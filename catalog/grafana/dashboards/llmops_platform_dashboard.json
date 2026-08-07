@@ -27,7 +27,7 @@
             "uid": "Prometheus"
           },
           "editorMode": "code",
-          "expr": "llmops_total_requests",
+          "expr": "sum(mcp_tool_calls_total)",
           "instant": true,
           "range": false,
           "refId": "A"
@@ -63,7 +63,7 @@
             "uid": "Prometheus"
           },
           "editorMode": "code",
-          "expr": "llmops_total_tokens",
+          "expr": "sum(llmops_tokens_total)",
           "instant": true,
           "range": false,
           "refId": "A"
@@ -99,7 +99,7 @@
             "uid": "Prometheus"
           },
           "editorMode": "code",
-          "expr": "llmops_total_cost_usd",
+          "expr": "sum(llmops_cost_usd_total)",
           "instant": true,
           "range": false,
           "refId": "A"
@@ -135,7 +135,7 @@
             "uid": "Prometheus"
           },
           "editorMode": "code",
-          "expr": "llmops_avg_latency_ms",
+          "expr": "sum(llmops_total_latency_ms_sum) / sum(llmops_total_latency_ms_count)",
           "instant": true,
           "range": false,
           "refId": "A"
@@ -173,7 +173,7 @@
             "uid": "Prometheus"
           },
           "editorMode": "code",
-          "expr": "llmops_tier_latency_ms{tier=\"vector_pgvector\"}",
+          "expr": "llmops_tier_latency_ms_sum{tier=\"Vector_Search_pgvector\"} / llmops_tier_latency_ms_count{tier=\"Vector_Search_pgvector\"}",
           "instant": true,
           "range": false,
           "refId": "A"
@@ -210,7 +210,7 @@
             "uid": "Prometheus"
           },
           "editorMode": "code",
-          "expr": "llmops_tier_latency_ms{tier=\"graph_neo4j\"}",
+          "expr": "llmops_tier_latency_ms_sum{tier=\"Graph_RAG_Neo4j\"} / llmops_tier_latency_ms_count{tier=\"Graph_RAG_Neo4j\"}",
           "instant": true,
           "range": false,
           "refId": "A"
@@ -247,7 +247,7 @@
             "uid": "Prometheus"
           },
           "editorMode": "code",
-          "expr": "llmops_tier_latency_ms{tier=\"semantic_cubejs\"}",
+          "expr": "llmops_tier_latency_ms_sum{tier=\"Semantic_Metrics_Cubejs\"} / llmops_tier_latency_ms_count{tier=\"Semantic_Metrics_Cubejs\"}",
           "instant": true,
           "range": false,
           "refId": "A"
@@ -284,7 +284,7 @@
             "uid": "Prometheus"
           },
           "editorMode": "code",
-          "expr": "llmops_tier_latency_ms{tier=\"relational_sql\"}",
+          "expr": "llmops_tier_latency_ms_sum{tier=\"Relational_SQL_PostgreSQL\"} / llmops_tier_latency_ms_count{tier=\"Relational_SQL_PostgreSQL\"}",
           "instant": true,
           "range": false,
           "refId": "A"
@@ -321,7 +321,7 @@
             "uid": "Prometheus"
           },
           "editorMode": "code",
-          "expr": "llmops_tier_latency_ms",
+          "expr": "sum by (tier) (llmops_tier_latency_ms_sum) / sum by (tier) (llmops_tier_latency_ms_count)",
           "instant": true,
           "range": false,
           "refId": "A"

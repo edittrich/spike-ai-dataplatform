@@ -82,9 +82,9 @@ implemented (CDC ingestion, a lakehouse/warehouse tier, hybrid lexical+vector se
 - **RAG Triad Smoke-Test Suite**: Heuristic (token-overlap) evaluator in [scripts/rag_triad_evaluator.py](scripts/rag_triad_evaluator.py) scoring Context Relevance, Faithfulness, and Answer Relevance as a fast sanity check — no model is in the loop, so treat scores as pass/fail smoke tests rather than accuracy or hallucination measurements.
 
 ### Cluster 3: Master Orchestration & Observability Suite
-- **Master Docker Compose Orchestrator**: Unified orchestration in [docker-compose.yml](docker-compose.yml) linking OpenMetadata, Neo4j, Cube.js, Prometheus, Grafana, Telemetry Exporter, and FastMCP Sidecar.
+- **Master Docker Compose Orchestrator**: Unified orchestration in [docker-compose.yml](docker-compose.yml) linking OpenMetadata, Neo4j, Cube.js, Prometheus, Grafana, and the FastMCP Sidecar.
 - **Prometheus Metrics Engine (`:9090`)**: Real-time operational metrics scraping engine configured in [catalog/prometheus.yml](catalog/prometheus.yml).
-- **LLMOps Telemetry Exporter Container (`:8000`)**: Persistent container daemon serving OpenMetrics data on port 8000. Currently generates simulated traffic for dashboard demonstration rather than measurements from real pipeline runs — see the runbook's [Known Issues](docs/APPLICATION_RUNBOOK.md#5-known-issues).
+- **Real LLMOps Metrics (`mcp_sidecar:8000/metrics`)**: The MCP sidecar serves genuine `prometheus_client` metrics (tool call counts/outcomes/latency, per-tier retrieval latency, token/cost accounting) directly from the process that executes tool calls — see [scripts/llmops_telemetry.py](scripts/llmops_telemetry.py) and `main()` in [mcp_server/financial_data_mcp_server.py](mcp_server/financial_data_mcp_server.py). There is no separate simulator process.
 - **Automated Grafana Dashboard & Datasource Provisioning (`:3000`)**: Zero-touch pre-configured visual dashboard (`http://localhost:3000`, credentials configured via `.env`) provisioned via [catalog/grafana/provisioning](catalog/grafana/provisioning) and [catalog/grafana/dashboards](catalog/grafana/dashboards).
 - **Automated GitHub Actions CI/CD**: Workflow in [.github/workflows/ci.yml](.github/workflows/ci.yml) validating syntax, guardrails, telemetry, and MCP tool handlers on `push`/`pull_request` to `main`.
 

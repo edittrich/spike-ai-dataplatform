@@ -38,10 +38,14 @@ against a refused connection until it's up.
 | `cube_semantic_layer` | `cubejs/cube:v0.35` | `4000` | `CUBEJS_DB_TYPE=postgres`, `CUBEJS_API_SECRET` — **enforced**: [`cube/cube.js`](../cube/cube.js)'s `checkAuth` rejects any request whose `Authorization: Bearer` token doesn't match this secret, in both dev and production mode. No `CUBEJS_SQL_PORT` — the Postgres-wire SQL API it would open has no equivalent auth check and nothing uses it. | Open-Source Semantic Layer (REST API) |
 | `prometheus_metrics` | `prom/prometheus:v2.51.0` | `9090` | [catalog/prometheus.yml](../catalog/prometheus.yml) | Operational time-series metrics engine |
 | `grafana_observability_dashboard` | `grafana/grafana:10.4.0` | `3000` | `GF_SECURITY_ADMIN_PASSWORD` | Visual monitoring dashboard portal |
-| `llmops_telemetry_exporter` | [`catalog/Dockerfile.exporter`](../catalog/Dockerfile.exporter) | `8000` | Custom Python 3.11 image, runs as non-root `appuser` | OpenMetrics exporter & traffic simulator |
-| `mcp_agentic_sidecar` | [`mcp_server/Dockerfile.mcp`](../mcp_server/Dockerfile.mcp) | `8001` (bound to `127.0.0.1` unless `MCP_HOST` overrides it) | `MCP_TRANSPORT=sse`, `MCP_PORT=8001`, `MCP_HOST`, `MCP_API_KEY` — required; the SSE endpoint now **refuses to start** without it, rather than falling back to unauthenticated. Connects to Postgres as `MCP_PG_READONLY_USER`/`MCP_PG_READONLY_PASSWORD` (the `mcp_readonly` role), not the superuser. | FastMCP Server SSE HTTP agent daemon, runs as non-root `appuser` |
+| `mcp_agentic_sidecar` | [`mcp_server/Dockerfile.mcp`](../mcp_server/Dockerfile.mcp) | `8001` (SSE, bound to `127.0.0.1` unless `MCP_HOST` overrides it) and `8000` (`/metrics`) | `MCP_TRANSPORT=sse`, `MCP_PORT=8001`, `MCP_METRICS_PORT=8000`, `MCP_HOST`, `MCP_API_KEY` — required; the SSE endpoint now **refuses to start** without it, rather than falling back to unauthenticated. Connects to Postgres as `MCP_PG_READONLY_USER`/`MCP_PG_READONLY_PASSWORD` (the `mcp_readonly` role), not the superuser. | FastMCP Server SSE HTTP agent daemon **and** the platform's real Prometheus metrics source (`prometheus_client.start_http_server()`); runs as non-root `appuser` |
 
-All 9 services declare a `healthcheck:` in `docker-compose.yml`; `openmetadata_server`'s `depends_on` gates on `openmetadata_db`/`openmetadata_search` reaching `condition: service_healthy` before it starts (fixes a real startup race — see Troubleshooting).
+There is no separate telemetry-exporter service — `mcp_sidecar` serves real per-call metrics itself
+(the process that actually executes tool calls is the only one that can; Prometheus client objects
+don't share state across processes, which is exactly why the previous separate exporter container had
+to fabricate its data — see [Known Issues](#5-known-issues)).
+
+All services declare a `healthcheck:` in `docker-compose.yml`; `openmetadata_server`'s `depends_on` gates on `openmetadata_db`/`openmetadata_search` reaching `condition: service_healthy` before it starts (fixes a real startup race — see Troubleshooting).
 
 ---
 
@@ -89,7 +93,7 @@ or on step 3 — and can run in any order or in parallel.
 12. **[`scripts/hybrid_rag_retriever.py`](../scripts/hybrid_rag_retriever.py):** 4-tier Hybrid RAG orchestrator combining Vector Search + Cypher + Cube.js Metrics + PostgreSQL SQL.
 
 ### D. Guardrails, Telemetry & Agentic Execution
-13. **[`scripts/ai_safety_guardrails.py`](../scripts/ai_safety_guardrails.py):** Implements PII redaction, prompt injection defense, and read-only query enforcement (regex/keyword-based, with separate SQL and Cypher keyword lists and string-literal-aware tokenization — see [Known Issues](#5-known-issues) for what it still doesn't catch). This is the first of two enforcement layers, not the only one: the MCP server's database connections carry their own privilege- and access-mode-level restrictions regardless of what this scan misses — see `mcp_readonly` in [`mcp_server/financial_data_mcp_server.py`](../mcp_server/financial_data_mcp_server.py) and `docs/ARCHITECTURE.md`'s Security Model.
+13. **[`scripts/ai_safety_guardrails.py`](../scripts/ai_safety_guardrails.py):** Implements PII redaction, prompt injection defense, and read-only query enforcement (regex/keyword-based, with separate SQL and Cypher keyword lists and string-literal-aware tokenization). This is the first of two enforcement layers, not the only one: the MCP server's database connections carry their own privilege- and access-mode-level restrictions regardless of what this scan misses — see `mcp_readonly` in [`mcp_server/financial_data_mcp_server.py`](../mcp_server/financial_data_mcp_server.py) and `docs/ARCHITECTURE.md`'s Security Model. The prompt-injection check is still a fixed regex list (paraphrase, other languages, or encoding easily evade it) and only warns rather than blocking on a match found in *retrieved* content — treat it as a coarse filter, not a guarantee.
 14. **[`scripts/llmops_telemetry.py`](../scripts/llmops_telemetry.py):** Tracks per-call latencies, token accounting, and model cost estimates as structured JSON trace spans (in-process only; not currently wired to an OpenTelemetry exporter).
 15. **[`scripts/telemetry_metrics_exporter_server.py`](../scripts/telemetry_metrics_exporter_server.py):** Serves an OpenMetrics payload on port 8000. **Currently a traffic simulator, not a real collector** — see [Known Issues](#5-known-issues).
 16. **[`scripts/ollama_agentic_tool_runner.py`](../scripts/ollama_agentic_tool_runner.py):** Native tool-calling runner allowing a local Ollama model (default `gemma4:latest`) to execute FastMCP tools autonomously.
@@ -157,11 +161,12 @@ or on step 3 — and can run in any order or in parallel.
 ### Troubleshooting Guide
 
 - **Problem:** `connection refused` on port 8000 or 8001.
-  - **Solution:** Restart container via `docker compose restart telemetry_exporter mcp_sidecar`.
+  - **Solution:** Both ports are served by the same container — restart via `docker compose restart mcp_sidecar`.
 - **Problem:** Neo4j Cypher query error.
   - **Solution:** Ensure `NEO4J_PASSWORD` is configured in `.env` or check container state with `docker ps --filter "name=neo4j"`.
 - **Problem:** Grafana dashboard panels show "No Data".
-  - **Solution:** Ensure `llmops_telemetry_exporter` container is running and set Grafana time range to "Last 5 minutes" with 5s auto-refresh.
+  - **Cause:** Since metrics now come from real MCP tool calls (not a simulator), "No Data" can mean exactly what it says — nothing has called the platform yet.
+  - **Solution:** Confirm `mcp_agentic_sidecar` is running and Prometheus's target is up (`curl http://127.0.0.1:9090/api/v1/targets`), then make a real tool call (e.g. `python3 -m mcp_server.test_mcp_server`, or any query through an MCP client) and set Grafana's time range to "Last 5 minutes" with 5s auto-refresh.
 - **Problem:** `openmetadata_server` crash-loops with `java.sql.SQLException: Access denied for user 'openmetadata_user'` even though the password in `.env` is correct and verified working against MySQL directly (`docker exec openmetadata_mysql mysql -u openmetadata_user -p...`).
   - **Cause:** `openmetadata_server`'s own config template ([`/opt/openmetadata/conf/openmetadata.yaml`](https://github.com/open-metadata/OpenMetadata) inside the image) reads the env var `DB_USER_PASSWORD`, not `DB_PASSWORD`. If only `DB_PASSWORD` is set, it silently falls back to the image's own hardcoded default (`openmetadata_password`) regardless of what's actually in MySQL. `docker-compose.yml` sets `DB_USER_PASSWORD` correctly as of this fix — if you see this error again, check that env var name first before assuming the credential itself is wrong.
   - **Solution:** Confirm `docker-compose.yml`'s `openmetadata_server` service sets `DB_USER_PASSWORD=${OPENMETADATA_MYSQL_PASSWORD}`.
@@ -185,10 +190,6 @@ or on step 3 — and can run in any order or in parallel.
   - **Cause:** These connect as the `mcp_readonly` role, configured via a separate pair of variables —
   see step 0 in [section 2](#2-script-by-script-codebase-deep-dive).
   - **Solution:** Set `MCP_PG_READONLY_PASSWORD` in `.env` and run `python3 scripts/configure_readonly_role.py`.
-- **Problem:** `scripts/hybrid_rag_retriever.py`'s Tier 3 (Cube.js metrics) always returns
-  `{"error": ...}` even with `CUBEJS_API_SECRET` set correctly, while `query_semantic_metrics` (the
-  MCP tool, previous entry) works fine with the same secret.
-  - **Cause:** Known bug, not a config problem — see [Known Issues](#5-known-issues) below.
 
 ---
 
@@ -196,19 +197,14 @@ or on step 3 — and can run in any order or in parallel.
 
 Operational quirks worth knowing before you conclude something in your own setup is broken:
 
-- **`hybrid_rag_retriever.py`'s Cube.js call sends no `Authorization` header** (unlike the MCP
-  server's `query_semantic_metrics`, which does), so Tier 3 of every `hybrid_rag_search` /
-  `hybrid_retrieve` call fails against a `checkAuth`-enforcing Cube.js and silently returns an error
-  object as if it were a metrics result.
-- **The telemetry exporter (`scripts/telemetry_metrics_exporter_server.py`) generates synthetic
-  traffic**, not measurements from real pipeline runs — its `background_traffic_generator` emits
-  `random.uniform()` latencies on a timer. Every panel on the Grafana dashboard reflects this
-  simulated traffic, not actual `hybrid_rag_retriever` calls, until it is wired to real
-  `LLMOpsTelemetry` traces from a running process.
-- **The embedding and re-ranking models silently degrade** to non-semantic fallbacks
-  (`sentence_transformers` unavailable, e.g. inside `mcp_sidecar`, which does not install it) —
-  `hybrid_rag_search` will still return plausible-looking scores in that mode. There is currently no
-  field in the response indicating degraded mode.
+- **`hybrid_rag_search` fails closed by default in `mcp_sidecar`.** The image doesn't install
+  `sentence-transformers`/`torch` (a multi-GB build-time/size cost not taken on by default), and the
+  vector/re-ranking tiers now refuse to run rather than silently substitute a non-semantic
+  approximation. If you need this tool working inside the container, either install those packages in
+  `mcp_server/Dockerfile.mcp`, or set `ALLOW_DEGRADED_EMBEDDINGS=1` in `.env` to explicitly accept
+  degraded (clearly-tagged) retrieval instead. Running `scripts/hybrid_rag_retriever.py` directly on
+  the host works normally if `sentence-transformers`/`torch` are installed there (`pip install -r
+  requirements.txt`). See `scripts/_embedding_backend.py`.
 - **`CUBEJS_DEV_MODE` is still `true`.** Disabling it is the right long-term move (dev mode serves the
   Developer Playground and loosens some defaults on a `network_mode: host` port), but production mode
   requires a Cube Store service for its cache/queue driver that isn't deployed in this compose file —

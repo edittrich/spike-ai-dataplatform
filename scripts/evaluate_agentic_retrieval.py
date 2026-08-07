@@ -17,8 +17,8 @@ import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import json
+import re
 import time
-import subprocess
 import asyncio
 from mcp_server.financial_data_mcp_server import mcp
 from scripts.hybrid_rag_retriever import HybridRAGRetriever
@@ -84,14 +84,24 @@ class AgenticEvaluator:
         elapsed_ms = round((time.time() - start_time) * 1000, 2)
 
         res_str = str(res_metrics)
-        metric_val_present = "63542607.6400" in res_str
+        # Extract the actual returned value rather than asserting equality
+        # against one golden run's exact figure (previously a hardcoded
+        # "63542607.6400" in res_str check) -- that passed only because
+        # generate_synthetic_data.py seeds with a fixed random.seed(42); any
+        # change to the seed data made this "benchmark" fail with no
+        # diagnostic. A real positive number is what the assertion cares about.
+        match = re.search(r'"deposit_balance\.total_available_balance"\s*:\s*"?(-?\d+(?:\.\d+)?)', res_str)
+        metric_value = float(match.group(1)) if match else None
+        metric_val_present = metric_value is not None and metric_value > 0
         score = 100 if metric_val_present else 0
 
-        # RAG Triad Evaluation
-        triad_metrics = self.triad_evaluator.evaluate_triad(prompt, "cube deposit_balance measure total_available_balance 63542607.6400", res_str)
+        # RAG Triad Evaluation, against the value actually returned -- not a
+        # hardcoded figure repeated into the "context" to guarantee a match.
+        context_str = f"cube deposit_balance measure total_available_balance {metric_value if metric_value is not None else 'N/A'}"
+        triad_metrics = self.triad_evaluator.evaluate_triad(prompt, context_str, res_str)
 
         self.record_result("Cube.js Semantic Metric (total_available_balance)", score, elapsed_ms, triad_metrics, {
-            "Total Available Balance ($63.5M) Verified": metric_val_present
+            "Total Available Balance Returned": f"${metric_value:,.2f}" if metric_value is not None else "N/A"
         })
 
     async def evaluate_scenario_3(self):
@@ -110,10 +120,12 @@ class AgenticEvaluator:
         graph_matched = len(res_str) > 0 and "Cypher Execution Error" not in res_str
         score = 100 if graph_matched else 0
 
-        # RAG Triad Evaluation
-        triad_metrics = self.triad_evaluator.evaluate_triad(prompt, cypher + " " + res_str, res_str)
-
-        self.record_result("Neo4j Knowledge Graph Multi-Hop Traversal", score, elapsed_ms, triad_metrics, {
+        # No RAG Triad metrics: this checks that the tool executed and
+        # returned data, not a generated answer's faithfulness to retrieved
+        # context. Passing the same string as both context and response (the
+        # previous code) makes faithfulness 1.0 by construction -- there's no
+        # separately-generated answer here to actually evaluate.
+        self.record_result("Neo4j Knowledge Graph Multi-Hop Traversal", score, elapsed_ms, None, {
             "Loan Collateral Graph Path Traversed": graph_matched
         })
 
@@ -128,10 +140,8 @@ class AgenticEvaluator:
         dq_matched = "Not Null Assertion" in res_str or "Success" in res_str
         score = 100 if dq_matched else 0
 
-        # RAG Triad Evaluation
-        triad_metrics = self.triad_evaluator.evaluate_triad(prompt, res_str, res_str)
-
-        self.record_result("Data Quality & Governance SLA Scorecard", score, elapsed_ms, triad_metrics, {
+        # No RAG Triad metrics -- see the note in evaluate_scenario_3.
+        self.record_result("Data Quality & Governance SLA Scorecard", score, elapsed_ms, None, {
             "OpenMetadata 59 Assertion Suite Checked": dq_matched
         })
 
@@ -146,10 +156,8 @@ class AgenticEvaluator:
         catalog_matched = "party_individual" in res_str
         score = 100 if catalog_matched else 0
 
-        # RAG Triad Evaluation
-        triad_metrics = self.triad_evaluator.evaluate_triad(prompt, res_str, res_str)
-
-        self.record_result("FastMCP Data Catalog Tool Call (`search_data_catalog`)", score, elapsed_ms, triad_metrics, {
+        # No RAG Triad metrics -- see the note in evaluate_scenario_3.
+        self.record_result("FastMCP Data Catalog Tool Call (`search_data_catalog`)", score, elapsed_ms, None, {
             "OpenMetadata Search Index Queried": catalog_matched
         })
 
@@ -163,7 +171,8 @@ class AgenticEvaluator:
             "triad_metrics": triad_metrics,
             "details": details
         })
-        print(f"  Result: [{status}] Score: {score}% — Latency: {latency_ms}ms — Triad Score: {triad_metrics['triad_score_percent']}")
+        triad_note = f" — Triad Score: {triad_metrics['triad_score_percent']}" if triad_metrics else " — Triad: N/A (execution check only, no generated response to evaluate)"
+        print(f"  Result: [{status}] Score: {score}% — Latency: {latency_ms}ms{triad_note}")
 
     def print_summary_report(self):
         print("\n=======================================================")
@@ -171,16 +180,30 @@ class AgenticEvaluator:
         print("=======================================================")
 
         total_tests = len(self.benchmark_results)
+        if total_tests == 0:
+            print("No benchmark results recorded.")
+            return
+
         passed_tests = sum(1 for r in self.benchmark_results if r["status"] == "PASSED")
         avg_score = round(sum(r["score"] for r in self.benchmark_results) / total_tests, 2)
         avg_latency = round(sum(r["latency_ms"] for r in self.benchmark_results) / total_tests, 2)
-        avg_triad = round(sum(r["triad_metrics"]["triad_composite_score"] for r in self.benchmark_results) / total_tests, 4)
+
+        # Only scenarios with a genuinely separate generated response get a
+        # RAG Triad score (see the per-scenario notes above) -- averaging in
+        # execution-only checks (triad_metrics=None) would silently pad the
+        # average with meaningless perfect scores.
+        triad_results = [r for r in self.benchmark_results if r["triad_metrics"]]
+        avg_triad = (
+            round(sum(r["triad_metrics"]["triad_composite_score"] for r in triad_results) / len(triad_results), 4)
+            if triad_results else None
+        )
 
         print(f"Total Test Scenarios:     {total_tests}")
         print(f"Passed Scenarios:         {passed_tests} / {total_tests} ({round(passed_tests/total_tests*100, 1)}%)")
         print(f"Average Accuracy Score:   {avg_score}%")
         print(f"Average Latency:          {avg_latency}ms")
-        print(f"Average RAG Triad Score:  {round(avg_triad * 100, 1)}%")
+        if avg_triad is not None:
+            print(f"Average RAG Triad Score:  {round(avg_triad * 100, 1)}% (from {len(triad_results)}/{total_tests} scenarios with a real generated response -- see table below)")
         print("-------------------------------------------------------")
 
         print("\n🎯 Scenario Quality Breakdown & RAG Triad Scorecard Table:")
@@ -189,10 +212,12 @@ class AgenticEvaluator:
         for r in self.benchmark_results:
             tm = r["triad_metrics"]
             scen = r['scenario'][:40]
-            print(f"{scen:<42} | {r['status']:<6} | {r['score']}%     | {tm['context_relevance']*100:5.1f}%      | {tm['faithfulness']*100:5.1f}%   | {tm['answer_relevance']*100:5.1f}%   | {tm['triad_score_percent']:<6}")
+            if tm:
+                print(f"{scen:<42} | {r['status']:<6} | {r['score']}%     | {tm['context_relevance']*100:5.1f}%      | {tm['faithfulness']*100:5.1f}%   | {tm['answer_relevance']*100:5.1f}%   | {tm['triad_score_percent']:<6}")
+            else:
+                print(f"{scen:<42} | {r['status']:<6} | {r['score']}%     | {'N/A':<11}  | {'N/A':<8} | {'N/A':<8} | {'N/A':<6}")
 
-        if avg_score >= 95.0 and avg_triad >= 0.75:
-            print("\n✨ ALL CLUSTER 2 AGENTIC BENCHMARKS & RAG TRIAD EVALUATIONS PASSED WITH EXCELLENCE!")
+        print(f"\nBenchmark run complete: {passed_tests}/{total_tests} scenarios passed (score >= 80%).")
 
 if __name__ == "__main__":
     evaluator = AgenticEvaluator()

@@ -68,7 +68,7 @@ def call_ollama(prompt_text: str, context_payload: dict) -> dict:
         headers={"Content-Type": "application/json"}
     )
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             latency_ms = round((time.time() - t_start) * 1000, 2)
             return {
@@ -105,17 +105,54 @@ async def run_e2e_ollama_pipeline():
     retriever = HybridRAGRetriever()
     rag_payload = retriever.hybrid_retrieve(user_prompt)
 
-    print("  ✅ Tier 1 (pgvector HNSW): Matched entity schemas")
-    print("  ✅ Tier 2 (Neo4j Graph-RAG): Traversed 2-hop collateral loan paths")
-    print("  ✅ Tier 3 (Cube.js Metrics): Calculated total_available_balance ($63.5M)")
-    print("  ✅ Tier 4 (Supabase SQL): Fetched party demographic aggregates")
+    # Each tier's status line reflects what actually came back, rather than
+    # printing "✅ ... " unconditionally regardless of the payload's content
+    # (which previously included a hardcoded "$63.5M" for Tier 3 -- whatever
+    # the real value was).
+    step_failures = []
+
+    vector_ctx = rag_payload.get("vector_schema_context", [])
+    if vector_ctx:
+        embed_mode = rag_payload.get("_embedding_backend", {}).get("embedding_mode", "unknown")
+        print(f"  {'✅' if embed_mode == 'real' else '⚠️'} Tier 1 (pgvector HNSW): {len(vector_ctx)} entity match(es), embedding_mode={embed_mode}")
+    else:
+        step_failures.append("Tier 1 (pgvector)")
+        print("  ❌ Tier 1 (pgvector HNSW): no matches returned")
+
+    graph_ctx = rag_payload.get("knowledge_graph_context", [])
+    graph_str = " ".join(graph_ctx) if isinstance(graph_ctx, list) else str(graph_ctx)
+    if graph_ctx and "Exception" not in graph_str and "Error" not in graph_str:
+        print(f"  ✅ Tier 2 (Neo4j Graph-RAG): {len(graph_ctx)} row(s) returned")
+    else:
+        step_failures.append("Tier 2 (Neo4j)")
+        print(f"  ❌ Tier 2 (Neo4j Graph-RAG): {graph_str[:120] or 'no rows returned'}")
+
+    semantic_ctx = rag_payload.get("semantic_metrics_context", [])
+    if semantic_ctx and not (isinstance(semantic_ctx, list) and semantic_ctx and "error" in semantic_ctx[0]):
+        print(f"  ✅ Tier 3 (Cube.js Metrics): {semantic_ctx}")
+    else:
+        step_failures.append("Tier 3 (Cube.js)")
+        print(f"  ❌ Tier 3 (Cube.js Metrics): {semantic_ctx}")
+
+    sql_ctx = rag_payload.get("relational_sql_context", [])
+    sql_str = " ".join(sql_ctx) if isinstance(sql_ctx, list) else str(sql_ctx)
+    if sql_ctx and "Error" not in sql_str:
+        print(f"  ✅ Tier 4 (Supabase SQL): {len(sql_ctx)} row(s) fetched")
+    else:
+        step_failures.append("Tier 4 (Supabase SQL)")
+        print(f"  ❌ Tier 4 (Supabase SQL): {sql_str[:120] or 'no rows returned'}")
 
     # -------------------------------------------------------------------------
     # STEP 3: FastMCP Tool Verification
     # -------------------------------------------------------------------------
     print("\n🔌 Step 3: FastMCP Tool Dispatch & Context Formatting...")
     mcp_catalog_res = await mcp.call_tool("search_data_catalog", {"query": "deposit_account"})
-    print("  ✅ FastMCP `search_data_catalog` tool invoked successfully")
+    catalog_str = str(mcp_catalog_res)
+    if "Error" in catalog_str:
+        step_failures.append("FastMCP search_data_catalog")
+        print(f"  ❌ FastMCP `search_data_catalog` tool returned an error: {catalog_str[:150]}")
+    else:
+        print("  ✅ FastMCP `search_data_catalog` tool invoked successfully")
 
     # -------------------------------------------------------------------------
     # STEP 4: Local Ollama Gemma 4 LLM Inference
@@ -156,7 +193,10 @@ async def run_e2e_ollama_pipeline():
     print(f"  🎯 Cumulative Cost:  ${final_span['cost_usd']:.6f} USD (100% Free Local Execution)")
     print(f"  🎯 OpenTelemetry ID: {final_span['trace_id']}")
 
-    print("\n✨ E2E APPLICATION TEST AGAINST OLLAMA PASSED SUCCESSFULLY (100%)!")
+    if step_failures:
+        print(f"\n⚠️  E2E test completed with {len(step_failures)} tier(s)/tool(s) reporting errors: {', '.join(step_failures)}")
+        sys.exit(1)
+    print("\n✨ E2E application test against Ollama completed -- all tiers and tools returned data.")
 
 if __name__ == "__main__":
     asyncio.run(run_e2e_ollama_pipeline())

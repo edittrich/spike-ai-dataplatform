@@ -61,7 +61,7 @@ def execute_cypher_batch(statements):
         }
     )
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode('utf-8'))
             if data.get("errors"):
                 print(f"Cypher Error: {data['errors']}")
@@ -231,7 +231,7 @@ def main():
     ]
     payload = json.dumps({"statements": [{"statement": stmt} for stmt in summary_cypher]}).encode('utf-8')
     req = urllib.request.Request(NEO4J_URL, data=payload, headers={"Content-Type": "application/json", "Authorization": f"Basic {auth_header}"})
-    with urllib.request.urlopen(req) as resp:
+    with urllib.request.urlopen(req, timeout=10) as resp:
         res = json.loads(resp.read().decode('utf-8'))
         nodes = res['results'][0]['data']
         rels = res['results'][1]['data']

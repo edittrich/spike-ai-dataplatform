@@ -14,9 +14,7 @@ Populates `financial.entity_embeddings` table in PostgreSQL with HNSW index.
 """
 
 import json
-import math
 import os
-import re
 import subprocess
 import sys
 import urllib.error
@@ -39,43 +37,26 @@ headers = {
     "Authorization": f"Bearer {JWT_TOKEN}"
 }
 
-# Try importing sentence_transformers, fallback to deterministic 384-dim semantic vector encoder
-try:
-    from sentence_transformers import SentenceTransformer
-    MODEL = SentenceTransformer("all-MiniLM-L6-v2")
-    def compute_embedding(text):
-        vec = MODEL.encode(text).tolist()
-        return [round(x, 6) for x in vec]
-    print("🧠 Using PyTorch `sentence-transformers/all-MiniLM-L6-v2` dense embedding model (384 dims).")
-except Exception:
-    def compute_embedding(text):
-        """
-        Deterministic 384-dimensional dense semantic embedding generator
-        using character n-gram hashing and L2 normalization.
-        """
-        dim = 384
-        vec = [0.0] * dim
-        tokens = re.findall(r'\w+', text.lower())
-        for token in tokens:
-            # Hash unigrams and bigrams across 384 dimensions
-            for i in range(len(token)):
-                sub = token[i:i+3]
-                h = hash(sub) % dim
-                vec[h] += 1.0
-        # L2 Normalize vector
-        norm = math.sqrt(sum(x * x for x in vec))
-        if norm > 0:
-            vec = [round(x / norm, 6) for x in vec]
-        else:
-            vec = [0.0] * dim
-        return vec
-    print("⚡ Using fast 384-dimensional dense semantic feature vector encoder (L2 normalized).")
+# Fails closed by default (raises) if the real sentence-transformers model
+# can't load -- set ALLOW_DEGRADED_EMBEDDINGS=1 to accept a non-semantic
+# fallback instead. This matters more here than anywhere else that uses the
+# same fallback: this script *writes* the resulting vectors into
+# financial.entity_embeddings, so a silent degraded run doesn't just affect
+# one in-flight request, it persists mathematically meaningless vectors into
+# the database for every later query to read. See scripts/_embedding_backend.py.
+from scripts._embedding_backend import load_embedding_model
+compute_embedding, EMBEDDING_MODE = load_embedding_model()
+if EMBEDDING_MODE == "degraded":
+    print("⚠️  DEGRADED embedding mode (ALLOW_DEGRADED_EMBEDDINGS=1) -- vectors written this run "
+          "are a non-semantic lexical-hash approximation, not real embeddings.")
+else:
+    print(f"🧠 Using real embedding model '{os.getenv('EMBEDDING_MODEL_NAME', 'sentence-transformers/all-MiniLM-L6-v2')}' (384 dims).")
 
 def api_get(endpoint):
     url = f"{OPENMETADATA_URL}/{endpoint}"
     req = urllib.request.Request(url, headers=headers, method="GET")
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=10) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except Exception as e:
         return None

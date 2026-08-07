@@ -18,6 +18,7 @@ import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import json
+import logging
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -25,6 +26,9 @@ import time
 
 import psycopg2
 from neo4j import READ_ACCESS, GraphDatabase
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger("HybridRAGRetriever")
 
 from scripts._dotenv_boot import load_env
 from scripts.ai_safety_guardrails import AISafetyGuardrails
@@ -38,27 +42,17 @@ from scripts.llmops_telemetry import LLMOpsTelemetry
 from scripts.neural_reranker import NeuralReranker
 from scripts.text_to_cypher_builder import TextToCypherBuilder
 
-# Configure PyTorch sentence-transformers embedding model
-try:
-    from sentence_transformers import SentenceTransformer
-    EMBED_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
-    def get_embedding(text):
-        return [round(float(x), 6) for x in EMBED_MODEL.encode(text)]
-except Exception:
-    import math, re
-    def get_embedding(text):
-        dim = 384
-        vec = [0.0] * dim
-        tokens = re.findall(r'\w+', text.lower())
-        for token in tokens:
-            for i in range(len(token)):
-                h = hash(token[i:i+3]) % dim
-                vec[h] += 1.0
-        norm = math.sqrt(sum(x * x for x in vec))
-        return [round(x / norm, 6) if norm > 0 else 0.0 for x in vec]
+# Fails closed by default (raises) if the real sentence-transformers model
+# can't load -- set ALLOW_DEGRADED_EMBEDDINGS=1 to accept a non-semantic
+# fallback instead. See scripts/_embedding_backend.py for why this used to be
+# a silent per-file fallback and what was wrong with that. EMBEDDING_MODE is
+# threaded into hybrid_retrieve()'s response payload below so a degraded
+# result can never look identical to a real one.
+from scripts._embedding_backend import load_embedding_model
+get_embedding, EMBEDDING_MODE = load_embedding_model()
 
-OPENMETADATA_URL = "http://127.0.0.1:8585/api/v1"
-CUBEJS_URL = "http://127.0.0.1:4000/cubejs-api/v1/load"
+CUBEJS_URL = os.getenv("CUBEJS_URL", "http://127.0.0.1:4000/cubejs-api/v1/load")
+CUBEJS_API_SECRET = os.getenv("CUBEJS_API_SECRET", "")
 
 # Native driver connection settings, replacing `docker exec <container>
 # psql/cypher-shell`, which only works when this process has the `docker`
@@ -95,7 +89,7 @@ class HybridRAGRetriever:
             raise ValueError(reason)
         conn = psycopg2.connect(
             host=POSTGRES_HOST, port=POSTGRES_PORT, user=POSTGRES_USER,
-            password=POSTGRES_PASSWORD, dbname=POSTGRES_DB,
+            password=POSTGRES_PASSWORD, dbname=POSTGRES_DB, connect_timeout=10,
             options="-c statement_timeout=10000 -c idle_in_transaction_session_timeout=30000",
         )
         try:
@@ -121,7 +115,7 @@ class HybridRAGRetriever:
         safe, reason = self.guardrails.validate_read_only_query(cypher, "Cypher")
         if not safe:
             raise ValueError(reason)
-        driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
+        driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD), connection_timeout=10)
         try:
             # See the matching comment in mcp_server/financial_data_mcp_server.py's
             # query_neo4j: READ_ACCESS is the enforcement available on Neo4j
@@ -194,9 +188,15 @@ class HybridRAGRetriever:
 
         url_encoded_query = urllib.parse.quote(json.dumps(query_body))
         url = f"{CUBEJS_URL}?query={url_encoded_query}"
-        req = urllib.request.Request(url)
+        # Was missing this entirely -- cube/cube.js's checkAuth rejects any
+        # request with no/invalid Authorization header, so this call failed
+        # 100% of the time, and the swallowed exception below returned an
+        # error object that flowed into the LLM context as if it were a real
+        # metrics result. mcp_server/financial_data_mcp_server.py's
+        # query_semantic_metrics always sent this header; this tier had drifted.
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {CUBEJS_API_SECRET}"})
         try:
-            with urllib.request.urlopen(req) as resp:
+            with urllib.request.urlopen(req, timeout=10) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 return data.get("data", [])
         except Exception as e:
@@ -221,20 +221,23 @@ class HybridRAGRetriever:
         # 0. Check Prompt Injection Defense
         safe, reason = self.guardrails.check_prompt_injection(prompt)
         if not safe:
-            print(f"\n⚠️ {reason}")
+            logger.warning(reason)
             return {"error": reason, "security_status": "BLOCKED"}
 
-        print(f"\n=======================================================")
-        print(f"🔍 Multi-Modal Hybrid RAG Prompt: '{prompt}'")
-        print(f"=======================================================")
+        # Logger, not print(), throughout this method: when the MCP server
+        # runs over its default stdio transport, stdout *is* the JSON-RPC
+        # channel -- calling hybrid_rag_search (which invokes this method)
+        # previously wrote ~15 lines of non-protocol bytes into that framing
+        # and broke the session. logging's default handler writes to stderr.
+        logger.info(f"Multi-Modal Hybrid RAG Prompt: '{prompt}'")
 
         # 1. Vector Semantic Search
         t1_start = time.time()
         vector_results = self.vector_semantic_search(prompt, top_k=3)
         self.telemetry.record_tier_latency(trace, "Vector_Search_pgvector", (time.time() - t1_start) * 1000)
-        print(f"\n🧠 Tier 1: 2-Stage Vector & Cross-Encoder Neural Re-Ranking Matches:")
+        logger.info("Tier 1: 2-Stage Vector & Cross-Encoder Neural Re-Ranking Matches:")
         for v in vector_results:
-            print(f"  🎯 [{v['entity_type']}] {v['display_name']} — Cross-Encoder Score: {v.get('cross_encoder_score', 'N/A')} (Bi-Encoder Sim: {v.get('similarity')})")
+            logger.info(f"  [{v['entity_type']}] {v['display_name']} — Cross-Encoder Score: {v.get('cross_encoder_score', 'N/A')} (Bi-Encoder Sim: {v.get('similarity')})")
 
         # 2. Graph-RAG Dynamic Text-to-Cypher Execution
         t2_start = time.time()
@@ -246,26 +249,26 @@ class HybridRAGRetriever:
 
         graph_results = self.graph_rag_search(cypher)
         self.telemetry.record_tier_latency(trace, "Graph_RAG_Neo4j", (time.time() - t2_start) * 1000)
-        print(f"\n🕸️ Tier 2: Knowledge Graph Traversal (Dynamic Text-to-Cypher: {intent}):")
+        logger.info(f"Tier 2: Knowledge Graph Traversal (Dynamic Text-to-Cypher: {intent}):")
         for g in graph_results:
-            print(f"  🕸️ {g}")
+            logger.info(f"  {g}")
 
         # 3. Semantic Metric Layer Calculation
         t3_start = time.time()
         semantic_results = self.semantic_metric_search("deposit_balance", ["total_available_balance"])
         self.telemetry.record_tier_latency(trace, "Semantic_Metrics_Cubejs", (time.time() - t3_start) * 1000)
-        print(f"\n📊 Tier 3: Semantic Layer Aggregation (Cube.js Metrics):")
+        logger.info("Tier 3: Semantic Layer Aggregation (Cube.js Metrics):")
         for s in semantic_results:
-            print(f"  📈 {s}")
+            logger.info(f"  {s}")
 
         # 4. Relational SQL Execution
         t4_start = time.time()
         sql = sql_override or "SELECT party_type, count(*) FROM financial.party GROUP BY party_type;"
         sql_results = self.relational_sql_search(sql)
         self.telemetry.record_tier_latency(trace, "Relational_SQL_PostgreSQL", (time.time() - t4_start) * 1000)
-        print(f"\n🗄️ Tier 4: Relational Database Execution (PostgreSQL SQL):")
+        logger.info("Tier 4: Relational Database Execution (PostgreSQL SQL):")
         for s in sql_results:
-            print(f"  🗄️ {s}")
+            logger.info(f"  {s}")
 
         # Construct Combined RAG Context Payload
         raw_payload = {
@@ -287,6 +290,16 @@ class HybridRAGRetriever:
             "latency_ms": final_trace["total_latency_ms"],
             "total_tokens": final_trace["total_tokens"],
             "cost_usd": final_trace["cost_usd"]
+        }
+
+        # Surfaces whether Tier 1 (vector search) and its re-ranking stage used
+        # the real sentence-transformers models or the non-semantic
+        # ALLOW_DEGRADED_EMBEDDINGS=1 fallback -- see scripts/_embedding_backend.py.
+        # A caller (agent or human) must be able to tell a degraded result from
+        # a real one; before this, both looked identical.
+        sanitized_payload["_embedding_backend"] = {
+            "embedding_mode": EMBEDDING_MODE,
+            "reranker_mode": self.reranker.mode,
         }
 
         return sanitized_payload

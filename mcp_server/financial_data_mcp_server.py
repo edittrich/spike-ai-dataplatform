@@ -16,11 +16,13 @@ Exposed MCP Tools:
 ===============================================================================
 """
 
+import functools
 import hmac
 import json
 import logging
 import os
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -29,6 +31,7 @@ from typing import Dict, List, Optional
 import psycopg2
 import uvicorn
 from neo4j import READ_ACCESS, GraphDatabase
+from prometheus_client import Counter, Histogram, start_http_server
 from starlette.responses import JSONResponse
 
 try:
@@ -56,6 +59,44 @@ logger = logging.getLogger("FinancialDataMCPServer")
 # Initialize FastMCP Server
 mcp = FastMCP("Enterprise-Financial-Data-Platform")
 guardrails = AISafetyGuardrails()
+
+# Per-tool call counters/duration, scraped over the real, always-on Prometheus
+# endpoint this process serves via start_http_server() in main() (see below).
+# This replaces scripts/telemetry_metrics_exporter_server.py, which ran as a
+# *separate* container process that could never see traces from this one --
+# it was seeded with random.uniform() fake data because there was no way to
+# feed it anything real. These metrics are, by construction, only ever
+# updated by an actual tool invocation.
+TOOL_CALLS_TOTAL = Counter(
+    "mcp_tool_calls_total", "Total MCP tool invocations.", ["tool", "outcome"]
+)
+TOOL_DURATION_MS = Histogram(
+    "mcp_tool_duration_ms",
+    "MCP tool execution duration, in milliseconds.",
+    ["tool"],
+    buckets=(5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000),
+)
+
+
+def track_tool_call(func):
+    """Records a Prometheus call count (by outcome) and duration for a tool function.
+
+    Applied as the innermost decorator (below @mcp.tool()) so FastMCP still
+    introspects the original function's signature for its JSON schema --
+    functools.wraps preserves __wrapped__, which inspect.signature() follows.
+    """
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        start = time.perf_counter()
+        outcome = "error"
+        try:
+            result = func(*args, **kwargs)
+            outcome = "success"
+            return result
+        finally:
+            TOOL_CALLS_TOTAL.labels(tool=func.__name__, outcome=outcome).inc()
+            TOOL_DURATION_MS.labels(tool=func.__name__).observe((time.perf_counter() - start) * 1000)
+    return wrapper
 
 # Environment Configuration
 OPENMETADATA_URL = os.getenv("OPENMETADATA_URL", "http://127.0.0.1:8585/api/v1")
@@ -134,7 +175,7 @@ def query_pg(sql: str) -> str:
     """
     conn = psycopg2.connect(
         host=POSTGRES_HOST, port=POSTGRES_PORT, user=POSTGRES_USER,
-        password=POSTGRES_PASSWORD, dbname=POSTGRES_DB,
+        password=POSTGRES_PASSWORD, dbname=POSTGRES_DB, connect_timeout=10,
         # Defense in depth independent of the mcp_readonly role's own
         # session-level defaults (set by the role-creation migration) -- these
         # apply even against a deployment that hasn't run that migration yet.
@@ -165,7 +206,7 @@ def query_neo4j(cypher: str) -> str:
     column names, followed by one comma-joined line per record) for
     compatibility with existing callers.
     """
-    driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
+    driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD), connection_timeout=10)
     try:
         # Neo4j Community Edition (this platform's neo4j:5.18.0-community image)
         # has no custom-role RBAC to restrict this connection to read-only the
@@ -225,6 +266,7 @@ class BearerAuthMiddleware:
 # -----------------------------------------------------------------------------
 
 @mcp.tool()
+@track_tool_call
 def search_data_catalog(query: str) -> str:
     """
     Search OpenMetadata Enterprise Catalog for tables, column metadata,
@@ -234,7 +276,7 @@ def search_data_catalog(query: str) -> str:
     url = f"{OPENMETADATA_URL}/search/query?q={urllib.parse.quote(query)}&index=table_search_index&size=5"
     req = urllib.request.Request(url, headers=HEADERS)
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             hits = data.get("hits", {}).get("hits", [])
             results = []
@@ -255,6 +297,7 @@ def search_data_catalog(query: str) -> str:
         return f"Catalog Search Error: {e}"
 
 @mcp.tool()
+@track_tool_call
 def query_semantic_metrics(cube_name: str, measures: List[str]) -> str:
     """
     Query Cube.js open-source semantic layer for standardized metrics and KPIs
@@ -266,7 +309,7 @@ def query_semantic_metrics(cube_name: str, measures: List[str]) -> str:
     url = f"{CUBEJS_URL}?query={url_encoded}"
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {CUBEJS_API_SECRET}"})
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             return json.dumps(data.get("data", []), indent=2)
     except Exception as e:
@@ -274,6 +317,7 @@ def query_semantic_metrics(cube_name: str, measures: List[str]) -> str:
         return f"Error querying semantic layer: {e}"
 
 @mcp.tool()
+@track_tool_call
 def query_knowledge_graph(cypher_query: str) -> str:
     """
     Execute multi-hop Cypher queries on Neo4j Knowledge Graph database
@@ -293,6 +337,7 @@ def query_knowledge_graph(cypher_query: str) -> str:
         return f"Cypher Execution Error: {e}"
 
 @mcp.tool()
+@track_tool_call
 def query_financial_database(sql_query: str) -> str:
     """
     Execute read-only SQL queries on Supabase PostgreSQL database schemas (`ref` and `financial`).
@@ -310,6 +355,7 @@ def query_financial_database(sql_query: str) -> str:
         return f"SQL Query Error: {e}"
 
 @mcp.tool()
+@track_tool_call
 def check_data_quality(table_name: str) -> str:
     """
     Fetch real-time OpenMetadata Data Quality test suite assertions, scorecards, and SLAs.
@@ -318,7 +364,7 @@ def check_data_quality(table_name: str) -> str:
     url = f"{OPENMETADATA_URL}/dataQuality/testCases?limit=20&fields=testCaseResult"
     req = urllib.request.Request(url, headers=HEADERS)
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             test_cases = data.get("data", [])
             matched = [tc for tc in test_cases if table_name.lower() in tc.get("entityFQN", "").lower()]
@@ -338,16 +384,25 @@ def check_data_quality(table_name: str) -> str:
         return f"Data Quality Check Error: {e}"
 
 @mcp.tool()
+@track_tool_call
 def hybrid_rag_search(prompt: str) -> str:
     """
     Execute full 4-tier Hybrid RAG context search (Vector Search + Cypher + Cube.js Metrics + SQL)
     for complex natural language questions.
     """
     logger.info(f"Executing hybrid_rag_search tool for prompt: '{prompt}'")
-    from scripts.hybrid_rag_retriever import HybridRAGRetriever
-    retriever = HybridRAGRetriever()
-    payload = retriever.hybrid_retrieve(prompt)
-    return json.dumps(payload, indent=2)
+    try:
+        from scripts.hybrid_rag_retriever import HybridRAGRetriever
+        retriever = HybridRAGRetriever()
+        payload = retriever.hybrid_retrieve(prompt)
+        return json.dumps(payload, indent=2)
+    except RuntimeError as e:
+        # Raised by scripts._embedding_backend when the real embedding/
+        # cross-encoder model can't load and ALLOW_DEGRADED_EMBEDDINGS isn't
+        # set -- surface this as a clear tool error rather than an unhandled
+        # 500, matching every other tool's error-handling convention here.
+        logger.error(f"Hybrid RAG search error: {e}")
+        return f"Hybrid RAG Search Error: {e}"
 
 # -----------------------------------------------------------------------------
 # MCP RESOURCES
@@ -401,7 +456,18 @@ def main():
             )
             sys.exit(1)
         app = BearerAuthMiddleware(mcp.sse_app(), MCP_API_KEY)
-        print(f"🚀 Launching Enterprise FastMCP Server (SSE HTTP Transport on http://{host}:{port})...")
+
+        # Real Prometheus metrics, served from this process (the one actually
+        # executing tool calls) rather than a separate simulator container --
+        # see the TOOL_CALLS_TOTAL/TOOL_DURATION_MS comment above and
+        # scripts/llmops_telemetry.py's module-level metrics. Unauthenticated,
+        # matching Prometheus's own default scrape convention and this
+        # endpoint's loopback-by-default binding.
+        metrics_port = int(os.getenv("MCP_METRICS_PORT", "8000"))
+        start_http_server(metrics_port, addr=host)
+        logger.info(f"📊 Prometheus metrics available at http://{host}:{metrics_port}/metrics")
+
+        logger.info(f"🚀 Launching Enterprise FastMCP Server (SSE HTTP Transport on http://{host}:{port})...")
         uvicorn.run(app, host=host, port=port, log_level="info")
     else:
         mcp.run()

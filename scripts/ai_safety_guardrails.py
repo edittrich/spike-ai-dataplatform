@@ -23,7 +23,16 @@ class AISafetyGuardrails:
     def __init__(self):
         # PII Patterns
         self.email_pattern = re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b')
-        self.phone_pattern = re.compile(r'\b(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b')
+        # No `.` in the separator class (unlike the other patterns below) --
+        # a plain `.` there let this match the integer/fractional halves of
+        # an ordinary decimal number (e.g. a monetary value like
+        # "63542607.6400" from Cube.js's total_available_balance measure was
+        # matched whole and silently mangled into "[REDACTED_PHONE_1]" before
+        # this fix, discovered once scripts/hybrid_rag_retriever.py's Tier 3
+        # was fixed to actually return real numbers -- see H9 in the
+        # hardening plan). Real phone numbers separated by dots (rare) are
+        # the accepted tradeoff against silently corrupting financial figures.
+        self.phone_pattern = re.compile(r'\b(?:\+?\d{1,3}[-\s]?)?\(?\d{3}\)?[-\s]?\d{3}[-\s]?\d{4}\b')
         self.ssn_pattern = re.compile(r'\b\d{3}-\d{2}-\d{4}\b')
         self.credit_card_pattern = re.compile(r'\b(?:\d{4}[-\s]?){3}\d{4}\b')
         self.iban_pattern = re.compile(r'\b[A-Z]{2}\d{2}[A-Z0-9]{12,30}\b')

@@ -24,7 +24,7 @@ models:
         type: UUID
         primary_key: true
         nullable: false
-      agreement_reference:
+      agreement_number:
         type: VARCHAR
         nullable: false
       principal_amount:
@@ -36,7 +36,7 @@ models:
       agreement_status:
         type: VARCHAR
         nullable: false
-        allowed_values: ["ACTIVE", "DEFAULT", "CLOSED", "RESTRUCTURED"]
+        allowed_values: ["ACTIVE", "DEFAULTED", "PAID_OFF"]
 
   financial.loan_collateral:
     description: Pledged Collateral Asset & Valuation
@@ -49,7 +49,7 @@ models:
       collateral_type:
         type: VARCHAR
         nullable: false
-      valuation_amount:
+      estimated_value:
         type: NUMERIC
         nullable: false
 

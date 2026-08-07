@@ -236,14 +236,26 @@ WHERE p.md_is_active = TRUE;
   unauthenticated), and defaults to binding `127.0.0.1` only.
 - **PII handling:** `scripts/ai_safety_guardrails.py` redacts PII from RAG context payloads before
   they reach an LLM, and `scripts/automate_openmetadata_pii_and_profiling.py` tags PII columns in the
-  catalog.
+  catalog. The PII regexes are pattern-based (not NER), so treat them as a coarse filter — a fixed
+  false positive (the phone-number pattern previously matched plain decimal monetary values) is
+  documented as fixed in the runbook's script deep dive; unlabeled names and less common formats can
+  still slip through.
+- **Retrieval honesty:** `scripts/hybrid_rag_retriever.py` and `scripts/neural_reranker.py` fail
+  closed (raise, don't silently substitute) if the real embedding/cross-encoder models can't load,
+  via `scripts/_embedding_backend.py` — set `ALLOW_DEGRADED_EMBEDDINGS=1` to explicitly opt into a
+  non-semantic fallback instead, in which case every result is tagged `embedding_mode`/
+  `reranker_mode: "degraded"` so it can't be mistaken for real retrieval.
+- **Observability:** the MCP sidecar serves real Prometheus metrics for every tool call
+  (`prometheus_client`, `mcp_server/financial_data_mcp_server.py`'s `main()`) — there is no separate
+  simulator process; Grafana panels move only in response to genuine tool invocations.
 
 This is the intended model, and the items above reflect its current state, not just its design intent
 — each has been applied to the running stack and verified (RLS blocking an anonymous read, the
 `mcp_readonly` role being rejected for file/OS access and writes, Neo4j rejecting a write inside a
-READ_ACCESS session, the SSE endpoint refusing to start without a key). A broader security review
-covers what's left — Cube.js still runs in dev mode pending a Cube Store deployment, the APOC Neo4j
-plugin was removed outright rather than allowlisted since nothing uses it, and several lower-severity
+READ_ACCESS session, the SSE endpoint refusing to start without a key, a real MCP tool call
+incrementing a real Prometheus counter end-to-end). A broader security review covers what's left —
+Cube.js still runs in dev mode pending a Cube Store deployment, the prompt-injection check is a fixed
+regex list that warns rather than blocks on retrieved-content matches, and several lower-severity
 findings remain open — those are tracked outside this document since fixing them changes code, not
 architecture.
 

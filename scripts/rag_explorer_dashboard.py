@@ -16,17 +16,102 @@ import json
 import time
 import urllib.request
 import urllib.parse
+import urllib.error
 import streamlit as st
 
 from scripts._dotenv_boot import load_env
 from scripts.ai_safety_guardrails import AISafetyGuardrails
 from scripts.hybrid_rag_retriever import HybridRAGRetriever
-from scripts.llmops_telemetry import LLMOpsTelemetry
 from scripts.ollama_agentic_tool_runner import OllamaAgenticRunner
 
 load_env()
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434/api/generate")
+POSTGRES_HOST = os.getenv("POSTGRES_HOST", "127.0.0.1")
+POSTGRES_PORT = int(os.getenv("POSTGRES_PORT", "54322"))
+POSTGRES_USER = os.getenv("POSTGRES_USER", "postgres")
+POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "")
+POSTGRES_DB = os.getenv("POSTGRES_DB", "postgres")
+NEO4J_URI = os.getenv("NEO4J_URI", "bolt://127.0.0.1:7687")
+NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
+NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "")
+OPENMETADATA_URL = os.getenv("OPENMETADATA_URL", "http://127.0.0.1:8585/api/v1")
+CUBEJS_URL = os.getenv("CUBEJS_URL", "http://127.0.0.1:4000/cubejs-api/v1/load")
+
+
+@st.cache_data(ttl=15)
+def get_system_status() -> dict:
+    """
+    Real, live connectivity checks for the sidebar status panel -- this used
+    to print "✅ Connected" for all 5 services unconditionally, regardless of
+    whether any of them were actually reachable. Cached briefly (15s) so the
+    sidebar doesn't re-check every service on every widget interaction.
+    """
+    status = {}
+
+    try:
+        import psycopg2
+        conn = psycopg2.connect(
+            host=POSTGRES_HOST, port=POSTGRES_PORT, user=POSTGRES_USER,
+            password=POSTGRES_PASSWORD, dbname=POSTGRES_DB, connect_timeout=2,
+        )
+        conn.close()
+        status["Supabase PostgreSQL"] = (True, f"Connected (Port {POSTGRES_PORT})")
+    except Exception as e:
+        status["Supabase PostgreSQL"] = (False, str(e))
+
+    try:
+        from neo4j import GraphDatabase
+        driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD), connection_timeout=2)
+        driver.verify_connectivity()
+        driver.close()
+        status["Neo4j Knowledge Graph"] = (True, "Connected (Port 7687)")
+    except Exception as e:
+        status["Neo4j Knowledge Graph"] = (False, str(e))
+
+    try:
+        req = urllib.request.Request(f"{OPENMETADATA_URL}/system/version")
+        urllib.request.urlopen(req, timeout=2)
+        status["OpenMetadata Catalog"] = (True, "Connected (Port 8585)")
+    except Exception as e:
+        status["OpenMetadata Catalog"] = (False, str(e))
+
+    try:
+        req = urllib.request.Request(CUBEJS_URL.replace("/cubejs-api/v1/load", "/readyz"))
+        urllib.request.urlopen(req, timeout=2)
+        status["Cube.js Semantic Engine"] = (True, "Connected (Port 4000)")
+    except urllib.error.HTTPError:
+        # readyz can 4xx/5xx while the process is still up and accepting
+        # connections -- that's a meaningful difference from "unreachable".
+        status["Cube.js Semantic Engine"] = (True, "Reachable (Port 4000)")
+    except Exception as e:
+        status["Cube.js Semantic Engine"] = (False, str(e))
+
+    try:
+        req = urllib.request.Request(OLLAMA_URL.replace("/api/generate", "/api/tags"))
+        urllib.request.urlopen(req, timeout=2)
+        status["Ollama Local Engine"] = (True, "Active (Port 11434)")
+    except Exception as e:
+        status["Ollama Local Engine"] = (False, str(e))
+
+    return status
+
+
+@st.cache_data(ttl=15)
+def get_knowledge_graph_counts() -> str:
+    """Real node/edge counts from Neo4j -- this used to be a hardcoded
+    '8,124 Nodes / 12.4k Edges' string, unrelated to whatever the graph
+    actually contains."""
+    try:
+        from neo4j import GraphDatabase
+        driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD), connection_timeout=2)
+        with driver.session() as session:
+            nodes = session.run("MATCH (n) RETURN count(n) AS c").single()["c"]
+            edges = session.run("MATCH ()-[r]->() RETURN count(r) AS c").single()["c"]
+        driver.close()
+        return f"{nodes:,} Nodes / {edges:,} Edges"
+    except Exception:
+        return "Unavailable"
 
 # Page Configuration
 st.set_page_config(
@@ -95,7 +180,7 @@ def call_ollama_model(model_name: str, prompt_text: str, context_payload: dict) 
             data=json.dumps(req_body).encode("utf-8"),
             headers={"Content-Type": "application/json"}
         )
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             latency_ms = round((time.time() - t_start) * 1000, 2)
             return {
@@ -116,7 +201,7 @@ def main():
     with col1:
         st.metric(label="🧠 Vector Search", value="pgvector 0.8.0", delta="384-dim HNSW")
     with col2:
-        st.metric(label="🕸️ Knowledge Graph", value="Neo4j 5", delta="8,124 Nodes / 12.4k Edges")
+        st.metric(label="🕸️ Knowledge Graph", value="Neo4j 5", delta=get_knowledge_graph_counts())
     with col3:
         st.metric(label="📊 Semantic Layer", value="Cube.js REST API", delta="16 Data Cubes")
     with col4:
@@ -137,11 +222,11 @@ def main():
     
     st.sidebar.markdown("---")
     st.sidebar.subheader("🔌 System Status")
-    st.sidebar.success("✅ Supabase PostgreSQL: Connected (Port 54322)")
-    st.sidebar.success("✅ Neo4j Knowledge Graph: Connected (Port 7687)")
-    st.sidebar.success("✅ OpenMetadata Catalog: Connected (Port 8585)")
-    st.sidebar.success("✅ Cube.js Semantic Engine: Connected (Port 4000)")
-    st.sidebar.success("✅ Ollama Local Engine: Active (Port 11434)")
+    for service_name, (reachable, detail) in get_system_status().items():
+        if reachable:
+            st.sidebar.success(f"✅ {service_name}: {detail}")
+        else:
+            st.sidebar.error(f"❌ {service_name}: unreachable ({detail})")
 
     # Sample Prompts Selection
     sample_queries = [
@@ -202,65 +287,77 @@ def main():
 
         st.markdown("---")
 
-        # 4-Tier Interactive Context Tabs
-        st.markdown("### 🔍 Multi-Modal 4-Tier RAG Context Breakdown")
-        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-            "🧠 Tier 1: Vector Search",
-            "🕸️ Tier 2: Knowledge Graph",
-            "📊 Tier 3: Semantic Metrics",
-            "🗄️ Tier 4: Relational SQL",
-            "🛡️ Guardrails Audit",
-            "📈 LLMOps Telemetry"
-        ])
+        # 4-Tier Interactive Context Tabs -- only meaningful in RAG Pipeline
+        # mode, which is the only branch above that populates rag_payload/
+        # ollama_res/guardrails. Autonomous mode drives MCP tools directly via
+        # OllamaAgenticRunner (its own tool-call log is rendered above) and
+        # has no equivalent 4-tier payload -- rendering this section
+        # unconditionally previously raised NameError the first time anyone
+        # ran Autonomous mode and clicked through to these tabs.
+        if "Autonomous" not in execution_mode:
+            st.markdown("### 🔍 Multi-Modal 4-Tier RAG Context Breakdown")
+            tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+                "🧠 Tier 1: Vector Search",
+                "🕸️ Tier 2: Knowledge Graph",
+                "📊 Tier 3: Semantic Metrics",
+                "🗄️ Tier 4: Relational SQL",
+                "🛡️ Guardrails Audit",
+                "📈 LLMOps Telemetry"
+            ])
 
-        with tab1:
-            st.subheader("pgvector 0.8.0 Dense Semantic Vector Search")
-            vector_data = rag_payload.get("vector_schema_context", [])
-            if vector_data:
-                for v in vector_data:
-                    st.markdown(f"**[{v.get('entity_type')}] `{v.get('display_name')}`** — Cosine Similarity: `{v.get('similarity')}`")
-                    st.caption(f"Content: {v.get('content_text')}")
-            else:
-                st.write("No vector matches found.")
+            with tab1:
+                st.subheader("pgvector 0.8.0 Dense Semantic Vector Search")
+                vector_data = rag_payload.get("vector_schema_context", [])
+                if vector_data:
+                    for v in vector_data:
+                        st.markdown(f"**[{v.get('entity_type')}] `{v.get('display_name')}`** — Cosine Similarity: `{v.get('similarity')}`")
+                        st.caption(f"Content: {v.get('content_text')}")
+                else:
+                    st.write("No vector matches found.")
 
-        with tab2:
-            st.subheader("Neo4j Multi-Hop Graph Traversal (Cypher Graph-RAG)")
-            graph_data = rag_payload.get("knowledge_graph_context", [])
-            st.code("\n".join(graph_data) if graph_data else "No graph nodes retrieved.")
+            with tab2:
+                st.subheader("Neo4j Multi-Hop Graph Traversal (Cypher Graph-RAG)")
+                graph_data = rag_payload.get("knowledge_graph_context", [])
+                st.code("\n".join(graph_data) if graph_data else "No graph nodes retrieved.")
 
-        with tab3:
-            st.subheader("Cube.js Open-Source Semantic Layer Metrics")
-            semantic_data = rag_payload.get("semantic_metrics_context", [])
-            st.json(semantic_data)
+            with tab3:
+                st.subheader("Cube.js Open-Source Semantic Layer Metrics")
+                semantic_data = rag_payload.get("semantic_metrics_context", [])
+                st.json(semantic_data)
 
-        with tab4:
-            st.subheader("Supabase PostgreSQL Relational Database SQL Execution")
-            sql_data = rag_payload.get("relational_sql_context", [])
-            st.code("\n".join(sql_data) if sql_data else "No SQL records returned.")
+            with tab4:
+                st.subheader("Supabase PostgreSQL Relational Database SQL Execution")
+                sql_data = rag_payload.get("relational_sql_context", [])
+                st.code("\n".join(sql_data) if sql_data else "No SQL records returned.")
 
-        with tab5:
-            st.subheader("AI Safety, PII Masking & Prompt Guardrails Audit")
-            st.success("✅ Prompt Clean: No SQL/Cypher mutation commands or prompt injection threats detected.")
-            sample_pii = "Customer John Doe, email: john@example.com, Phone: 555-123-4567, SSN: 123-45-6789"
-            redacted, _ = guardrails.redact_pii(sample_pii)
-            st.markdown(f"**Sample Real-Time PII Masking Test:**")
-            st.text(f"Original: {sample_pii}\nMasked:   {redacted}")
+            with tab5:
+                st.subheader("AI Safety, PII Masking & Prompt Guardrails Audit")
+                # Reflects the actual check run earlier in this branch
+                # (is_safe/msg) rather than a hardcoded "clean" message --
+                # unreachable if the prompt was blocked, since that path
+                # returns before this point, but the message now says what
+                # was actually checked rather than asserting a fixed outcome.
+                st.success(f"✅ Prompt Guardrail Check: {msg}")
+                sample_pii = "Customer John Doe, email: john@example.com, Phone: 555-123-4567, SSN: 123-45-6789"
+                redacted, _ = guardrails.redact_pii(sample_pii)
+                st.markdown(f"**Sample Real-Time PII Masking Test:**")
+                st.text(f"Original: {sample_pii}\nMasked:   {redacted}")
 
-        with tab6:
-            st.subheader("LLMOps Telemetry, Token Accounting & Cost Breakdown")
-            m_col1, m_col2, m_col3, m_col4 = st.columns(4)
-            p_tokens = ollama_res.get("prompt_eval_count", 0)
-            c_tokens = ollama_res.get("eval_count", 0)
-            with m_col1:
-                st.metric("Prompt Tokens", p_tokens)
-            with m_col2:
-                st.metric("Completion Tokens", c_tokens)
-            with m_col3:
-                st.metric("Generation Latency", f"{ollama_res.get('latency_ms', 0)} ms")
-            with m_col4:
-                st.metric("Cumulative Cost", "$0.0000 USD (Local)")
+            with tab6:
+                st.subheader("LLMOps Telemetry, Token Accounting & Cost Breakdown")
+                m_col1, m_col2, m_col3, m_col4 = st.columns(4)
+                p_tokens = ollama_res.get("prompt_eval_count", 0)
+                c_tokens = ollama_res.get("eval_count", 0)
+                with m_col1:
+                    st.metric("Prompt Tokens", p_tokens)
+                with m_col2:
+                    st.metric("Completion Tokens", c_tokens)
+                with m_col3:
+                    st.metric("Generation Latency", f"{ollama_res.get('latency_ms', 0)} ms")
+                with m_col4:
+                    st.metric("Cumulative Cost", "$0.0000 USD (Local)")
 
-            st.json(rag_payload.get("_telemetry_span", {}))
+                st.json(rag_payload.get("_telemetry_span", {}))
 
 if __name__ == "__main__":
     main()

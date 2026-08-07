@@ -8,6 +8,7 @@
 @prefix fibo-party: <https://spec.edmcouncil.org/fibo/ontology/FND/Parties/Parties/> .
 @prefix fibo-people: <https://spec.edmcouncil.org/fibo/ontology/FND/AgentsAndPeople/People/> .
 @prefix fibo-org: <https://spec.edmcouncil.org/fibo/ontology/FBC/FunctionalMetadata/Organizations/> .
+@prefix fibo-partyrole: <https://spec.edmcouncil.org/fibo/ontology/FND/Parties/Roles/> .
 @prefix fibo-account: <https://spec.edmcouncil.org/fibo/ontology/FBC/ProductsAndServices/FinancialProductsAndServices/> .
 @prefix fibo-loan: <https://spec.edmcouncil.org/fibo/ontology/LOAN/Loans/LoansGeneral/> .
 @prefix bian: <https://bian.org/ontology/v11/> .
@@ -50,7 +51,14 @@ fin:Customer a owl:Class ;
     rdfs:subClassOf fin:PartyRole ;
     rdfs:label "Customer Role"@en ;
     rdfs:comment "Party playing the role of a banking customer."@en ;
-    rdfs:isDefinedBy bian:CustomerRole .
+    # Both groundings are genuinely correct -- Customer is a first-class BIAN
+    # business role concept as well as a FIBO party-role concept. This used
+    # to name only bian:CustomerRole here while scripts/ground_fibo_ontology_uris.py's
+    # FIBO_GROUNDING_MAP (independently) grounded the same local class to
+    # fibo-partyrole:Customer -- not a contradiction, just two valid
+    # groundings that had drifted apart by only being recorded in one place
+    # each. Listing both here keeps them from silently disagreeing again.
+    rdfs:isDefinedBy bian:CustomerRole, fibo-partyrole:Customer .
 
 fin:DepositAccount a owl:Class ;
     rdfs:label "Deposit Account"@en ;

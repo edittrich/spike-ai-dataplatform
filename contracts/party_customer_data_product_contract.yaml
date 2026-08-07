@@ -58,7 +58,7 @@ models:
       legal_name:
         type: VARCHAR
         nullable: false
-      tax_identifier:
+      registration_number:
         type: VARCHAR
         nullable: false
         pii_classification: "PersonalData.SpecialCategory"

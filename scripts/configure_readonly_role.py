@@ -57,7 +57,7 @@ def main() -> None:
 
     conn = psycopg2.connect(
         host=POSTGRES_HOST, port=POSTGRES_PORT, user=POSTGRES_USER,
-        password=POSTGRES_PASSWORD, dbname=POSTGRES_DB,
+        password=POSTGRES_PASSWORD, dbname=POSTGRES_DB, connect_timeout=10,
     )
     try:
         conn.autocommit = True

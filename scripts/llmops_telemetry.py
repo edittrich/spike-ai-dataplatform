@@ -19,12 +19,48 @@ import time
 import json
 import uuid
 import logging
+import collections
 from typing import Dict, List, Any, Optional
+
+from prometheus_client import Counter, Histogram
 
 from scripts.ai_safety_guardrails import AISafetyGuardrails
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("LLMOpsTelemetry")
+
+# Process-global Prometheus metrics (module-level, per prometheus_client's own
+# convention -- Counter/Histogram accumulate across every LLMOpsTelemetry
+# instance in this process, unlike the per-instance `trace_history` below).
+# This is what makes real metrics possible at all: the previous design served
+# `/metrics` from a *separate* container process
+# (scripts/telemetry_metrics_exporter_server.py, now removed) that could never
+# see traces recorded by a different process no matter what fed it -- which is
+# exactly why it was seeded with `random.uniform()` fake data instead. These
+# are now read directly by the process doing the actual work
+# (mcp_server/financial_data_mcp_server.py, which calls
+# `prometheus_client.start_http_server()` to expose them) rather than shipped
+# to a simulator.
+TRACES_TOTAL = Counter(
+    "llmops_traces_total", "Total number of LLMOps traces completed.", ["model"]
+)
+TOKENS_TOTAL = Counter(
+    "llmops_tokens_total", "Total tokens processed (prompt + completion, estimated).", ["model"]
+)
+COST_USD_TOTAL = Counter(
+    "llmops_cost_usd_total", "Cumulative estimated LLM inference cost in USD.", ["model"]
+)
+TOTAL_LATENCY_MS = Histogram(
+    "llmops_total_latency_ms",
+    "End-to-end pipeline latency per trace, in milliseconds.",
+    buckets=(10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000),
+)
+TIER_LATENCY_MS = Histogram(
+    "llmops_tier_latency_ms",
+    "Per-tier retrieval latency, in milliseconds.",
+    ["tier"],
+    buckets=(5, 10, 25, 50, 100, 250, 500, 1000, 2500),
+)
 
 # Standard Model Pricing per 1,000 Tokens (USD)
 MODEL_PRICING = {
@@ -36,9 +72,17 @@ MODEL_PRICING = {
     "gpt-4o-mini": {"input": 0.00015, "output": 0.00060}
 }
 
+# Cap on the in-process trace_history used by export_telemetry_dashboard()'s
+# per-instance JSON view -- previously an unbounded list, which in a
+# `restart: always` container is a slow memory leak over the container's
+# lifetime. The real, unbounded-in-effect metrics now live in the
+# process-global Prometheus objects above, which store fixed-size bucket
+# counts rather than one entry per trace.
+MAX_TRACE_HISTORY = 500
+
 class LLMOpsTelemetry:
     def __init__(self):
-        self.trace_history = []
+        self.trace_history = collections.deque(maxlen=MAX_TRACE_HISTORY)
         self.guardrails = AISafetyGuardrails()
 
     def estimate_tokens(self, text: str) -> int:
@@ -83,6 +127,7 @@ class LLMOpsTelemetry:
     def record_tier_latency(self, trace: Dict[str, Any], tier_name: str, latency_ms: float):
         """Records sub-millisecond execution latency for a specific retrieval tier."""
         trace["tier_latencies_ms"][tier_name] = round(latency_ms, 2)
+        TIER_LATENCY_MS.labels(tier=tier_name).observe(latency_ms)
 
     def finalize_trace(self, trace: Dict[str, Any], output_text: str, total_latency_ms: float) -> Dict[str, Any]:
         """Finalizes trace span with completion tokens, cost, and total latency."""
@@ -97,11 +142,22 @@ class LLMOpsTelemetry:
         trace["status"] = "COMPLETED"
 
         self.trace_history.append(trace)
+        TRACES_TOTAL.labels(model=trace["model"]).inc()
+        TOKENS_TOTAL.labels(model=trace["model"]).inc(total_tokens)
+        COST_USD_TOTAL.labels(model=trace["model"]).inc(cost_usd)
+        TOTAL_LATENCY_MS.observe(total_latency_ms)
         logger.info(f"Trace Completed: [{trace['trace_id']}] Latency: {trace['total_latency_ms']}ms | Tokens: {total_tokens} | Cost: ${cost_usd:.6f}")
         return trace
 
     def export_telemetry_dashboard(self) -> Dict[str, Any]:
-        """Exports aggregate LLMOps telemetry dashboard metrics."""
+        """
+        Exports a JSON summary of this instance's own recent trace history --
+        a debugging/demo view scoped to one process (or, for the MCP server
+        specifically, one HybridRAGRetriever call, since a fresh instance is
+        constructed per call). For real cross-call metrics, scrape the module-
+        level Prometheus objects above via /metrics on the MCP sidecar (see
+        `mcp_server/financial_data_mcp_server.py`), not this method.
+        """
         total_calls = len(self.trace_history)
         if total_calls == 0:
             return {"total_calls": 0, "status": "No traces recorded."}
@@ -119,40 +175,17 @@ class LLMOpsTelemetry:
             lats = [t["tier_latencies_ms"][tier] for t in self.trace_history if tier in t["tier_latencies_ms"]]
             tier_avg_latencies[tier] = round(sum(lats) / len(lats), 2) if lats else 0.0
 
+        # self.trace_history is a bounded deque (see MAX_TRACE_HISTORY above),
+        # which doesn't support slicing -- materialize to a list first.
+        recent = list(self.trace_history)[-5:]
         return {
             "total_llm_calls": total_calls,
             "total_tokens_processed": total_tokens,
             "cumulative_cost_usd": round(total_cost, 6),
             "average_latency_ms": avg_latency,
             "tier_latency_breakdown_ms": tier_avg_latencies,
-            "active_traces": [t["trace_id"] for t in self.trace_history[-5:]]
+            "active_traces": [t["trace_id"] for t in recent]
         }
-
-    def export_prometheus_metrics(self) -> str:
-        """Exports metrics in OpenMetrics/Prometheus text format."""
-        dashboard = self.export_telemetry_dashboard()
-        tier_breakdown = dashboard.get("tier_latency_breakdown_ms", {})
-        metrics = [
-            "# HELP llmops_total_requests Total number of LLMOps traces recorded.",
-            "# TYPE llmops_total_requests counter",
-            f"llmops_total_requests {dashboard.get('total_llm_calls', 0)}",
-            "# HELP llmops_total_tokens Total tokens processed.",
-            "# TYPE llmops_total_tokens counter",
-            f"llmops_total_tokens {dashboard.get('total_tokens_processed', 0)}",
-            "# HELP llmops_total_cost_usd Cumulative LLM inference cost in USD.",
-            "# TYPE llmops_total_cost_usd counter",
-            f"llmops_total_cost_usd {dashboard.get('cumulative_cost_usd', 0.0)}",
-            "# HELP llmops_avg_latency_ms Average trace latency in milliseconds.",
-            "# TYPE llmops_avg_latency_ms gauge",
-            f"llmops_avg_latency_ms {dashboard.get('average_latency_ms', 0.0)}",
-            "# HELP llmops_tier_latency_ms Multi-tier execution latency breakdown in ms.",
-            "# TYPE llmops_tier_latency_ms gauge",
-            f'llmops_tier_latency_ms{{tier="vector_pgvector"}} {tier_breakdown.get("Vector_Search_pgvector", 0.0)}',
-            f'llmops_tier_latency_ms{{tier="graph_neo4j"}} {tier_breakdown.get("Graph_RAG_Neo4j", 0.0)}',
-            f'llmops_tier_latency_ms{{tier="semantic_cubejs"}} {tier_breakdown.get("Semantic_Metrics_Cubejs", 0.0)}',
-            f'llmops_tier_latency_ms{{tier="relational_sql"}} {tier_breakdown.get("Relational_SQL_PostgreSQL", 0.0)}'
-        ]
-        return "\n".join(metrics) + "\n"
 
 def main():
     telemetry = LLMOpsTelemetry()

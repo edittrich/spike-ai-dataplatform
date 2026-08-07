@@ -232,23 +232,13 @@ services:
       retries: 10
       start_period: 15s
 
-  telemetry_exporter:
-    build:
-      context: .
-      dockerfile: catalog/Dockerfile.exporter
-    container_name: llmops_telemetry_exporter
-    restart: always
-    network_mode: "host"
-    deploy:
-      resources:
-        limits:
-          memory: 256m
-    healthcheck:
-      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/metrics', timeout=3)"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
+  # No standalone telemetry_exporter service -- it used to run
+  # scripts/telemetry_metrics_exporter_server.py (removed) as a *separate*
+  # container that could never see traces recorded by mcp_sidecar, since
+  # Prometheus client metrics live in-process; it was seeded with
+  # `random.uniform()` fake data because there was no way to feed it anything
+  # real. mcp_sidecar below now serves genuine metrics on :8000 itself, from
+  # the same process that executes tool calls.
 
   # ===========================================================================
   # 5. FastMCP Agentic Protocol Sidecar Container Service
@@ -273,6 +263,7 @@ services:
     environment:
       - MCP_TRANSPORT=sse
       - MCP_PORT=8001
+      - MCP_METRICS_PORT=8000
       - MCP_API_KEY=${MCP_API_KEY}
       - MCP_HOST=${MCP_HOST:-127.0.0.1}
       - POSTGRES_HOST=${POSTGRES_HOST:-127.0.0.1}
@@ -289,4 +280,10 @@ services:
       - CUBEJS_API_SECRET=${CUBEJS_API_SECRET}
       - OPENMETADATA_URL=${OPENMETADATA_URL:-http://127.0.0.1:8585/api/v1}
       - OPENMETADATA_JWT_TOKEN=${OPENMETADATA_JWT_TOKEN}
+      # This image doesn't install sentence-transformers/torch (see .env.example's
+      # comment) -- hybrid_rag_search fails closed by default rather than
+      # silently degrading. Leave unset/0 unless you deliberately want degraded
+      # (clearly-tagged) retrieval instead.
+      - ALLOW_DEGRADED_EMBEDDINGS=${ALLOW_DEGRADED_EMBEDDINGS:-0}
+      - EMBEDDING_MODEL_NAME=${EMBEDDING_MODEL_NAME:-sentence-transformers/all-MiniLM-L6-v2}
 

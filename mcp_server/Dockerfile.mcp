@@ -17,12 +17,17 @@ RUN useradd --create-home --uid 1000 --shell /usr/sbin/nologin appuser \
     && chown -R appuser:appuser /app
 USER appuser
 
-# Expose FastMCP SSE HTTP port 8001
+# Expose FastMCP SSE HTTP port 8001, and 8000 for the Prometheus /metrics
+# endpoint this process serves itself (start_http_server() in
+# financial_data_mcp_server.py's main()) -- the standalone telemetry-exporter
+# container that used to own :8000 was removed.
 EXPOSE 8001
+EXPOSE 8000
 
 # Default environment variables
 ENV MCP_TRANSPORT=sse
 ENV MCP_PORT=8001
+ENV MCP_METRICS_PORT=8000
 
 # Run FastMCP Server
 CMD ["python3", "-m", "mcp_server.financial_data_mcp_server"]

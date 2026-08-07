@@ -34,7 +34,7 @@ models:
       account_status:
         type: VARCHAR
         nullable: false
-        allowed_values: ["ACTIVE", "DORMANT", "CLOSED", "BLOCKED"]
+        allowed_values: ["ACTIVE", "DORMANT", "FROZEN", "CLOSED"]
 
   financial.deposit_balance:
     description: Real-Time Position Balances & Overdraft Exposures

@@ -36,7 +36,7 @@ def api_put(endpoint, payload):
     url = f"{OPENMETADATA_URL}/{endpoint}"
     req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="PUT")
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=10) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         print(f"❌ Error PUT {endpoint}: {e.code} - {e.read().decode('utf-8')}")

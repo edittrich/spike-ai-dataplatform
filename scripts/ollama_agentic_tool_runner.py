@@ -211,7 +211,7 @@ class OllamaAgenticRunner:
                 headers={"Content-Type": "application/json"}
             )
 
-            with urllib.request.urlopen(req) as resp:
+            with urllib.request.urlopen(req, timeout=10) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
 
             msg_res = data.get("message", {})

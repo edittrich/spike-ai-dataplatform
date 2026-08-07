@@ -1,5 +1,6 @@
 # Enterprise AI-Enabled Data Platform Dependencies
 python-dotenv>=1.0.0
+prometheus-client>=0.20.0
 sentence-transformers>=2.2.2
 torch>=2.0.0
 torchvision>=0.15.0

@@ -7,6 +7,10 @@ scrape_configs:
     static_configs:
       - targets: ['127.0.0.1:9090']
 
-  - job_name: 'llmops_telemetry_exporter'
+  # mcp_sidecar serves real, in-process Prometheus metrics on :8000 (see
+  # start_http_server() in mcp_server/financial_data_mcp_server.py) -- this
+  # used to scrape a separate llmops_telemetry_exporter container that was
+  # seeded with random.uniform() fake data, now removed.
+  - job_name: 'mcp_sidecar'
     static_configs:
       - targets: ['127.0.0.1:8000']

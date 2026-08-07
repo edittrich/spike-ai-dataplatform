@@ -24,7 +24,7 @@ PostgreSQL is **not** a `docker-compose.yml` service — it's managed separately
 
 ```bash
 npm run supabase:start     # starts Postgres, applies migrations (first run only; use supabase:db:reset to re-seed)
-docker compose up -d       # everything else: OpenMetadata, Neo4j, Cube.js, Prometheus, Grafana, telemetry exporter, MCP sidecar
+docker compose up -d       # everything else: OpenMetadata, Neo4j, Cube.js, Prometheus, Grafana, MCP sidecar
 docker compose ps
 docker compose logs -f <service>
 docker compose restart <service>
@@ -93,7 +93,7 @@ Then `scripts/hybrid_rag_retriever.py`, `scripts/ollama_agentic_tool_runner.py`,
 3. **Semantic & governance** — Cube.js cubes in `cube/model/cubes/*.yml` (`:4000`); OpenMetadata catalog (`:8585`) with domains/contracts under `contracts/*.yaml`; W3C FIBO ontology grounding (`ontology/*.ttl`).
 4. **Retrieval** — `scripts/hybrid_rag_retriever.py` is the orchestrator: it fuses pgvector HNSW vector search, `scripts/neural_reranker.py` cross-encoder re-ranking, `scripts/text_to_cypher_builder.py` NL→Cypher compilation, Cube.js metrics, and raw SQL into a single "4-tier hybrid RAG" call.
 5. **Agentic protocol** — `mcp_server/financial_data_mcp_server.py` is a FastMCP server exposing 6 tools (`search_data_catalog`, `query_semantic_metrics`, `query_knowledge_graph`, `query_financial_database`, `check_data_quality`, `hybrid_rag_search`), runnable over stdio or as the `mcp_sidecar` SSE container (`:8001/sse`, `MCP_TRANSPORT=sse`). `scripts/ollama_agentic_tool_runner.py` drives these tools autonomously via a local Ollama model. Both this file and `scripts/hybrid_rag_retriever.py` reach Postgres/Neo4j via native drivers (`psycopg2`, `neo4j`), not `docker exec` — the `mcp_sidecar` container has neither the `docker` CLI nor a mounted `docker.sock`, so a `docker exec`-based approach fails there specifically even though it works fine when the same code runs directly on the host. (The other, standalone pipeline scripts in `scripts/` are meant to be run on the host and still use `docker exec`, which is fine there.)
-6. **Consumption & observability** — Streamlit dashboard (`scripts/rag_explorer_dashboard.py`, `:8501`); Grafana (`:3000`) + Prometheus (`:9090`) fed by `scripts/telemetry_metrics_exporter_server.py` (`:8000`). Cross-cutting: `scripts/ai_safety_guardrails.py` (PII redaction, prompt-injection defense, read-only query enforcement) and `scripts/llmops_telemetry.py` (per-tier latency tracing), used by the retrieval/agentic layers above.
+6. **Consumption & observability** — Streamlit dashboard (`scripts/rag_explorer_dashboard.py`, `:8501`); Grafana (`:3000`) + Prometheus (`:9090`) scraping real metrics served directly by `mcp_sidecar` (`:8000/metrics`, via `prometheus_client.start_http_server()` in `mcp_server/financial_data_mcp_server.py`'s `main()`) — there is no separate telemetry exporter container; metrics live in the same process that executes tool calls, since Prometheus client objects don't share state across processes. Cross-cutting: `scripts/ai_safety_guardrails.py` (PII redaction, prompt-injection defense, read-only query enforcement) and `scripts/llmops_telemetry.py` (per-tier latency tracing feeding both the process-global Prometheus metrics and a per-call JSON trace view), used by the retrieval/agentic layers above.
 
 ### Data domains
 
@@ -103,7 +103,7 @@ Three BIAN/FIBO-aligned domains, each with its own OpenMetadata data product and
 
 ### Docker networking
 
-`docker-compose.yml` runs most services with `network_mode: "host"` (Neo4j, Cube.js, Prometheus, Grafana, telemetry exporter, MCP sidecar) — only the OpenMetadata trio (MySQL, OpenSearch, server) uses bridge networking with published ports. Host-mode services reach each other over `127.0.0.1`, not Docker DNS names; keep this in mind when adding a service or debugging connectivity. MySQL (`33060`) and OpenSearch (`9200`) publish to `127.0.0.1` only, not `0.0.0.0` — both are reachable from the host for local debugging, but not from the network (OpenSearch in particular runs with `DISABLE_SECURITY_PLUGIN=true`, so it must never be exposed beyond localhost). All 9 services declare a `healthcheck:`; `openmetadata_server` waits on `openmetadata_db`/`openmetadata_search` reaching `condition: service_healthy` before starting.
+`docker-compose.yml` runs most services with `network_mode: "host"` (Neo4j, Cube.js, Prometheus, Grafana, MCP sidecar) — only the OpenMetadata trio (MySQL, OpenSearch, server) uses bridge networking with published ports. Host-mode services reach each other over `127.0.0.1`, not Docker DNS names; keep this in mind when adding a service or debugging connectivity. MySQL (`33060`) and OpenSearch (`9200`) publish to `127.0.0.1` only, not `0.0.0.0` — both are reachable from the host for local debugging, but not from the network (OpenSearch in particular runs with `DISABLE_SECURITY_PLUGIN=true`, so it must never be exposed beyond localhost). All services declare a `healthcheck:`; `openmetadata_server` waits on `openmetadata_db`/`openmetadata_search` reaching `condition: service_healthy` before starting.
 
 ### Secrets convention
 

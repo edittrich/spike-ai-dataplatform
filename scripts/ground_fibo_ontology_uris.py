@@ -43,8 +43,13 @@ FIBO_GROUNDING_MAP = {
     # Party & Customer Domain
     "financial.party": {
         "tag": "Party",
-        "fibo_uri": "https://spec.edmcouncil.org/fibo/ontology/FND/AgentsAndPeople/Agents/Party",
-        "fibo_label": "fibo-fnd-aap-agt:Party",
+        # Matches ontology/financial_platform_ontology.ttl's fin:Party
+        # rdfs:isDefinedBy fibo-party:Party -- this used to disagree (this map
+        # said FND/AgentsAndPeople/Agents/Party), and FIBO's Agent module
+        # defines a distinct, more general Agent class, not a Party class --
+        # the TTL's grounding is the correct one; this map had drifted.
+        "fibo_uri": "https://spec.edmcouncil.org/fibo/ontology/FND/Parties/Parties/Party",
+        "fibo_label": "fibo-fnd-pty-pty:Party",
         "description": "An agent that is an individual or organization, capable of entering into agreements or obligations."
     },
     "financial.party_individual": {
@@ -55,12 +60,23 @@ FIBO_GROUNDING_MAP = {
     },
     "financial.party_organization": {
         "tag": "Organization",
-        "fibo_uri": "https://spec.edmcouncil.org/fibo/ontology/FND/Organizations/Organizations/Organization",
-        "fibo_label": "fibo-fnd-org-org:Organization",
+        # Matches ontology/financial_platform_ontology.ttl's fin:Organization
+        # rdfs:isDefinedBy fibo-org:LegalEntity (this map previously pointed
+        # at FND/Organizations/Organizations/Organization instead).
+        "fibo_uri": "https://spec.edmcouncil.org/fibo/ontology/FBC/FunctionalMetadata/Organizations/LegalEntity",
+        "fibo_label": "fibo-fbc-fct-org:LegalEntity",
         "description": "A legal entity or social structure formed by people with a shared purpose."
     },
     "financial.party_role_customer": {
         "tag": "Customer",
+        # ontology/financial_platform_ontology.ttl's fin:Customer grounds to
+        # bian:CustomerRole instead -- both are legitimately correct (Customer
+        # is a first-class BIAN business role concept as well as a FIBO
+        # party-role concept), and the TTL now references both rather than
+        # this map and the TTL silently disagreeing about which one applies.
+        # This map stays FIBO-only since it's specifically the FIBO grounding
+        # pass (see scripts/register_openmetadata_data_contracts.py for the
+        # BIAN domain/product registration).
         "fibo_uri": "https://spec.edmcouncil.org/fibo/ontology/FND/Parties/Roles/Customer",
         "fibo_label": "fibo-fnd-pty-rl:Customer",
         "description": "A party in the role of purchasing or receiving financial products or services."
@@ -167,7 +183,7 @@ def api_get(endpoint):
     url = f"{OPENMETADATA_URL}/{endpoint}"
     req = urllib.request.Request(url, headers=headers, method="GET")
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=10) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         print(f"❌ Error GET {endpoint}: {e.code} - {e.read().decode('utf-8')}")
@@ -177,7 +193,7 @@ def api_put(endpoint, payload):
     url = f"{OPENMETADATA_URL}/{endpoint}"
     req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="PUT")
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=10) as resp:
             raw = resp.read().decode("utf-8")
             if not raw:
                 return {"status": "success"}
@@ -194,7 +210,7 @@ def api_post(endpoint, payload=None):
     data = json.dumps(payload).encode("utf-8") if payload else None
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=10) as resp:
             raw = resp.read().decode("utf-8")
             try:
                 return json.loads(raw)

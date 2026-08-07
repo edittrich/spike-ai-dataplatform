@@ -26,12 +26,16 @@ cubes:
         format: currency
         title: "Total Principal Amount Portfolio"
         description: "Total principal exposure across active loan agreements."
+        filters:
+          - sql: "{CUBE}.md_is_active = TRUE"
 
       - name: average_loan_amount
         sql: principal_amount
         type: avg
         format: currency
         title: "Average Loan Principal Size"
+        filters:
+          - sql: "{CUBE}.md_is_active = TRUE"
 
       - name: average_interest_rate
         sql: interest_rate * 100.0

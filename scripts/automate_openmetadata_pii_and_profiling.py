@@ -38,19 +38,25 @@ headers = {
 }
 
 PII_PERSONAL_PATTERNS = [
-    "first_name", "last_name", "address_line1", "address_line2",
+    # street_address/building_number (not address_line1/address_line2, which
+    # don't exist in supabase/migrations/20260722000000_create_financial_platform_schema.sql --
+    # the phantom names meant street addresses were never actually tagged).
+    "first_name", "last_name", "street_address", "building_number",
     "city", "postal_code", "account_number", "target_account_number"
 ]
 
 PII_SPECIAL_PATTERNS = [
-    "id_number", "date_of_birth", "tax_identifier"
+    # registration_number (not tax_identifier, same phantom-column issue --
+    # see contracts/party_customer_data_product_contract.yaml, which had the
+    # identical mistake).
+    "id_number", "date_of_birth", "registration_number"
 ]
 
 def api_get(endpoint):
     url = f"{OPENMETADATA_URL}/{endpoint}"
     req = urllib.request.Request(url, headers=headers, method="GET")
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=10) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         print(f"❌ Error GET {endpoint}: {e.code} - {e.read().decode('utf-8')}")
@@ -60,7 +66,7 @@ def api_put(endpoint, payload):
     url = f"{OPENMETADATA_URL}/{endpoint}"
     req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="PUT")
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=10) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         print(f"❌ Error PUT {endpoint}: {e.code} - {e.read().decode('utf-8')}")
@@ -71,7 +77,7 @@ def api_post(endpoint, payload=None):
     data = json.dumps(payload).encode("utf-8") if payload else None
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=10) as resp:
             raw = resp.read().decode("utf-8")
             try:
                 return json.loads(raw)
