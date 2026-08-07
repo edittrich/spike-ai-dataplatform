@@ -1,0 +1,35 @@
+{
+  "name": "ai-financial-data-platform",
+  "version": "1.0.0",
+  "description": "BIAN/FIBO aligned, SCD Type 2 AI-Enabled Financial Data Platform PoC with Cube.js, Neo4j, Protégé Ontology & OpenMetadata Catalog",
+  "main": "index.js",
+  "scripts": {
+    "supabase:start": "supabase start",
+    "supabase:stop": "supabase stop",
+    "supabase:db:reset": "supabase db reset",
+    "supabase:migration:new": "supabase migration new",
+    "cube:start": "docker compose -f cube/docker-compose.yml up -d",
+    "cube:stop": "docker compose -f cube/docker-compose.yml down",
+    "cube:logs": "docker compose -f cube/docker-compose.yml logs -f",
+    "neo4j:start": "docker compose -f neo4j/docker-compose.yml up -d",
+    "neo4j:stop": "docker compose -f neo4j/docker-compose.yml down",
+    "neo4j:logs": "docker compose -f neo4j/docker-compose.yml logs -f",
+    "catalog:start": "docker compose -f catalog/docker-compose.yml up -d",
+    "catalog:stop": "docker compose -f catalog/docker-compose.yml down",
+    "catalog:logs": "docker compose -f catalog/docker-compose.yml logs -f",
+    "catalog:ingest": "python3 scripts/populate_openmetadata_tables.py",
+    "graph:build": "python3 scripts/build_knowledge_graph.py",
+    "rdf:export": "python3 scripts/export_rdf_ontology.py",
+    "protege": "./tools/Protege-5.6.9/run.sh ontology/financial_platform_ontology.ttl",
+    "generate-data": "python3 scripts/generate_synthetic_data.py",
+    "dashboard": "streamlit run scripts/rag_explorer_dashboard.py"
+  },
+  "devDependencies": {
+    "supabase": "^1.145.0"
+  },
+  "dependencies": {
+    "@cubejs-backend/postgres": "^0.35.0",
+    "@cubejs-backend/server": "^0.35.0",
+    "@supabase/supabase-js": "^2.39.8"
+  }
+}

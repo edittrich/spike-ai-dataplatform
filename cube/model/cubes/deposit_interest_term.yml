@@ -1,0 +1,51 @@
+cubes:
+  - name: deposit_interest_term
+    sql_table: financial.deposit_interest_term
+    title: "Deposit Interest Term Data Product"
+    description: "Semantic Cube for Deposit Interest Rates and Day Count Accrual Rules."
+
+    joins:
+      - name: deposit_account
+        sql: "{CUBE}.deposit_account_id = {deposit_account.deposit_account_id}"
+        relationship: belongs_to
+
+    measures:
+      - name: average_interest_rate
+        sql: interest_rate * 100.0
+        type: avg
+        format: percent
+        title: "Average Deposit Interest Rate (%)"
+
+    dimensions:
+      - name: deposit_interest_term_id
+        sql: deposit_interest_term_id
+        type: string
+        primary_key: true
+
+      - name: deposit_account_id
+        sql: deposit_account_id
+        type: string
+
+      - name: interest_rate
+        sql: interest_rate
+        type: number
+
+      - name: rate_type
+        sql: rate_type
+        type: string
+
+      - name: accrual_frequency
+        sql: accrual_frequency
+        type: string
+
+      - name: calculation_basis
+        sql: calculation_basis
+        type: string
+
+      - name: effective_date
+        sql: effective_date
+        type: time
+
+      - name: md_is_active
+        sql: md_is_active
+        type: boolean

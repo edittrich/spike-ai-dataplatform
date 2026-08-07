@@ -1,0 +1,133 @@
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+
+# Standard Ontologies
+@prefix fibo-party: <https://spec.edmcouncil.org/fibo/ontology/FND/Parties/Parties/> .
+@prefix fibo-people: <https://spec.edmcouncil.org/fibo/ontology/FND/AgentsAndPeople/People/> .
+@prefix fibo-org: <https://spec.edmcouncil.org/fibo/ontology/FBC/FunctionalMetadata/Organizations/> .
+@prefix fibo-account: <https://spec.edmcouncil.org/fibo/ontology/FBC/ProductsAndServices/FinancialProductsAndServices/> .
+@prefix fibo-loan: <https://spec.edmcouncil.org/fibo/ontology/LOAN/Loans/LoansGeneral/> .
+@prefix bian: <https://bian.org/ontology/v11/> .
+
+# Local Platform Namespace
+@prefix fin: <http://ai-platform.financial/ontology/v1#> .
+
+<http://ai-platform.financial/ontology/v1> a owl:Ontology ;
+    dcterms:title "BIAN & FIBO Aligned Financial Platform Ontology"@en ;
+    dcterms:description "Formal W3C OWL/RDF Ontology mapping BIAN BCM and FIBO FND/FBC standards to local schema."@en ;
+    owl:versionInfo "1.0.0" .
+
+# ============================================================================
+# 1. CORE CLASS HIERARCHY
+# ============================================================================
+
+fin:Party a owl:Class ;
+    rdfs:label "Party Supertype"@en ;
+    rdfs:comment "Master autonomous entity capable of entering into legal contracts."@en ;
+    rdfs:isDefinedBy fibo-party:Party .
+
+fin:Individual a owl:Class ;
+    rdfs:subClassOf fin:Party ;
+    rdfs:label "Individual Person"@en ;
+    rdfs:comment "Natural person entity with legal personality."@en ;
+    rdfs:isDefinedBy fibo-people:Person .
+
+fin:Organization a owl:Class ;
+    rdfs:subClassOf fin:Party ;
+    rdfs:label "Organization Legal Entity"@en ;
+    rdfs:comment "Corporate legal entity or partnership."@en ;
+    rdfs:isDefinedBy fibo-org:LegalEntity .
+
+fin:PartyRole a owl:Class ;
+    rdfs:label "Party Role"@en ;
+    rdfs:comment "Role played by a Party in a specific context."@en ;
+    rdfs:isDefinedBy fibo-party:PartyInRole .
+
+fin:Customer a owl:Class ;
+    rdfs:subClassOf fin:PartyRole ;
+    rdfs:label "Customer Role"@en ;
+    rdfs:comment "Party playing the role of a banking customer."@en ;
+    rdfs:isDefinedBy bian:CustomerRole .
+
+fin:DepositAccount a owl:Class ;
+    rdfs:label "Deposit Account"@en ;
+    rdfs:comment "Checking, Savings, or Term Deposit contract."@en ;
+    rdfs:isDefinedBy fibo-account:DepositAccount .
+
+fin:DepositBalance a owl:Class ;
+    rdfs:label "Deposit Balance Snapshot"@en ;
+    rdfs:comment "Real-time ledger, available, and book balance state."@en .
+
+fin:LoanApplication a owl:Class ;
+    rdfs:label "Loan Application"@en ;
+    rdfs:comment "Credit application request during origination."@en .
+
+fin:LoanAgreement a owl:Class ;
+    rdfs:label "Loan Agreement Contract"@en ;
+    rdfs:comment "Legally binding credit facility agreement."@en ;
+    rdfs:isDefinedBy fibo-loan:LoanAgreement .
+
+fin:LoanCollateral a owl:Class ;
+    rdfs:label "Pledged Collateral Asset"@en ;
+    rdfs:comment "Asset pledged to secure a loan facility."@en .
+
+# ============================================================================
+# 2. OBJECT PROPERTIES
+# ============================================================================
+
+fin:playsRole a owl:ObjectProperty ;
+    rdfs:domain fin:Party ;
+    rdfs:range fin:PartyRole ;
+    rdfs:label "plays role"@en .
+
+fin:holdsAccount a owl:ObjectProperty ;
+    rdfs:domain fin:Customer ;
+    rdfs:range fin:DepositAccount ;
+    rdfs:label "holds deposit account"@en .
+
+fin:hasBalanceSnapshot a owl:ObjectProperty ;
+    rdfs:domain fin:DepositAccount ;
+    rdfs:range fin:DepositBalance ;
+    rdfs:label "has balance snapshot"@en .
+
+fin:borrowerOf a owl:ObjectProperty ;
+    rdfs:domain fin:Customer ;
+    rdfs:range fin:LoanAgreement ;
+    rdfs:label "is borrower of loan"@en .
+
+fin:securedBy a owl:ObjectProperty ;
+    rdfs:domain fin:LoanAgreement ;
+    rdfs:range fin:LoanCollateral ;
+    rdfs:label "is secured by collateral"@en .
+
+# ============================================================================
+# 3. DATATYPE PROPERTIES
+# ============================================================================
+
+fin:customerNumber a owl:DatatypeProperty ;
+    rdfs:domain fin:Customer ;
+    rdfs:range xsd:string ;
+    rdfs:label "customer account number"@en .
+
+fin:amlRiskRating a owl:DatatypeProperty ;
+    rdfs:domain fin:Customer ;
+    rdfs:range xsd:string ;
+    rdfs:label "AML risk rating (LOW, MEDIUM, HIGH)"@en .
+
+fin:availableBalance a owl:DatatypeProperty ;
+    rdfs:domain fin:DepositBalance ;
+    rdfs:range xsd:decimal ;
+    rdfs:label "available withdrawable balance"@en .
+
+fin:principalAmount a owl:DatatypeProperty ;
+    rdfs:domain fin:LoanAgreement ;
+    rdfs:range xsd:decimal ;
+    rdfs:label "original loan principal amount"@en .
+
+fin:isNpl a owl:DatatypeProperty ;
+    rdfs:domain fin:LoanAgreement ;
+    rdfs:range xsd:boolean ;
+    rdfs:label "Non-Performing Loan default flag"@en .

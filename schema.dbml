@@ -1,0 +1,369 @@
+// ============================================================================
+// DBML Specification: AI-Enabled Financial Data Platform PoC
+// Domain Standards: BIAN / FIBO Aligned Architecture
+// Temporal Pattern: Inmon 3NF with SCD Type 2 Metadata Headers
+// Data Product Naming Rule: All tables start with their Data Product prefix
+// ============================================================================
+
+Project AI_Financial_Data_Platform {
+  database_type: 'PostgreSQL'
+  Note: 'Production-grade BIAN/FIBO aligned financial data platform schema featuring Party, Deposit, and Loan domains with SCD Type 2 temporal metadata. Table names strictly prefixed by Data Product name.'
+}
+
+// ----------------------------------------------------------------------------
+// REFERENCE DATA PRODUCT (ref)
+// ----------------------------------------------------------------------------
+
+Table ref_currency {
+  currency_code varchar(3) [pk, note: 'ISO 4217 3-letter currency code (e.g. USD, EUR)']
+  currency_name varchar(100) [not null, note: 'Official currency title']
+  symbol varchar(10) [note: 'Currency symbol (e.g. $, €)']
+  decimal_places integer [not null, default: 2, note: 'Number of decimal places']
+  is_active boolean [not null, default: true, note: 'Reference active indicator']
+  created_at timestamp [not null, default: `now()`, note: 'Record creation timestamp UTC']
+
+  Note: 'Reference table for ISO 4217 currencies'
+}
+
+Table ref_country {
+  country_code varchar(2) [pk, note: 'ISO 3166-1 alpha-2 country code (e.g. US, DE)']
+  country_name varchar(100) [not null, note: 'Official country name']
+  iso_alpha3 varchar(3) [not null, note: 'ISO 3166-1 alpha-3 code']
+  iso_numeric varchar(3) [not null, note: 'ISO numeric country code']
+  is_high_risk_aml boolean [not null, default: false, note: 'AML high-risk country flag']
+  created_at timestamp [not null, default: `now()`, note: 'Record creation timestamp UTC']
+
+  Note: 'Reference table for ISO 3166-1 country codes'
+}
+
+Table ref_nace_industry {
+  nace_code varchar(10) [pk, note: 'NACE Rev. 2 industry code (e.g. K64.1.9)']
+  nace_section varchar(1) [not null, note: 'NACE main section code (e.g. K)']
+  nace_title varchar(255) [not null, note: 'Industry sector title description']
+  risk_level varchar(20) [not null, default: 'MEDIUM', note: 'Industry AML credit risk level (LOW, MEDIUM, HIGH)']
+  created_at timestamp [not null, default: `now()`, note: 'Record creation timestamp UTC']
+
+  Note: 'Reference table for NACE Rev. 2 industry classifications'
+}
+
+// ----------------------------------------------------------------------------
+// PARTY DATA PRODUCT (party)
+// ----------------------------------------------------------------------------
+
+Table party {
+  md_created_at_utc timestamp [not null, default: `now()`, note: 'Record creation timestamp UTC']
+  md_updated_at_utc timestamp [not null, default: `now()`, note: 'Record modification timestamp UTC']
+  md_valid_from_utc timestamp [not null, default: `now()`, note: 'SCD Type 2 effective start timestamp UTC']
+  md_valid_to_utc timestamp [not null, default: '9999-12-31 23:59:59', note: 'SCD Type 2 effective end timestamp UTC']
+  md_is_active boolean [not null, default: true, note: 'SCD Type 2 active status flag']
+  
+  party_id uuid [pk, default: `gen_random_uuid()`, note: 'Surrogate primary key']
+  party_bk varchar(50) [not null, note: 'Natural business key for party master']
+  party_type varchar(20) [not null, note: 'Party type discriminator: INDIVIDUAL or ORGANIZATION']
+  status_code varchar(20) [not null, default: 'ACTIVE', note: 'Master party status (ACTIVE, INACTIVE, SUSPENDED)']
+
+  Note: 'Master Party entity supertype (BIAN Party Master)'
+}
+
+Table party_individual {
+  md_created_at_utc timestamp [not null, default: `now()`, note: 'Record creation timestamp UTC']
+  md_updated_at_utc timestamp [not null, default: `now()`, note: 'Record modification timestamp UTC']
+  md_valid_from_utc timestamp [not null, default: `now()`, note: 'SCD Type 2 effective start timestamp UTC']
+  md_valid_to_utc timestamp [not null, default: '9999-12-31 23:59:59', note: 'SCD Type 2 effective end timestamp UTC']
+  md_is_active boolean [not null, default: true, note: 'SCD Type 2 active status flag']
+
+  party_individual_id uuid [pk, default: `gen_random_uuid()`, note: 'Surrogate primary key']
+  party_id uuid [not null, ref: > party.party_id, note: 'Foreign key to party supertype']
+  first_name varchar(100) [not null, note: 'First name']
+  last_name varchar(100) [not null, note: 'Last name']
+  date_of_birth date [not null, note: 'Date of birth']
+  gender varchar(20) [note: 'Gender identity']
+  citizenship_country_code varchar(2) [not null, ref: > ref_country.country_code, note: 'Citizenship country code']
+  tax_residence_country_code varchar(2) [not null, ref: > ref_country.country_code, note: 'Primary tax residence country code']
+
+  Note: 'Individual natural person party subtype'
+}
+
+Table party_organization {
+  md_created_at_utc timestamp [not null, default: `now()`, note: 'Record creation timestamp UTC']
+  md_updated_at_utc timestamp [not null, default: `now()`, note: 'Record modification timestamp UTC']
+  md_valid_from_utc timestamp [not null, default: `now()`, note: 'SCD Type 2 effective start timestamp UTC']
+  md_valid_to_utc timestamp [not null, default: '9999-12-31 23:59:59', note: 'SCD Type 2 effective end timestamp UTC']
+  md_is_active boolean [not null, default: true, note: 'SCD Type 2 active status flag']
+
+  party_organization_id uuid [pk, default: `gen_random_uuid()`, note: 'Surrogate primary key']
+  party_id uuid [not null, ref: > party.party_id, note: 'Foreign key to party supertype']
+  legal_name varchar(255) [not null, note: 'Registered legal organization name']
+  trade_name varchar(255) [note: 'Commercial or DBA trade name']
+  registration_number varchar(50) [not null, note: 'Corporate registration / tax number']
+  incorporation_date date [not null, note: 'Date of legal incorporation']
+  incorporation_country_code varchar(2) [not null, ref: > ref_country.country_code, note: 'Country of incorporation']
+  nace_code varchar(10) [not null, ref: > ref_nace_industry.nace_code, note: 'Industry classification code']
+  legal_form varchar(50) [not null, note: 'Legal corporate structure (LLC, AG, Corp)']
+
+  Note: 'Organization legal entity party subtype'
+}
+
+Table party_role_customer {
+  md_created_at_utc timestamp [not null, default: `now()`, note: 'Record creation timestamp UTC']
+  md_updated_at_utc timestamp [not null, default: `now()`, note: 'Record modification timestamp UTC']
+  md_valid_from_utc timestamp [not null, default: `now()`, note: 'SCD Type 2 effective start timestamp UTC']
+  md_valid_to_utc timestamp [not null, default: '9999-12-31 23:59:59', note: 'SCD Type 2 effective end timestamp UTC']
+  md_is_active boolean [not null, default: true, note: 'SCD Type 2 active status flag']
+
+  party_role_customer_id uuid [pk, default: `gen_random_uuid()`, note: 'Surrogate primary key']
+  customer_number varchar(50) [not null, note: 'Business key: Customer Account Number']
+  party_id uuid [not null, ref: > party.party_id, note: 'Foreign key to party entity']
+  customer_segment varchar(30) [not null, note: 'Segment (RETAIL, SME, CORPORATE, WEALTH)']
+  onboarding_date date [not null, note: 'Customer onboarding date']
+  kyc_status varchar(20) [not null, default: 'PENDING', note: 'KYC status (VERIFIED, PENDING, EXPIRED)']
+  kyc_last_review_date date [note: 'Date of last KYC review']
+  aml_risk_rating varchar(20) [not null, default: 'LOW', note: 'AML risk classification (LOW, MEDIUM, HIGH)']
+
+  Note: 'Customer role context assigned to a party'
+}
+
+Table party_address {
+  md_created_at_utc timestamp [not null, default: `now()`, note: 'Record creation timestamp UTC']
+  md_updated_at_utc timestamp [not null, default: `now()`, note: 'Record modification timestamp UTC']
+  md_valid_from_utc timestamp [not null, default: `now()`, note: 'SCD Type 2 effective start timestamp UTC']
+  md_valid_to_utc timestamp [not null, default: '9999-12-31 23:59:59', note: 'SCD Type 2 effective end timestamp UTC']
+  md_is_active boolean [not null, default: true, note: 'SCD Type 2 active status flag']
+
+  party_address_id uuid [pk, default: `gen_random_uuid()`, note: 'Surrogate primary key']
+  party_id uuid [not null, ref: > party.party_id, note: 'Foreign key to party entity']
+  address_type varchar(30) [not null, note: 'Address classification (RESIDENTIAL, REGISTERED, MAILING)']
+  street_address varchar(255) [not null, note: 'Street name and line details']
+  building_number varchar(20) [note: 'Building / house number']
+  city varchar(100) [not null, note: 'City / Municipality']
+  postal_code varchar(20) [not null, note: 'Postal / ZIP code']
+  country_code varchar(2) [not null, ref: > ref_country.country_code, note: 'Country reference code']
+  is_primary boolean [not null, default: true, note: 'Primary address indicator']
+
+  Note: 'Physical and registered address records for parties'
+}
+
+Table party_identification {
+  md_created_at_utc timestamp [not null, default: `now()`, note: 'Record creation timestamp UTC']
+  md_updated_at_utc timestamp [not null, default: `now()`, note: 'Record modification timestamp UTC']
+  md_valid_from_utc timestamp [not null, default: `now()`, note: 'SCD Type 2 effective start timestamp UTC']
+  md_valid_to_utc timestamp [not null, default: '9999-12-31 23:59:59', note: 'SCD Type 2 effective end timestamp UTC']
+  md_is_active boolean [not null, default: true, note: 'SCD Type 2 active status flag']
+
+  party_identification_id uuid [pk, default: `gen_random_uuid()`, note: 'Surrogate primary key']
+  party_id uuid [not null, ref: > party.party_id, note: 'Foreign key to party entity']
+  id_type varchar(30) [not null, note: 'Identification document type (PASSPORT, NATIONAL_ID, TAX_ID, LEI)']
+  id_number varchar(100) [not null, note: 'Official identification document number']
+  issuing_country_code varchar(2) [not null, ref: > ref_country.country_code, note: 'Issuing country code']
+  issue_date date [not null, note: 'Document issuance date']
+  expiry_date date [note: 'Document expiration date']
+  verification_status varchar(20) [not null, default: 'VERIFIED', note: 'Status (VERIFIED, UNVERIFIED)']
+
+  Note: 'Official identification and tax documents for parties'
+}
+
+// ----------------------------------------------------------------------------
+// DEPOSIT DATA PRODUCT (deposit)
+// ----------------------------------------------------------------------------
+
+Table deposit_account {
+  md_created_at_utc timestamp [not null, default: `now()`, note: 'Record creation timestamp UTC']
+  md_updated_at_utc timestamp [not null, default: `now()`, note: 'Record modification timestamp UTC']
+  md_valid_from_utc timestamp [not null, default: `now()`, note: 'SCD Type 2 effective start timestamp UTC']
+  md_valid_to_utc timestamp [not null, default: '9999-12-31 23:59:59', note: 'SCD Type 2 effective end timestamp UTC']
+  md_is_active boolean [not null, default: true, note: 'SCD Type 2 active status flag']
+
+  deposit_account_id uuid [pk, default: `gen_random_uuid()`, note: 'Surrogate primary key']
+  account_number varchar(50) [not null, note: 'Business key: IBAN / Account Number']
+  customer_id uuid [not null, ref: > party_role_customer.party_role_customer_id, note: 'Customer relationship owner']
+  currency_code varchar(3) [not null, ref: > ref_currency.currency_code, note: 'Base account currency']
+  account_type varchar(30) [not null, note: 'Product type (SAVINGS, CHECKING, TERM_DEPOSIT)']
+  account_status varchar(20) [not null, default: 'ACTIVE', note: 'Account status (ACTIVE, DORMANT, FROZEN, CLOSED)']
+  opened_date date [not null, note: 'Account opening date']
+  closed_date date [note: 'Account closing date']
+
+  Note: 'Deposit account core entity (BIAN Deposit Account)'
+}
+
+Table deposit_balance {
+  md_created_at_utc timestamp [not null, default: `now()`, note: 'Record creation timestamp UTC']
+  md_updated_at_utc timestamp [not null, default: `now()`, note: 'Record modification timestamp UTC']
+  md_valid_from_utc timestamp [not null, default: `now()`, note: 'SCD Type 2 effective start timestamp UTC']
+  md_valid_to_utc timestamp [not null, default: '9999-12-31 23:59:59', note: 'SCD Type 2 effective end timestamp UTC']
+  md_is_active boolean [not null, default: true, note: 'SCD Type 2 active status flag']
+
+  deposit_balance_id uuid [pk, default: `gen_random_uuid()`, note: 'Surrogate primary key']
+  deposit_account_id uuid [not null, ref: > deposit_account.deposit_account_id, note: 'Parent deposit account']
+  currency_code varchar(3) [not null, ref: > ref_currency.currency_code, note: 'Balance currency code']
+  current_balance numeric(18,4) [not null, default: 0.0000, note: 'Real-time book balance']
+  available_balance numeric(18,4) [not null, default: 0.0000, note: 'Funds available for withdrawal']
+  ledger_balance numeric(18,4) [not null, default: 0.0000, note: 'End of day settled ledger balance']
+  accrued_interest numeric(18,4) [not null, default: 0.0000, note: 'Unposted accrued interest balance']
+  as_of_timestamp timestamp [not null, default: `now()`, note: 'Snapshot timestamp']
+
+  Note: 'Deposit account balance snapshot'
+}
+
+Table deposit_transaction {
+  md_created_at_utc timestamp [not null, default: `now()`, note: 'Record creation timestamp UTC']
+  md_updated_at_utc timestamp [not null, default: `now()`, note: 'Record modification timestamp UTC']
+  md_valid_from_utc timestamp [not null, default: `now()`, note: 'SCD Type 2 effective start timestamp UTC']
+  md_valid_to_utc timestamp [not null, default: '9999-12-31 23:59:59', note: 'SCD Type 2 effective end timestamp UTC']
+  md_is_active boolean [not null, default: true, note: 'SCD Type 2 active status flag']
+
+  deposit_transaction_id uuid [pk, default: `gen_random_uuid()`, note: 'Surrogate primary key']
+  transaction_reference varchar(100) [not null, note: 'Business key: Unique transaction reference']
+  deposit_account_id uuid [not null, ref: > deposit_account.deposit_account_id, note: 'Target deposit account']
+  currency_code varchar(3) [not null, ref: > ref_currency.currency_code, note: 'Transaction currency']
+  transaction_type varchar(30) [not null, note: 'Type (DEPOSIT, WITHDRAWAL, TRANSFER_IN, TRANSFER_OUT, INTEREST_CREDIT, FEE)']
+  amount numeric(18,4) [not null, note: 'Transaction amount (positive value)']
+  booking_date timestamp [not null, note: 'Accounting ledger posting timestamp']
+  value_date date [not null, note: 'Interest calculation value date']
+  counterparty_account varchar(100) [note: 'External or internal counterparty IBAN']
+  transaction_status varchar(20) [not null, default: 'BOOKED', note: 'Status (BOOKED, PENDING, REVERSED)']
+
+  Note: 'Deposit transaction journal records'
+}
+
+Table deposit_interest_term {
+  md_created_at_utc timestamp [not null, default: `now()`, note: 'Record creation timestamp UTC']
+  md_updated_at_utc timestamp [not null, default: `now()`, note: 'Record modification timestamp UTC']
+  md_valid_from_utc timestamp [not null, default: `now()`, note: 'SCD Type 2 effective start timestamp UTC']
+  md_valid_to_utc timestamp [not null, default: '9999-12-31 23:59:59', note: 'SCD Type 2 effective end timestamp UTC']
+  md_is_active boolean [not null, default: true, note: 'SCD Type 2 active status flag']
+
+  deposit_interest_term_id uuid [pk, default: `gen_random_uuid()`, note: 'Surrogate primary key']
+  deposit_account_id uuid [not null, ref: > deposit_account.deposit_account_id, note: 'Parent deposit account']
+  interest_rate numeric(8,5) [not null, note: 'Annual interest rate percentage (e.g., 0.02500 for 2.5%)']
+  rate_type varchar(20) [not null, default: 'VARIABLE', note: 'Interest rate behavior (FIXED, VARIABLE)']
+  accrual_frequency varchar(20) [not null, default: 'DAILY', note: 'Frequency (DAILY, MONTHLY, ANNUALLY)']
+  calculation_basis varchar(20) [not null, default: 'ACT/360', note: 'Day count convention (ACT/360, ACT/365, 30/360)']
+  effective_date date [not null, note: 'Rate term effective start date']
+  expiry_date date [note: 'Rate term expiration date']
+
+  Note: 'Deposit interest terms and rate agreements'
+}
+
+Table deposit_overdraft_facility {
+  md_created_at_utc timestamp [not null, default: `now()`, note: 'Record creation timestamp UTC']
+  md_updated_at_utc timestamp [not null, default: `now()`, note: 'Record modification timestamp UTC']
+  md_valid_from_utc timestamp [not null, default: `now()`, note: 'SCD Type 2 effective start timestamp UTC']
+  md_valid_to_utc timestamp [not null, default: '9999-12-31 23:59:59', note: 'SCD Type 2 effective end timestamp UTC']
+  md_is_active boolean [not null, default: true, note: 'SCD Type 2 active status flag']
+
+  deposit_overdraft_facility_id uuid [pk, default: `gen_random_uuid()`, note: 'Surrogate primary key']
+  deposit_account_id uuid [not null, ref: > deposit_account.deposit_account_id, note: 'Associated deposit account']
+  approved_limit numeric(18,4) [not null, default: 0.0000, note: 'Approved credit overdraft limit']
+  interest_rate_penalty numeric(8,5) [not null, note: 'Penalty interest rate on overdrawn amounts']
+  facility_status varchar(20) [not null, default: 'ACTIVE', note: 'Facility status (ACTIVE, SUSPENDED, CANCELLED)']
+  granted_date date [not null, note: 'Facility approval date']
+  expiry_date date [note: 'Facility expiration date']
+
+  Note: 'Approved overdraft facility bounds for deposit accounts'
+}
+
+// ----------------------------------------------------------------------------
+// LOAN DATA PRODUCT (loan)
+// ----------------------------------------------------------------------------
+
+Table loan_application {
+  md_created_at_utc timestamp [not null, default: `now()`, note: 'Record creation timestamp UTC']
+  md_updated_at_utc timestamp [not null, default: `now()`, note: 'Record modification timestamp UTC']
+  md_valid_from_utc timestamp [not null, default: `now()`, note: 'SCD Type 2 effective start timestamp UTC']
+  md_valid_to_utc timestamp [not null, default: '9999-12-31 23:59:59', note: 'SCD Type 2 effective end timestamp UTC']
+  md_is_active boolean [not null, default: true, note: 'SCD Type 2 active status flag']
+
+  loan_application_id uuid [pk, default: `gen_random_uuid()`, note: 'Surrogate primary key']
+  application_number varchar(50) [not null, note: 'Business key: Loan application reference']
+  customer_id uuid [not null, ref: > party_role_customer.party_role_customer_id, note: 'Applicant customer']
+  currency_code varchar(3) [not null, ref: > ref_currency.currency_code, note: 'Requested currency']
+  requested_amount numeric(18,4) [not null, note: 'Requested principal loan amount']
+  application_status varchar(30) [not null, default: 'SUBMITTED', note: 'Status (SUBMITTED, UNDERWRITING, APPROVED, REJECTED)']
+  credit_score integer [note: 'Underwriting credit score snapshot']
+  submission_date date [not null, note: 'Application submission date']
+  decision_date date [note: 'Final credit decision date']
+
+  Note: 'Loan origination application lifecycle'
+}
+
+Table loan_agreement {
+  md_created_at_utc timestamp [not null, default: `now()`, note: 'Record creation timestamp UTC']
+  md_updated_at_utc timestamp [not null, default: `now()`, note: 'Record modification timestamp UTC']
+  md_valid_from_utc timestamp [not null, default: `now()`, note: 'SCD Type 2 effective start timestamp UTC']
+  md_valid_to_utc timestamp [not null, default: '9999-12-31 23:59:59', note: 'SCD Type 2 effective end timestamp UTC']
+  md_is_active boolean [not null, default: true, note: 'SCD Type 2 active status flag']
+
+  loan_agreement_id uuid [pk, default: `gen_random_uuid()`, note: 'Surrogate primary key']
+  agreement_number varchar(50) [not null, note: 'Business key: Loan contract agreement number']
+  loan_application_id uuid [not null, ref: > loan_application.loan_application_id, note: 'Originating loan application']
+  customer_id uuid [not null, ref: > party_role_customer.party_role_customer_id, note: 'Borrower customer']
+  currency_code varchar(3) [not null, ref: > ref_currency.currency_code, note: 'Loan currency code']
+  principal_amount numeric(18,4) [not null, note: 'Approved principal amount']
+  interest_rate numeric(8,5) [not null, note: 'Annual contractual interest rate']
+  term_months integer [not null, note: 'Loan tenor in months']
+  agreement_status varchar(20) [not null, default: 'ACTIVE', note: 'Status (ACTIVE, DEFAULTED, PAID_OFF)']
+  is_npl boolean [not null, default: false, note: 'Non-Performing Loan (NPL) default indicator']
+  disbursement_date date [not null, note: 'Initial loan disbursement date']
+  maturity_date date [not null, note: 'Scheduled loan maturity date']
+
+  Note: 'Core contractual loan agreement (FIBO Loan Agreement)'
+}
+
+Table loan_repayment_schedule {
+  md_created_at_utc timestamp [not null, default: `now()`, note: 'Record creation timestamp UTC']
+  md_updated_at_utc timestamp [not null, default: `now()`, note: 'Record modification timestamp UTC']
+  md_valid_from_utc timestamp [not null, default: `now()`, note: 'SCD Type 2 effective start timestamp UTC']
+  md_valid_to_utc timestamp [not null, default: '9999-12-31 23:59:59', note: 'SCD Type 2 effective end timestamp UTC']
+  md_is_active boolean [not null, default: true, note: 'SCD Type 2 active status flag']
+
+  loan_repayment_schedule_id uuid [pk, default: `gen_random_uuid()`, note: 'Surrogate primary key']
+  loan_agreement_id uuid [not null, ref: > loan_agreement.loan_agreement_id, note: 'Parent loan agreement']
+  installment_number integer [not null, note: 'Sequential installment schedule number']
+  due_date date [not null, note: 'Payment due date']
+  principal_due numeric(18,4) [not null, note: 'Scheduled principal payment component']
+  interest_due numeric(18,4) [not null, note: 'Scheduled interest payment component']
+  total_due numeric(18,4) [not null, note: 'Total installment payment due']
+  installment_status varchar(20) [not null, default: 'PENDING', note: 'Status (PENDING, PAID, OVERDUE, PARTIALLY_PAID)']
+  paid_amount numeric(18,4) [not null, default: 0.0000, note: 'Cumulative amount paid towards installment']
+  paid_date date [note: 'Actual date payment was settled']
+
+  Note: 'Amortization repayment schedule installments'
+}
+
+Table loan_disbursement {
+  md_created_at_utc timestamp [not null, default: `now()`, note: 'Record creation timestamp UTC']
+  md_updated_at_utc timestamp [not null, default: `now()`, note: 'Record modification timestamp UTC']
+  md_valid_from_utc timestamp [not null, default: `now()`, note: 'SCD Type 2 effective start timestamp UTC']
+  md_valid_to_utc timestamp [not null, default: '9999-12-31 23:59:59', note: 'SCD Type 2 effective end timestamp UTC']
+  md_is_active boolean [not null, default: true, note: 'SCD Type 2 active status flag']
+
+  loan_disbursement_id uuid [pk, default: `gen_random_uuid()`, note: 'Surrogate primary key']
+  disbursement_reference varchar(100) [not null, note: 'Business key: Unique disbursement reference']
+  loan_agreement_id uuid [not null, ref: > loan_agreement.loan_agreement_id, note: 'Associated loan agreement']
+  currency_code varchar(3) [not null, ref: > ref_currency.currency_code, note: 'Disbursement currency']
+  disbursed_amount numeric(18,4) [not null, note: 'Disbursed principal amount']
+  disbursement_date timestamp [not null, note: 'Execution release timestamp UTC']
+  target_account_number varchar(100) [not null, note: 'Beneficiary destination account IBAN']
+  disbursement_status varchar(20) [not null, default: 'COMPLETED', note: 'Status (COMPLETED, PENDING, FAILED)']
+
+  Note: 'Loan principal disbursement events'
+}
+
+Table loan_collateral {
+  md_created_at_utc timestamp [not null, default: `now()`, note: 'Record creation timestamp UTC']
+  md_updated_at_utc timestamp [not null, default: `now()`, note: 'Record modification timestamp UTC']
+  md_valid_from_utc timestamp [not null, default: `now()`, note: 'SCD Type 2 effective start timestamp UTC']
+  md_valid_to_utc timestamp [not null, default: '9999-12-31 23:59:59', note: 'SCD Type 2 effective end timestamp UTC']
+  md_is_active boolean [not null, default: true, note: 'SCD Type 2 active status flag']
+
+  loan_collateral_id uuid [pk, default: `gen_random_uuid()`, note: 'Surrogate primary key']
+  loan_agreement_id uuid [not null, ref: > loan_agreement.loan_agreement_id, note: 'Secured loan agreement']
+  collateral_type varchar(30) [not null, note: 'Type (REAL_ESTATE, VEHICLE, SECURITIES, CASH_DEPOSIT)']
+  currency_code varchar(3) [not null, ref: > ref_currency.currency_code, note: 'Valuation currency']
+  estimated_value numeric(18,4) [not null, note: 'Appraised collateral market value']
+  ltv_ratio numeric(8,5) [not null, note: 'Loan-to-Value ratio (e.g., 0.75000 for 75%)']
+  valuation_date date [not null, note: 'Date of last appraisal valuation']
+  collateral_status varchar(20) [not null, default: 'PLEDGED', note: 'Status (PLEDGED, RELEASED, LIQUIDATED)']
+
+  Note: 'Pledged assets securing loan contracts'
+}

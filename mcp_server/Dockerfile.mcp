@@ -1,0 +1,28 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Copy requirements and install dependencies
+COPY catalog/requirements.exporter.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt mcp fastmcp uvicorn starlette
+
+# Copy application source code
+COPY . .
+
+# Run as a non-root user -- this container has no reason to hold root
+# privileges at runtime; it only serves the FastMCP SSE endpoint and connects to
+# Postgres/Neo4j over their native drivers (mcp_server/financial_data_mcp_server.py),
+# not by shelling out to other containers.
+RUN useradd --create-home --uid 1000 --shell /usr/sbin/nologin appuser \
+    && chown -R appuser:appuser /app
+USER appuser
+
+# Expose FastMCP SSE HTTP port 8001
+EXPOSE 8001
+
+# Default environment variables
+ENV MCP_TRANSPORT=sse
+ENV MCP_PORT=8001
+
+# Run FastMCP Server
+CMD ["python3", "-m", "mcp_server.financial_data_mcp_server"]

@@ -1,0 +1,62 @@
+version: "1.0.0"
+kind: DataContract
+id: urn:datacontract:financial_platform:loan_credit_risk_domain
+dataset: Loan_Credit_Risk_Data_Product
+name: Loan & Credit Risk Data Product Contract
+status: active
+domain: Loan & Credit Risk Domain
+owner:
+  name: Credit Risk & Capital Management Data Team
+  email: credit-risk-team@financial-platform.com
+
+sla:
+  freshness: "1 hour"
+  availability: "99.9%"
+  retention: "10 years (Basel III/IV Compliance)"
+  data_quality_score: ">= 99.0%"
+
+models:
+  financial.loan_agreement:
+    description: BIAN Loan Product Contract & Principal
+    type: table
+    columns:
+      loan_agreement_id:
+        type: UUID
+        primary_key: true
+        nullable: false
+      agreement_reference:
+        type: VARCHAR
+        nullable: false
+      principal_amount:
+        type: NUMERIC
+        nullable: false
+      interest_rate:
+        type: NUMERIC
+        nullable: false
+      agreement_status:
+        type: VARCHAR
+        nullable: false
+        allowed_values: ["ACTIVE", "DEFAULT", "CLOSED", "RESTRUCTURED"]
+
+  financial.loan_collateral:
+    description: Pledged Collateral Asset & Valuation
+    type: table
+    columns:
+      loan_collateral_id:
+        type: UUID
+        primary_key: true
+        nullable: false
+      collateral_type:
+        type: VARCHAR
+        nullable: false
+      valuation_amount:
+        type: NUMERIC
+        nullable: false
+
+quality:
+  - type: rowCountGreaterThan
+    value: 1000
+  - type: columnNoNulls
+    column: loan_agreement_id
+  - type: columnNoNulls
+    column: principal_amount

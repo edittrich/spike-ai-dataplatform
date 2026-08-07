@@ -1,0 +1,76 @@
+cubes:
+  - name: loan_repayment_schedule
+    sql_table: financial.loan_repayment_schedule
+    title: "Loan Repayment Schedule Data Product"
+    description: "Semantic Cube for Loan repayment schedule installments, collection performance, and overdue payment default tracking."
+
+    joins:
+      - name: loan_agreement
+        sql: "{CUBE}.loan_agreement_id = {loan_agreement.loan_agreement_id}"
+        relationship: belongs_to
+
+    measures:
+      - name: total_installments
+        type: count
+        title: "Total Scheduled Installments Count"
+
+      - name: total_scheduled_due
+        sql: total_due
+        type: sum
+        format: currency
+        title: "Total Scheduled Amortization Due"
+
+      - name: total_collected_amount
+        sql: paid_amount
+        type: sum
+        format: currency
+        title: "Total Amortization Principal/Interest Collected"
+
+      - name: overdue_installment_count
+        type: count
+        filters:
+          - sql: "{CUBE}.installment_status = 'OVERDUE' AND {CUBE}.md_is_active = TRUE"
+        title: "Overdue Installment Count"
+
+      - name: overdue_amount_exposure
+        sql: "CASE WHEN {CUBE}.installment_status = 'OVERDUE' THEN ({CUBE}.total_due - {CUBE}.paid_amount) ELSE 0 END"
+        type: sum
+        format: currency
+        title: "Total Overdue Default Exposure Amount"
+
+      - name: collection_fulfillment_rate
+        type: number
+        sql: "100.0 * {total_collected_amount} / NULLIF({total_scheduled_due}, 0)"
+        format: percent
+        title: "Installment Collection Fulfillment Rate (%)"
+
+    dimensions:
+      - name: loan_repayment_schedule_id
+        sql: loan_repayment_schedule_id
+        type: string
+        primary_key: true
+
+      - name: installment_number
+        sql: installment_number
+        type: number
+        title: "Sequential Installment Number"
+
+      - name: installment_status
+        sql: installment_status
+        type: string
+        title: "Installment Status (Pending, Paid, Overdue, Partially Paid)"
+
+      - name: due_date
+        sql: due_date
+        type: time
+        title: "Scheduled Due Date"
+
+      - name: paid_date
+        sql: paid_date
+        type: time
+        title: "Actual Settlement Paid Date"
+
+      - name: md_is_active
+        sql: md_is_active
+        type: boolean
+        title: "SCD2 Active Version Flag"

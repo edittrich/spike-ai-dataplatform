@@ -1,0 +1,69 @@
+cubes:
+  - name: deposit_balance
+    sql_table: financial.deposit_balance
+    title: "Deposit Balance Data Product"
+    description: "Semantic Cube for Real-time book, available, and ledger balances."
+
+    joins:
+      - name: deposit_account
+        sql: "{CUBE}.deposit_account_id = {deposit_account.deposit_account_id}"
+        relationship: belongs_to
+
+    measures:
+      - name: total_current_balance
+        sql: current_balance
+        type: sum
+        format: currency
+
+      - name: total_available_balance
+        sql: available_balance
+        type: sum
+        format: currency
+
+      - name: total_ledger_balance
+        sql: ledger_balance
+        type: sum
+        format: currency
+
+      - name: total_accrued_interest
+        sql: accrued_interest
+        type: sum
+        format: currency
+
+    dimensions:
+      - name: deposit_balance_id
+        sql: deposit_balance_id
+        type: string
+        primary_key: true
+
+      - name: deposit_account_id
+        sql: deposit_account_id
+        type: string
+
+      - name: currency_code
+        sql: currency_code
+        type: string
+
+      - name: available_balance
+        sql: available_balance
+        type: number
+
+      - name: current_balance
+        sql: current_balance
+        type: number
+
+      - name: ledger_balance
+        sql: ledger_balance
+        type: number
+
+      - name: accrued_interest
+        sql: accrued_interest
+        type: number
+
+      - name: as_of_timestamp
+        sql: as_of_timestamp
+        type: time
+
+      - name: md_is_active
+        sql: md_is_active
+        type: boolean

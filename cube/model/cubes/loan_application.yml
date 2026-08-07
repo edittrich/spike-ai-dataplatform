@@ -1,0 +1,66 @@
+cubes:
+  - name: loan_application
+    sql_table: financial.loan_application
+    title: "Loan Application Data Product"
+    description: "Semantic Cube for Loan Origination Applications and Underwriting Decisions."
+
+    joins:
+      - name: party_role_customer
+        sql: "{CUBE}.customer_id = {party_role_customer.party_role_customer_id}"
+        relationship: belongs_to
+
+    measures:
+      - name: total_applications
+        type: count
+        title: "Total Loan Applications Count"
+
+      - name: approved_application_count
+        type: count
+        filters:
+          - sql: "{CUBE}.application_status = 'APPROVED'"
+        title: "Approved Loan Application Count"
+
+      - name: total_requested_principal
+        sql: requested_amount
+        type: sum
+        format: currency
+        title: "Total Requested Loan Principal"
+
+      - name: average_credit_score
+        sql: credit_score
+        type: avg
+        title: "Average Underwriting Credit Score"
+
+    dimensions:
+      - name: loan_application_id
+        sql: loan_application_id
+        type: string
+        primary_key: true
+
+      - name: application_number
+        sql: application_number
+        type: string
+
+      - name: customer_id
+        sql: customer_id
+        type: string
+
+      - name: application_status
+        sql: application_status
+        type: string
+
+      - name: credit_score
+        sql: credit_score
+        type: number
+
+      - name: currency_code
+        sql: currency_code
+        type: string
+
+      - name: submission_date
+        sql: submission_date
+        type: time
+
+      - name: md_is_active
+        sql: md_is_active
+        type: boolean

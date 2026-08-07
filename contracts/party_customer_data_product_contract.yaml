@@ -1,0 +1,72 @@
+version: "1.0.0"
+kind: DataContract
+id: urn:datacontract:financial_platform:party_customer_domain
+dataset: Party_Customer_Data_Product
+name: Party & Customer Data Product Contract
+status: active
+domain: Party & Customer Domain
+owner:
+  name: Master Data Management Governance Team
+  email: mdm-team@financial-platform.com
+
+sla:
+  freshness: "15 minutes"
+  availability: "99.9%"
+  retention: "7 years (SCD Type 2)"
+  data_quality_score: ">= 99.0%"
+
+models:
+  financial.party:
+    description: Core BIAN/FIBO Master Party Entity
+    type: table
+    columns:
+      party_id:
+        type: UUID
+        primary_key: true
+        nullable: false
+        description: Master Party Surrogate UUID
+      party_type:
+        type: VARCHAR
+        nullable: false
+        allowed_values: ["INDIVIDUAL", "ORGANIZATION"]
+      md_is_active:
+        type: BOOLEAN
+        nullable: false
+        description: SCD Type 2 Active Indicator
+
+  financial.party_individual:
+    description: Natural Person Demographic Metadata
+    type: table
+    columns:
+      first_name:
+        type: VARCHAR
+        nullable: false
+        pii_classification: "PersonalData.Personal"
+      last_name:
+        type: VARCHAR
+        nullable: false
+        pii_classification: "PersonalData.Personal"
+      date_of_birth:
+        type: DATE
+        nullable: false
+        pii_classification: "PersonalData.SpecialCategory"
+
+  financial.party_organization:
+    description: Legal Entity Corporate Metadata
+    type: table
+    columns:
+      legal_name:
+        type: VARCHAR
+        nullable: false
+      tax_identifier:
+        type: VARCHAR
+        nullable: false
+        pii_classification: "PersonalData.SpecialCategory"
+
+quality:
+  - type: rowCountGreaterThan
+    value: 1000
+  - type: columnNoNulls
+    column: party_id
+  - type: columnNoNulls
+    column: party_type

@@ -1,0 +1,56 @@
+cubes:
+  - name: party_organization
+    sql_table: financial.party_organization
+    title: "Party Organization Subtype Data Product"
+    description: "Corporate entity organization details (Legal Name, Reg Number, NACE Code)."
+
+    joins:
+      - name: party
+        sql: "{CUBE}.party_id = {party.party_id}"
+        relationship: belongs_to
+
+    measures:
+      - name: total_organizations
+        type: count
+
+    dimensions:
+      - name: party_organization_id
+        sql: party_organization_id
+        type: string
+        primary_key: true
+
+      - name: party_id
+        sql: party_id
+        type: string
+
+      - name: legal_name
+        sql: legal_name
+        type: string
+
+      - name: trade_name
+        sql: trade_name
+        type: string
+
+      - name: registration_number
+        sql: registration_number
+        type: string
+
+      - name: incorporation_date
+        sql: incorporation_date
+        type: time
+
+      - name: incorporation_country_code
+        sql: incorporation_country_code
+        type: string
+
+      - name: nace_code
+        sql: nace_code
+        type: string
+
+      - name: legal_form
+        sql: legal_form
+        type: string
+
+      - name: md_is_active
+        sql: md_is_active
+        type: boolean

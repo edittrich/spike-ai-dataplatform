@@ -1,0 +1,292 @@
+services:
+  # ===========================================================================
+  # 1. Enterprise Catalog & Metadata Governance (OpenMetadata 1.3.1)
+  # ===========================================================================
+  openmetadata_db:
+    image: mysql:8.0.35
+    container_name: openmetadata_mysql
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 768m
+    environment:
+      - MYSQL_ROOT_PASSWORD=${OPENMETADATA_MYSQL_PASSWORD}
+      - MYSQL_DATABASE=openmetadata_db
+      - MYSQL_USER=openmetadata_user
+      - MYSQL_PASSWORD=${OPENMETADATA_MYSQL_PASSWORD}
+    ports:
+      # Loopback-only: this port exists for local debugging (e.g. a host mysql
+      # client). openmetadata_server itself reaches this container over the
+      # default bridge network via the `openmetadata_db` DNS name, not this
+      # published port.
+      - "127.0.0.1:33060:3306"
+    volumes:
+      - ./catalog/mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  openmetadata_search:
+    image: opensearchproject/opensearch:2.11.0
+    container_name: openmetadata_search
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+    environment:
+      - cluster.name=openmetadata-cluster
+      - node.name=openmetadata-node
+      - discovery.type=single-node
+      - bootstrap.memory_lock=true
+      - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m"
+      - DISABLE_INSTALL_DEMO_CONFIG=true
+      - DISABLE_SECURITY_PLUGIN=true
+    ports:
+      # Loopback-only (see rationale above): openmetadata_server reaches this
+      # container over the default bridge network via `openmetadata_search`,
+      # not this published port. DISABLE_SECURITY_PLUGIN=true means anyone who
+      # can reach this port has unauthenticated read/write access to the
+      # catalog's search index, so it must not be published beyond localhost.
+      - "127.0.0.1:9200:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -f http://127.0.0.1:9200 >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  openmetadata_server:
+    image: openmetadata/server:1.3.1
+    container_name: openmetadata_server
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 1536m
+    ports:
+      - "8585:8585"
+    environment:
+      - DB_HOST=openmetadata_db
+      - DB_PORT=3306
+      - DB_DRIVER_CLASS=com.mysql.cj.jdbc.Driver
+      - DB_SCHEME=mysql
+      - DB_USER=openmetadata_user
+      # OpenMetadata's own config template (openmetadata.yaml) reads
+      # DB_USER_PASSWORD, not DB_PASSWORD -- the latter is silently ignored,
+      # which meant this service always fell back to the image's own
+      # hardcoded default password ("openmetadata_password") regardless of
+      # what was set here. DB_USER_NAME below is similarly unused by the
+      # template; kept only for backward compatibility with anything that
+      # might read it.
+      - DB_USER_PASSWORD=${OPENMETADATA_MYSQL_PASSWORD}
+      - DB_USER_NAME=openmetadata_db
+      - SEARCH_TYPE=opensearch
+      - ELASTICSEARCH_HOST=openmetadata_search
+      - ELASTICSEARCH_PORT=9200
+      - ELASTICSEARCH_SCHEME=http
+      - AUTHORIZER_CLASS_NAME=org.openmetadata.service.security.DefaultAuthorizer
+      - AUTHENTICATION_PROVIDER=basic
+    depends_on:
+      openmetadata_db:
+        condition: service_healthy
+      openmetadata_search:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8585/api/v1/system/version || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 90s
+
+  # ===========================================================================
+  # 2. Knowledge Graph Database (Neo4j 5 Community Edition)
+  # ===========================================================================
+  neo4j:
+    image: neo4j:5.18.0-community
+    container_name: neo4j_knowledge_graph
+    restart: always
+    network_mode: "host"
+    deploy:
+      resources:
+        limits:
+          memory: 1536m
+    environment:
+      - NEO4J_AUTH=${NEO4J_AUTH:-neo4j/${NEO4J_PASSWORD}}
+      # No script or MCP tool in this repo calls any APOC procedure (verified:
+      # zero `apoc.` references outside this file). The plugin was previously
+      # installed with EVERY procedure unrestricted, including apoc.load.json/
+      # apoc.load.jdbc-style procedures that can reach arbitrary URLs/files --
+      # an SSRF/exfiltration surface for no functional benefit. If a future
+      # script genuinely needs a specific APOC procedure, re-add the plugin with
+      # `NEO4J_dbms_security_procedures_allowlist=apoc.<specific.procedure>`
+      # naming only that procedure, not the `apoc.*` wildcard.
+      - NEO4J_dbms_memory_heap_initial__size=512m
+      - NEO4J_dbms_memory_heap_max__size=1024m
+    volumes:
+      - ./neo4j/data:/data
+      - ./neo4j/logs:/logs
+      - ./neo4j/import:/var/lib/neo4j/import
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:7474 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # ===========================================================================
+  # 3. Open-Source Semantic Layer (Cube.js Engine)
+  # ===========================================================================
+  cube:
+    image: cubejs/cube:v0.35
+    container_name: cube_semantic_layer
+    restart: always
+    network_mode: "host"
+    deploy:
+      resources:
+        limits:
+          memory: 768m
+    environment:
+      - CUBEJS_DB_TYPE=postgres
+      - CUBEJS_DB_HOST=${POSTGRES_HOST:-127.0.0.1}
+      - CUBEJS_DB_PORT=54322
+      - CUBEJS_DB_NAME=${POSTGRES_DB:-postgres}
+      - CUBEJS_DB_USER=${POSTGRES_USER:-postgres}
+      - CUBEJS_DB_PASS=${POSTGRES_PASSWORD}
+      - CUBEJS_DB_SCHEMA=financial
+      - CUBEJS_PORT=4000
+      # No CUBEJS_SQL_PORT: the Postgres-wire SQL API it would open has no
+      # equivalent to cube.js's checkAuth (there's no CUBEJS_SQL_USER/
+      # CUBEJS_SQL_PASSWORD configured), and nothing in this repo uses it --
+      # leaving it enabled meant an unauthenticated query interface to the
+      # semantic layer on a network_mode: host port.
+      # CUBEJS_DEV_MODE stays `true` -- tried flipping this to `false` as part
+      # of the same hardening pass that removed CUBEJS_SQL_PORT above, but
+      # production mode requires a separate Cube Store service for its
+      # cache/queue driver (CUBEJS_CUBESTORE_HOST/PORT), which isn't deployed
+      # in this compose file; every query fails without it. Disabling dev mode
+      # is still the right target -- it serves the Developer Playground and
+      # loosens some defaults on a network_mode: host port -- but it needs a
+      # Cube Store service added first, not a one-line flip. checkAuth in
+      # cube/cube.js itself is enforced in both modes (verified), so the
+      # authentication story this platform relies on is unaffected either way.
+      - CUBEJS_DEV_MODE=true
+      - CUBEJS_API_SECRET=${CUBEJS_API_SECRET}
+      - CUBEJS_TELEMETRY=false
+    volumes:
+      - ./cube/model:/cube/conf/model
+      - ./cube/cube.js:/cube/conf/cube.js
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:4000/readyz', r => process.exit(r.statusCode < 500 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # ===========================================================================
+  # 4. Live Prometheus & Grafana Observability Suite
+  # ===========================================================================
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: prometheus_metrics
+    restart: always
+    network_mode: "host"
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+    volumes:
+      - ./catalog/prometheus.yml:/etc/prometheus/prometheus.yml
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:9090/-/healthy || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: grafana_observability_dashboard
+    restart: always
+    network_mode: "host"
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - ./catalog/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources
+      - ./catalog/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards
+      - ./catalog/grafana/dashboards:/etc/grafana/dashboards
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:3000/api/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  telemetry_exporter:
+    build:
+      context: .
+      dockerfile: catalog/Dockerfile.exporter
+    container_name: llmops_telemetry_exporter
+    restart: always
+    network_mode: "host"
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/metrics', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ===========================================================================
+  # 5. FastMCP Agentic Protocol Sidecar Container Service
+  # ===========================================================================
+  mcp_sidecar:
+    build:
+      context: .
+      dockerfile: mcp_server/Dockerfile.mcp
+    container_name: mcp_agentic_sidecar
+    restart: always
+    network_mode: "host"
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import socket; socket.create_connection(('127.0.0.1', 8001), timeout=3).close()"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    environment:
+      - MCP_TRANSPORT=sse
+      - MCP_PORT=8001
+      - MCP_API_KEY=${MCP_API_KEY}
+      - MCP_HOST=${MCP_HOST:-127.0.0.1}
+      - POSTGRES_HOST=${POSTGRES_HOST:-127.0.0.1}
+      - POSTGRES_PORT=54322
+      # Connects as the least-privilege mcp_readonly role, not the postgres
+      # superuser -- see the comment above POSTGRES_USER in
+      # mcp_server/financial_data_mcp_server.py for why.
+      - MCP_PG_READONLY_USER=${MCP_PG_READONLY_USER:-mcp_readonly}
+      - MCP_PG_READONLY_PASSWORD=${MCP_PG_READONLY_PASSWORD}
+      - NEO4J_URI=${NEO4J_URI:-bolt://127.0.0.1:7687}
+      - NEO4J_USER=${NEO4J_USER:-neo4j}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD}
+      - CUBEJS_URL=${CUBEJS_URL:-http://127.0.0.1:4000/cubejs-api/v1/load}
+      - CUBEJS_API_SECRET=${CUBEJS_API_SECRET}
+      - OPENMETADATA_URL=${OPENMETADATA_URL:-http://127.0.0.1:8585/api/v1}
+      - OPENMETADATA_JWT_TOKEN=${OPENMETADATA_JWT_TOKEN}
+

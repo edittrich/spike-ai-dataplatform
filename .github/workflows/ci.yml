@@ -1,0 +1,70 @@
+name: Enterprise AI Data Platform CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    name: Build, Lint & Automated Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Platform Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install ruff pip-audit
+
+      - name: Verify Python Code Syntax
+        run: |
+          python -m py_compile scripts/*.py mcp_server/*.py
+
+      - name: Lint for Undefined Names & Syntax Errors (blocking)
+        # Narrow, high-signal rule set: undefined-name bugs (the exact class
+        # that let a missing `import os` ship silently -- py_compile only
+        # catches syntax errors, not NameErrors at call time) plus syntax
+        # checks. Deliberately excludes style-only rules (unused imports,
+        # f-strings without placeholders, etc.) so this can be a hard gate
+        # without needing an unrelated codebase-wide style cleanup first.
+        run: |
+          python -m ruff check --select E9,F821,F822,F823 scripts mcp_server
+
+      - name: Lint for Style Issues (informational)
+        # Broader ruff pyflakes rule set (unused imports/variables, etc.) --
+        # real findings, but not correctness bugs, so this reports without
+        # failing the build.
+        continue-on-error: true
+        run: |
+          python -m ruff check --select F scripts mcp_server
+
+      - name: Audit Dependencies for Known Vulnerabilities (informational)
+        # requirements.txt pins no upper bounds, so a new CVE against a
+        # transitively-resolved version shouldn't block unrelated PRs --
+        # this surfaces findings in the log without failing the build.
+        continue-on-error: true
+        run: |
+          python -m pip_audit -r requirements.txt
+
+      - name: Run AI Safety & Prompt Guardrails Test Suite
+        run: |
+          python3 scripts/ai_safety_guardrails.py
+
+      - name: Run LLMOps Telemetry & Observability Engine Test Suite
+        run: |
+          python3 scripts/llmops_telemetry.py
+
+      - name: Run FastMCP Tool Server Handler Tests
+        run: |
+          python3 -m mcp_server.test_mcp_server

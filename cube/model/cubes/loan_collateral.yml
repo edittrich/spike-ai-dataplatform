@@ -1,0 +1,64 @@
+cubes:
+  - name: loan_collateral
+    sql_table: financial.loan_collateral
+    title: "Loan Collateral Data Product"
+    description: "Semantic Cube for Pledged collateral security assets, appraised market valuations, and Loan-to-Value (LTV) risk coverage."
+
+    joins:
+      - name: loan_agreement
+        sql: "{CUBE}.loan_agreement_id = {loan_agreement.loan_agreement_id}"
+        relationship: belongs_to
+
+    measures:
+      - name: total_collateral_assets
+        type: count
+        title: "Total Pledged Asset Count"
+
+      - name: total_appraised_value
+        sql: estimated_value
+        type: sum
+        format: currency
+        title: "Total Appraised Collateral Market Value"
+
+      - name: average_ltv_ratio
+        sql: ltv_ratio * 100.0
+        type: avg
+        format: percent
+        title: "Weighted Average LTV Ratio (%)"
+
+      - name: high_ltv_risk_count
+        type: count
+        filters:
+          - sql: "{CUBE}.ltv_ratio > 0.80 AND {CUBE}.md_is_active = TRUE"
+        title: "High LTV Risk Collateral Count (>80% LTV)"
+
+    dimensions:
+      - name: loan_collateral_id
+        sql: loan_collateral_id
+        type: string
+        primary_key: true
+
+      - name: collateral_type
+        sql: collateral_type
+        type: string
+        title: "Collateral Type (Real Estate, Vehicle, Securities, Cash Deposit)"
+
+      - name: collateral_status
+        sql: collateral_status
+        type: string
+        title: "Collateral Status (Pledged, Released, Liquidated)"
+
+      - name: currency_code
+        sql: currency_code
+        type: string
+        title: "Valuation Currency"
+
+      - name: valuation_date
+        sql: valuation_date
+        type: time
+        title: "Appraisal Valuation Date"
+
+      - name: md_is_active
+        sql: md_is_active
+        type: boolean
+        title: "SCD2 Active Version Flag"

@@ -1,0 +1,69 @@
+# Python & Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+*.so
+
+# Environments & Keys
+.env
+.env.*
+!.env.example
+.venv
+env/
+venv/
+ENV/
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+secrets.*
+*.secret
+credentials*
+
+
+# Antigravity Brain Artifacts & Logs
+.system_generated/
+*.log
+*.tmp
+brain/
+
+# Node & Package Managers
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Database & Storage Caches
+.cube/
+.supabase/
+*.db
+*.sqlite
+
+# IDE & OS Files
+.DS_Store
+.vscode/
+.idea/
+
+# Docker Container Volumes & Storage Data
+catalog/mysql-data/
+catalog/mysql-data.bak-*/
+catalog/opensearch-data/
+neo4j/data/
+neo4j/import/
+neo4j/logs/
+neo4j/plugins/
+
+# Large Binaries & Archive Bundles
+*.tar.gz
+*.zip
+*.tgz
+*.7z
+*.rar
+tools/Protege-5.6.9*
+tools/*.tar.gz
+
+

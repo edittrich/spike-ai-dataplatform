@@ -1,0 +1,33 @@
+source:
+  type: postgres
+  serviceName: PostgreSQL_Financial_Platform
+  serviceConnection:
+    config:
+      type: Postgres
+      username: postgres
+      password: "${POSTGRES_PASSWORD}"
+      hostPort: 127.0.0.1:54322
+      database: postgres
+      scheme: postgresql+psycopg2
+  sourceConfig:
+    config:
+      type: DatabaseMetadata
+      databaseFilterPattern:
+        includes: [postgres]
+      schemaFilterPattern:
+        includes: [ref, financial]
+      tableFilterPattern:
+        includes: [.*]
+      includeTables: true
+      includeViews: true
+
+sink:
+  type: metadata-rest
+  config:
+    type: metadata-rest
+    openMetadataServerConnection:
+      type: OpenMetadata
+      hostPort: http://127.0.0.1:8585/api
+      authProvider: openmetadata
+      securityConfig:
+        jwtToken: ""

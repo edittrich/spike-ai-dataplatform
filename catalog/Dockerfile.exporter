@@ -1,0 +1,22 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Copy requirements and install dependencies
+COPY catalog/requirements.exporter.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application source code
+COPY . .
+
+# Run as a non-root user -- this container only serves an HTTP metrics
+# endpoint and has no reason to hold root privileges at runtime.
+RUN useradd --create-home --uid 1000 --shell /usr/sbin/nologin appuser \
+    && chown -R appuser:appuser /app
+USER appuser
+
+# Expose Prometheus OpenMetrics port 8000
+EXPOSE 8000
+
+# Run Telemetry Prometheus Exporter Server
+CMD ["python3", "scripts/telemetry_metrics_exporter_server.py"]

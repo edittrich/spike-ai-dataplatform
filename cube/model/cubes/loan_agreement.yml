@@ -1,0 +1,116 @@
+cubes:
+  - name: loan_agreement
+    sql_table: financial.loan_agreement
+    title: "Loan Agreement Data Product"
+    description: "Semantic Cube for Loan principal exposure, credit risk underwriting, and Non-Performing Loan (NPL) default rates."
+
+    joins:
+      - name: party_role_customer
+        sql: "{CUBE}.customer_id = {party_role_customer.party_role_customer_id}"
+        relationship: belongs_to
+
+      - name: loan_application
+        sql: "{CUBE}.loan_application_id = {loan_application.loan_application_id}"
+        relationship: belongs_to
+
+    measures:
+      - name: total_loan_contracts
+        type: count
+        title: "Total Loan Agreement Count"
+        filters:
+          - sql: "{CUBE}.md_is_active = TRUE"
+
+      - name: total_principal_exposure
+        sql: principal_amount
+        type: sum
+        format: currency
+        title: "Total Principal Amount Portfolio"
+        description: "Total principal exposure across active loan agreements."
+
+      - name: average_loan_amount
+        sql: principal_amount
+        type: avg
+        format: currency
+        title: "Average Loan Principal Size"
+
+      - name: average_interest_rate
+        sql: interest_rate * 100.0
+        type: avg
+        format: percent
+        title: "Weighted Average Interest Rate (%)"
+
+      - name: npl_default_count
+        type: count
+        filters:
+          - sql: "{CUBE}.is_npl = TRUE AND {CUBE}.md_is_active = TRUE"
+        title: "Non-Performing Loan Default Count"
+        description: "Number of defaulted loans (NPL)."
+
+      - name: npl_default_principal_exposure
+        sql: principal_amount
+        type: sum
+        filters:
+          - sql: "{CUBE}.is_npl = TRUE AND {CUBE}.md_is_active = TRUE"
+        format: currency
+        title: "Non-Performing Loan (NPL) Default Exposure Amount"
+
+      - name: npl_default_ratio
+        type: number
+        sql: "100.0 * {npl_default_count} / NULLIF({total_loan_contracts}, 0)"
+        format: percent
+        title: "NPL Default Ratio (%)"
+        description: "Percentage of active loan contracts marked as Non-Performing Loans."
+
+    dimensions:
+      - name: loan_agreement_id
+        sql: loan_agreement_id
+        type: string
+        primary_key: true
+
+      - name: agreement_number
+        sql: agreement_number
+        type: string
+        title: "Contract Agreement Number"
+
+      - name: customer_id
+        sql: customer_id
+        type: string
+
+      - name: loan_application_id
+        sql: loan_application_id
+        type: string
+
+      - name: agreement_status
+        sql: agreement_status
+        type: string
+        title: "Agreement Status (Active, Defaulted, Paid Off)"
+
+      - name: is_npl
+        sql: is_npl
+        type: boolean
+        title: "Non-Performing Loan (NPL) Default Flag"
+
+      - name: currency_code
+        sql: currency_code
+        type: string
+        title: "Loan Currency Code"
+
+      - name: term_months
+        sql: term_months
+        type: number
+        title: "Loan Tenor Term (Months)"
+
+      - name: disbursement_date
+        sql: disbursement_date
+        type: time
+        title: "Initial Disbursement Date"
+
+      - name: maturity_date
+        sql: maturity_date
+        type: time
+        title: "Scheduled Maturity Date"
+
+      - name: md_is_active
+        sql: md_is_active
+        type: boolean
+        title: "SCD2 Active Version Flag"

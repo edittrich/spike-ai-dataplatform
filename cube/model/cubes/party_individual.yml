@@ -1,0 +1,52 @@
+cubes:
+  - name: party_individual
+    sql_table: financial.party_individual
+    title: "Party Individual Subtype Data Product"
+    description: "Individual natural person attributes (Name, DOB, Gender, Citizenship)."
+
+    joins:
+      - name: party
+        sql: "{CUBE}.party_id = {party.party_id}"
+        relationship: belongs_to
+
+    measures:
+      - name: total_individuals
+        type: count
+
+    dimensions:
+      - name: party_individual_id
+        sql: party_individual_id
+        type: string
+        primary_key: true
+
+      - name: party_id
+        sql: party_id
+        type: string
+
+      - name: first_name
+        sql: first_name
+        type: string
+
+      - name: last_name
+        sql: last_name
+        type: string
+
+      - name: date_of_birth
+        sql: date_of_birth
+        type: time
+
+      - name: gender
+        sql: gender
+        type: string
+
+      - name: citizenship_country_code
+        sql: citizenship_country_code
+        type: string
+
+      - name: tax_residence_country_code
+        sql: tax_residence_country_code
+        type: string
+
+      - name: md_is_active
+        sql: md_is_active
+        type: boolean

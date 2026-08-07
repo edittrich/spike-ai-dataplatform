@@ -1,0 +1,85 @@
+cubes:
+  - name: party_role_customer
+    sql_table: financial.party_role_customer
+    title: "Party Role Customer Data Product"
+    description: "Semantic Cube for Customer demographics, KYC verification status, and AML risk classifications."
+
+    joins:
+      - name: party
+        sql: "{CUBE}.party_id = {party.party_id}"
+        relationship: belongs_to
+
+    measures:
+      - name: total_customers
+        type: count
+        title: "Total Customer Count"
+        description: "Total count of registered customer roles."
+
+      - name: active_customers_count
+        type: count
+        title: "Active Customer Count"
+        filters:
+          - sql: "{CUBE}.md_is_active = TRUE"
+        description: "Count of currently active customer records (SCD2 active state)."
+
+      - name: high_aml_risk_count
+        type: count
+        title: "High AML Risk Customer Count"
+        filters:
+          - sql: "{CUBE}.aml_risk_rating = 'HIGH' AND {CUBE}.md_is_active = TRUE"
+        description: "Count of active customers flagged with High AML risk."
+
+      - name: verified_kyc_count
+        type: count
+        title: "Verified KYC Customer Count"
+        filters:
+          - sql: "{CUBE}.kyc_status = 'VERIFIED' AND {CUBE}.md_is_active = TRUE"
+        description: "Count of customers with verified KYC compliance."
+
+      - name: high_aml_risk_ratio
+        type: number
+        title: "High AML Risk Ratio (%)"
+        sql: "100.0 * {high_aml_risk_count} / NULLIF({active_customers_count}, 0)"
+        format: percent
+        description: "Percentage of active customers classified as High AML risk."
+
+    dimensions:
+      - name: party_role_customer_id
+        sql: party_role_customer_id
+        type: string
+        primary_key: true
+
+      - name: customer_number
+        sql: customer_number
+        type: string
+        title: "Customer Account Number"
+
+      - name: party_id
+        sql: party_id
+        type: string
+        title: "Party ID"
+
+      - name: customer_segment
+        sql: customer_segment
+        type: string
+        title: "Customer Segment (Retail, SME, Corporate, Wealth)"
+
+      - name: kyc_status
+        sql: kyc_status
+        type: string
+        title: "KYC Status (Verified, Pending, Expired)"
+
+      - name: aml_risk_rating
+        sql: aml_risk_rating
+        type: string
+        title: "AML Risk Classification (Low, Medium, High)"
+
+      - name: onboarding_date
+        sql: onboarding_date
+        type: time
+        title: "Onboarding Date"
+
+      - name: md_is_active
+        sql: md_is_active
+        type: boolean
+        title: "SCD2 Active Version Flag"

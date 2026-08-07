@@ -1,0 +1,31 @@
+cubes:
+  - name: party
+    sql_table: financial.party
+    title: "Master Party Supertype Data Product"
+    description: "Master Party Supertype entity (BIAN Party Domain)."
+
+    measures:
+      - name: total_party_masters
+        type: count
+
+    dimensions:
+      - name: party_id
+        sql: party_id
+        type: string
+        primary_key: true
+
+      - name: party_bk
+        sql: party_bk
+        type: string
+
+      - name: party_type
+        sql: party_type
+        type: string
+
+      - name: status_code
+        sql: status_code
+        type: string
+
+      - name: md_is_active
+        sql: md_is_active
+        type: boolean

@@ -1,0 +1,42 @@
+# Supabase CLI Configuration locked for AI Financial Data Platform PoC
+project_id = "ai-dataplatform"
+
+[api]
+enabled = true
+port = 54321
+# `ref`/`financial` were previously exposed here for no reason any code depends on --
+# every platform component (MCP server, pipeline scripts, Cube.js) reaches PostgreSQL
+# over the wire protocol on [db].port, never through PostgREST. Exposing them meant the
+# public `anon` API key could read financial.* over plain HTTP (verified live: a bare
+# anon key retrieved real customer names and dates of birth via
+# `GET /rest/v1/party_individual`). RLS + revoked grants (see the
+# 20260807150000_enable_rls_and_restrict_anon_access.sql migration) close this even if
+# a schema is re-added here by mistake, but there's no reason to expose either schema
+# through the HTTP API at all -- keep this list to what actually needs REST/GraphQL access.
+schemas = ["public", "storage", "graphql_public"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[db]
+port = 54322
+shadow_port = 54320
+major_version = 15
+
+[studio]
+enabled = true
+port = 54323
+
+[auth]
+enabled = true
+site_url = "http://127.0.0.1:3000"
+additional_redirect_urls = ["https://127.0.0.1:3000"]
+jwt_expiry = 3600
+# No part of this platform has a real end-user signup/auth flow -- self-registration
+# only mattered previously because a self-registered `authenticated` user inherited
+# blanket write access to financial.* (see the RLS migration above). Disabled since
+# there's no legitimate use for it in this PoC; re-enable deliberately if a real
+# authenticated-user flow is ever built on top of this schema.
+enable_signup = false
+
+[analytics]
+enabled = false

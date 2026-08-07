@@ -1,0 +1,53 @@
+cubes:
+  - name: loan_disbursement
+    sql_table: financial.loan_disbursement
+    title: "Loan Disbursement Data Product"
+    description: "Loan tranche principal release execution records."
+
+    joins:
+      - name: loan_agreement
+        sql: "{CUBE}.loan_agreement_id = {loan_agreement.loan_agreement_id}"
+        relationship: belongs_to
+
+    measures:
+      - name: total_disbursed_amount
+        sql: disbursed_amount
+        type: sum
+        format: currency
+
+      - name: total_disbursements_count
+        type: count
+
+    dimensions:
+      - name: loan_disbursement_id
+        sql: loan_disbursement_id
+        type: string
+        primary_key: true
+
+      - name: loan_agreement_id
+        sql: loan_agreement_id
+        type: string
+
+      - name: disbursement_reference
+        sql: disbursement_reference
+        type: string
+
+      - name: disbursed_amount
+        sql: disbursed_amount
+        type: number
+
+      - name: currency_code
+        sql: currency_code
+        type: string
+
+      - name: disbursement_date
+        sql: disbursement_date
+        type: time
+
+      - name: disbursement_status
+        sql: disbursement_status
+        type: string
+
+      - name: md_is_active
+        sql: md_is_active
+        type: boolean

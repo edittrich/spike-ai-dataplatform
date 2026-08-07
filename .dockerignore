@@ -1,0 +1,19 @@
+.git
+.venv
+venv/
+node_modules/
+catalog/mysql-data/
+catalog/mysql-data.bak-*/
+catalog/opensearch-data/
+neo4j/data/
+neo4j/logs/
+neo4j/import/
+tools/Protege-5.6.9*
+.system_generated/
+brain/
+*.log
+# Never bake live secrets into an image layer -- both mcp_server/Dockerfile.mcp
+# and catalog/Dockerfile.exporter COPY the full build context (`.`).
+.env
+.env.*
+!.env.example

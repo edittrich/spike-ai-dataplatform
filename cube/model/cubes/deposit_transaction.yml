@@ -1,0 +1,79 @@
+cubes:
+  - name: deposit_transaction
+    sql_table: financial.deposit_transaction
+    title: "Deposit Transactions Data Product"
+    description: "Semantic Cube for Deposit & Withdrawal transaction journals, velocity, and flow analytics."
+
+    joins:
+      - name: deposit_account
+        sql: "{CUBE}.deposit_account_id = {deposit_account.deposit_account_id}"
+        relationship: belongs_to
+
+    measures:
+      - name: total_transactions
+        type: count
+        title: "Total Transaction Volume Count"
+
+      - name: total_deposit_volume
+        sql: amount
+        type: sum
+        filters:
+          - sql: "{CUBE}.transaction_type IN ('DEPOSIT', 'TRANSFER_IN', 'INTEREST_CREDIT')"
+        format: currency
+        title: "Total Inflow Transaction Volume"
+
+      - name: total_withdrawal_volume
+        sql: amount
+        type: sum
+        filters:
+          - sql: "{CUBE}.transaction_type IN ('WITHDRAWAL', 'TRANSFER_OUT', 'FEE')"
+        format: currency
+        title: "Total Outflow Transaction Volume"
+
+      - name: net_transaction_cashflow
+        type: number
+        sql: "{total_deposit_volume} - {total_withdrawal_volume}"
+        format: currency
+        title: "Net Deposit Cashflow"
+
+      - name: average_transaction_amount
+        sql: amount
+        type: avg
+        format: currency
+        title: "Average Transaction Size"
+
+    dimensions:
+      - name: deposit_transaction_id
+        sql: deposit_transaction_id
+        type: string
+        primary_key: true
+
+      - name: transaction_reference
+        sql: transaction_reference
+        type: string
+        title: "Transaction Reference Number"
+
+      - name: transaction_type
+        sql: transaction_type
+        type: string
+        title: "Transaction Type (Deposit, Withdrawal, Transfer In/Out, Fee)"
+
+      - name: transaction_status
+        sql: transaction_status
+        type: string
+        title: "Transaction Status (Booked, Pending, Reversed)"
+
+      - name: currency_code
+        sql: currency_code
+        type: string
+        title: "Currency Code"
+
+      - name: booking_date
+        sql: booking_date
+        type: time
+        title: "Booking Date Timestamp UTC"
+
+      - name: value_date
+        sql: value_date
+        type: time
+        title: "Interest Value Date"

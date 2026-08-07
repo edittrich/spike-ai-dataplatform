@@ -1,0 +1,52 @@
+cubes:
+  - name: party_address
+    sql_table: financial.party_address
+    title: "Party Address Data Product"
+    description: "Registered and residential party address records."
+
+    joins:
+      - name: party
+        sql: "{CUBE}.party_id = {party.party_id}"
+        relationship: belongs_to
+
+    measures:
+      - name: total_addresses
+        type: count
+
+    dimensions:
+      - name: party_address_id
+        sql: party_address_id
+        type: string
+        primary_key: true
+
+      - name: party_id
+        sql: party_id
+        type: string
+
+      - name: address_type
+        sql: address_type
+        type: string
+
+      - name: street_address
+        sql: street_address
+        type: string
+
+      - name: city
+        sql: city
+        type: string
+
+      - name: postal_code
+        sql: postal_code
+        type: string
+
+      - name: country_code
+        sql: country_code
+        type: string
+
+      - name: is_primary
+        sql: is_primary
+        type: boolean
+
+      - name: md_is_active
+        sql: md_is_active
+        type: boolean

@@ -1,0 +1,59 @@
+version: "1.0.0"
+kind: DataContract
+id: urn:datacontract:financial_platform:deposit_liquidity_domain
+dataset: Deposit_Liquidity_Data_Product
+name: Deposit & Liquidity Data Product Contract
+status: active
+domain: Deposit & Liquidity Domain
+owner:
+  name: Retail & Corporate Banking Data Product Team
+  email: deposit-team@financial-platform.com
+
+sla:
+  freshness: "5 minutes (Real-Time Balances)"
+  availability: "99.95%"
+  retention: "10 years (Regulatory Audit Ledger)"
+  data_quality_score: ">= 99.5%"
+
+models:
+  financial.deposit_account:
+    description: BIAN Current & Savings Deposit Account Entity
+    type: table
+    columns:
+      deposit_account_id:
+        type: UUID
+        primary_key: true
+        nullable: false
+      account_number:
+        type: VARCHAR
+        nullable: false
+        pii_classification: "PersonalData.Personal"
+      currency_code:
+        type: VARCHAR
+        nullable: false
+      account_status:
+        type: VARCHAR
+        nullable: false
+        allowed_values: ["ACTIVE", "DORMANT", "CLOSED", "BLOCKED"]
+
+  financial.deposit_balance:
+    description: Real-Time Position Balances & Overdraft Exposures
+    type: table
+    columns:
+      deposit_account_id:
+        type: UUID
+        nullable: false
+      available_balance:
+        type: NUMERIC
+        nullable: false
+      ledger_balance:
+        type: NUMERIC
+        nullable: false
+
+quality:
+  - type: rowCountGreaterThan
+    value: 1500
+  - type: columnNoNulls
+    column: deposit_account_id
+  - type: columnNoNulls
+    column: account_number

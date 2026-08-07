@@ -1,0 +1,49 @@
+cubes:
+  - name: deposit_overdraft_facility
+    sql_table: financial.deposit_overdraft_facility
+    title: "Deposit Overdraft Facility Data Product"
+    description: "Approved overdraft limits and interest penalty terms."
+
+    joins:
+      - name: deposit_account
+        sql: "{CUBE}.deposit_account_id = {deposit_account.deposit_account_id}"
+        relationship: belongs_to
+
+    measures:
+      - name: total_approved_limit
+        sql: approved_limit
+        type: sum
+        format: currency
+
+      - name: total_facility_count
+        type: count
+
+    dimensions:
+      - name: deposit_overdraft_facility_id
+        sql: deposit_overdraft_facility_id
+        type: string
+        primary_key: true
+
+      - name: deposit_account_id
+        sql: deposit_account_id
+        type: string
+
+      - name: approved_limit
+        sql: approved_limit
+        type: number
+
+      - name: interest_rate_penalty
+        sql: interest_rate_penalty
+        type: number
+
+      - name: facility_status
+        sql: facility_status
+        type: string
+
+      - name: granted_date
+        sql: granted_date
+        type: time
+
+      - name: md_is_active
+        sql: md_is_active
+        type: boolean

@@ -1,0 +1,103 @@
+cubes:
+  - name: deposit_account
+    sql_table: financial.deposit_account
+    title: "Deposit Account Data Product"
+    description: "Semantic Cube for Checking, Savings, and Term Deposit accounts, balances, liquidity exposure, and overdrawn account metrics."
+
+    joins:
+      - name: party_role_customer
+        sql: "{CUBE}.customer_id = {party_role_customer.party_role_customer_id}"
+        relationship: belongs_to
+
+      - name: deposit_balance
+        sql: "{CUBE}.deposit_account_id = {deposit_balance.deposit_account_id} AND {deposit_balance.md_is_active} = TRUE"
+        relationship: has_one
+
+      - name: deposit_interest_term
+        sql: "{CUBE}.deposit_account_id = {deposit_interest_term.deposit_account_id} AND {deposit_interest_term.md_is_active} = TRUE"
+        relationship: has_one
+
+    measures:
+      - name: total_deposit_accounts
+        type: count
+        title: "Total Deposit Account Count"
+        filters:
+          - sql: "{CUBE}.md_is_active = TRUE"
+
+      - name: total_available_balance
+        sql: "{deposit_balance.available_balance}"
+        type: sum
+        format: currency
+        title: "Total Available Balance Portfolio"
+        description: "Aggregate available liquidity across active deposit accounts."
+
+      - name: total_ledger_balance
+        sql: "{deposit_balance.ledger_balance}"
+        type: sum
+        format: currency
+        title: "Total Settled Ledger Balance"
+
+      - name: total_accrued_interest
+        sql: "{deposit_balance.accrued_interest}"
+        type: sum
+        format: currency
+        title: "Total Unposted Accrued Interest"
+
+      - name: average_account_balance
+        sql: "{deposit_balance.available_balance}"
+        type: avg
+        format: currency
+        title: "Average Customer Account Balance"
+
+      - name: overdrawn_account_count
+        type: count
+        filters:
+          - sql: "{deposit_balance.current_balance} < 0 AND {CUBE}.md_is_active = TRUE"
+        title: "Overdrawn Account Count"
+        description: "Number of checking/deposit accounts currently in negative balance."
+
+      - name: total_overdrawn_amount
+        sql: "CASE WHEN {deposit_balance.current_balance} < 0 THEN ABS({deposit_balance.current_balance}) ELSE 0 END"
+        type: sum
+        format: currency
+        title: "Total Overdrawn Exposure Amount"
+
+    dimensions:
+      - name: deposit_account_id
+        sql: deposit_account_id
+        type: string
+        primary_key: true
+
+      - name: account_number
+        sql: account_number
+        type: string
+        title: "Account IBAN / Reference Number"
+
+      - name: customer_id
+        sql: customer_id
+        type: string
+
+      - name: account_type
+        sql: account_type
+        type: string
+        title: "Account Type (Savings, Checking, Term Deposit)"
+
+      - name: account_status
+        sql: account_status
+        type: string
+        title: "Account Status (Active, Dormant, Frozen, Closed)"
+
+      - name: currency_code
+        sql: currency_code
+        type: string
+        title: "Account Currency (USD, EUR, GBP, CHF, JPY)"
+
+      - name: opened_date
+        sql: opened_date
+        type: time
+        title: "Account Opening Date"
+
+      - name: md_is_active
+        sql: md_is_active
+        type: boolean
+        title: "SCD2 Active Version Flag"

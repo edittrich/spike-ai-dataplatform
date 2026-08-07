@@ -1,0 +1,52 @@
+cubes:
+  - name: party_identification
+    sql_table: financial.party_identification
+    title: "Party Identification Data Product"
+    description: "Official identity documents, passport, tax IDs, and LEI numbers."
+
+    joins:
+      - name: party
+        sql: "{CUBE}.party_id = {party.party_id}"
+        relationship: belongs_to
+
+    measures:
+      - name: total_identifications
+        type: count
+
+    dimensions:
+      - name: party_identification_id
+        sql: party_identification_id
+        type: string
+        primary_key: true
+
+      - name: party_id
+        sql: party_id
+        type: string
+
+      - name: id_type
+        sql: id_type
+        type: string
+
+      - name: id_number
+        sql: id_number
+        type: string
+
+      - name: issuing_country_code
+        sql: issuing_country_code
+        type: string
+
+      - name: issue_date
+        sql: issue_date
+        type: time
+
+      - name: expiry_date
+        sql: expiry_date
+        type: time
+
+      - name: verification_status
+        sql: verification_status
+        type: string
+
+      - name: md_is_active
+        sql: md_is_active
+        type: boolean
