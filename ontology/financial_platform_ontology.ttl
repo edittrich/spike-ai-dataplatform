@@ -6,23 +6,30 @@
 
 # Standard Ontologies
 #
-# D5 (hardening plan) verification pass, 2026-08-08: fibo-party:, fibo-org:,
-# fibo-account:, and fibo-loan: below were corrected against the real,
-# upstream FIBO ontology source (github.com/edmcouncil/fibo), fetched live
-# and checked for a real owl:Class declaration at each resulting URI --
-# not inferred from documentation. See
-# scripts/ground_fibo_ontology_uris.py's FIBO_GROUNDING_MAP module comment
-# for the full verification writeup (this file's Party/Organization/
-# DepositAccount/LoanAgreement groundings had the identical wrong paths,
+# D5 (hardening plan) verification, 2026-08-08 (two passes): fibo-party:,
+# fibo-org:, fibo-account:, fibo-loan:, and (in the second pass)
+# fibo-partyrole: below were all corrected against the real, upstream FIBO
+# ontology source (github.com/edmcouncil/fibo), fetched live and checked
+# for a real owl:Class declaration at each resulting URI -- not inferred
+# from documentation. See scripts/ground_fibo_ontology_uris.py's
+# FIBO_GROUNDING_MAP module comment for the full verification writeup --
+# by the end of the second pass, all 19 of that map's entries have been
+# individually re-verified (this file's Party/Organization/DepositAccount/
+# LoanAgreement/Customer groundings had the identical wrong paths,
 # independently reconciled with that map back when it and this file only
 # needed to agree with *each other* -- neither had been checked against
-# upstream FIBO itself until now). fibo-people:/fibo-partyrole:/bian: were
-# not re-checked in this pass (fibo-people: specifically was verified via
-# the FIBO_GROUNDING_MAP pass and is correct as-is).
+# upstream FIBO itself until D5's first pass). fibo-people: was verified
+# via the FIBO_GROUNDING_MAP pass and is correct as-is; bian: was not
+# checked (out of scope -- it's a BIAN ontology, not FIBO).
 @prefix fibo-party: <https://www.omg.org/spec/Commons/PartiesAndSituations/> .
 @prefix fibo-people: <https://spec.edmcouncil.org/fibo/ontology/FND/AgentsAndPeople/People/> .
 @prefix fibo-org: <https://www.omg.org/spec/Commons/Organizations/> .
-@prefix fibo-partyrole: <https://spec.edmcouncil.org/fibo/ontology/FND/Parties/Roles/> .
+# D5 second pass: real Customer class lives in FND/ProductsAndServices/
+# ProductsAndServices.rdf ("a party that receives or consumes products...
+# and has the ability to choose between different products and suppliers",
+# subclass of Buyer) -- FND/Parties/Roles/ doesn't correspond to a real
+# FIBO file at all (no Roles.rdf exists under FND/Parties/).
+@prefix fibo-partyrole: <https://spec.edmcouncil.org/fibo/ontology/FND/ProductsAndServices/ProductsAndServices/> .
 @prefix fibo-account: <https://spec.edmcouncil.org/fibo/ontology/FBC/ProductsAndServices/ClientsAndAccounts/> .
 @prefix fibo-loan: <https://spec.edmcouncil.org/fibo/ontology/LOAN/LoansGeneral/Loans/> .
 @prefix fibo-loanapp: <https://spec.edmcouncil.org/fibo/ontology/LOAN/LoansGeneral/LoanApplications/> .
