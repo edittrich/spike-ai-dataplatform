@@ -67,16 +67,20 @@ fin:Organization a owl:Class ;
 fin:PartyRole a owl:Class ;
     rdfs:label "Party Role"@en ;
     rdfs:comment "Role played by a Party in a specific context."@en ;
-    # D5 CAVEAT (2026-08-08): this line rides on the fibo-party: prefix fix
-    # above (Party's real namespace is OMG Commons), but "PartyInRole"
-    # itself was NOT independently confirmed to exist there or anywhere
-    # else in FIBO -- a live search of the FIBO repository found no class
-    # by this name (FND/Parties/Parties.rdf defines PartyRoleIdentifier/
-    # PartyRoleIdentificationScheme, not PartyInRole). Neither the old nor
-    # this new URI is confirmed correct for this specific class; treat
-    # this one line as unverified pending a closer look, unlike Party/
-    # Organization/DepositAccount/LoanApplication/LoanAgreement above.
-    rdfs:isDefinedBy fibo-party:PartyInRole .
+    # D5 CAVEAT RESOLVED (2026-08-08): the previous fibo-party:PartyInRole
+    # target was confirmed not to exist anywhere in FIBO (FND/Parties/
+    # Parties.rdf defines PartyRoleIdentifier/PartyRoleIdentificationScheme,
+    # not PartyInRole). The real class is PartyRole itself, in the same OMG
+    # Commons PartiesAndSituations module fibo-party: already points to
+    # (definition: "role played by an organization or individual that may
+    # be time bound") -- confirmed both from the OMG spec page and, more
+    # authoritatively, from FIBO's own live FND/Parties/Parties.rdf source,
+    # which references this exact class (via its &cmns-pts; entity, the
+    # same namespace as fibo-party:Party) as the owl:onClass restriction on
+    # its identifies property. A near-exact semantic match for this local
+    # class's own definition above, and now on the same verified footing as
+    # Party/Organization/Customer in this file.
+    rdfs:isDefinedBy fibo-party:PartyRole .
 
 fin:Customer a owl:Class ;
     rdfs:subClassOf fin:PartyRole ;
