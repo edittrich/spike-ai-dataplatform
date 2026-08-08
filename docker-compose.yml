@@ -49,6 +49,42 @@ x-logging: &default-logging
 # working end-to-end -- this belongs in its own dedicated pass with room to
 # debug connectivity issues without extended platform downtime.
 
+# Q14 (container capability hardening -- `read_only`): every service below
+# except `neo4j_jmx_agent_init` (see its own comment for the reasoned
+# exception) now sets `read_only: true`, with an explicit, minimal
+# `tmpfs`/writable-mount allowlist for whatever each image genuinely needs to
+# write -- audited and live-verified one service at a time, not applied
+# blanket. `cap_drop`/`pids_limit`/CPU limits (the rest of Q14's original
+# scope) remain a separate, not-yet-implemented follow-up. Two real,
+# non-obvious problems surfaced doing this, both worth knowing before adding
+# a new tmpfs mount to this file:
+#   1. Docker's own default tmpfs mount ownership/mode is NOT reliably
+#      writable by a non-root container user -- verified live on
+#      OpenSearch (root:root 0755, denying its own `opensearch` uid 1000).
+#      Every tmpfs mount below is therefore the long `volumes:`-with-
+#      `type: tmpfs` form with an explicit `mode:` (the short top-level
+#      `tmpfs:` key doesn't accept `mode:` at all), *except* where the
+#      `exec` mount option is also needed (Neo4j's /tmp -- JNA's native
+#      page-cache library must be mmap-executable, which the long form's
+#      schema has no field for at all), which uses the short-form's
+#      `path:options` string syntax instead.
+#   2. That `mode:` field is NOT parsed as octal digits the way `chmod`/
+#      Docker's own CLI tmpfs flags are -- `mode: 1777` (typing what looks
+#      like "octal 1777") is instead applied as the literal *decimal*
+#      integer 1777 read as a raw 12-bit permission bitmask, producing a
+#      bizarre, too-restrictive result and a real crash (verified live via
+#      `stat` inside a `docker compose run` shell, and via mysqld's InnoDB
+#      failing to open a temp file under it). The fix, used on every tmpfs
+#      mount below: supply the *decimal* value that equals the intended
+#      octal mode -- octal 01777 (world rwx + sticky bit) is decimal 1023,
+#      so `mode: 1023` is what actually appears, not 1777.
+# Every read_only change was verified against real functionality, not just
+# "container starts": a real query through query_financial_database (mcp_
+# sidecar), a real Cube.js measure query (cube), a real Cypher query and
+# JMX/Prometheus scrape (neo4j), real catalog data surviving a MySQL/
+# OpenSearch/openmetadata_server recreate, and a full `docker compose down`
+# + `up -d` bringing all 15 services back healthy with all data intact.
+
 services:
   # ===========================================================================
   # 1. Enterprise Catalog & Metadata Governance (OpenMetadata 1.3.1)
@@ -57,6 +93,39 @@ services:
     image: mysql:8.0.35
     container_name: openmetadata_mysql
     restart: always
+    read_only: true
+    # Q14: beyond /var/lib/mysql (already a writable bind mount), mysqld
+    # needs two more writable paths that read_only:true would otherwise
+    # block: /var/run/mysqld for its Unix socket + PID file (mysqladmin
+    # ping in the healthcheck connects over -h 127.0.0.1/TCP, not the
+    # socket, but mysqld itself refuses to start without being able to
+    # create the socket file), and /tmp for on-disk temp tables/sorts that
+    # exceed tmp_table_size (InnoDB genuinely fails to initialize at all
+    # without it -- verified live). Both verified to be exactly what's
+    # needed -- no more, no less.
+    #
+    # Every tmpfs mount in this file uses this long `volumes:`-with-
+    # `type: tmpfs` form (never the short top-level `tmpfs:` key), and
+    # every one sets an explicit `mode:` -- two real, live-discovered
+    # problems this works around, not stylistic preference:
+    #   1. The short-form `tmpfs: [path]` key doesn't accept a `mode:`
+    #      option at all (`docker compose config` rejects it outright),
+    #      and its own default ownership isn't reliably writable by a
+    #      non-root container user in this Docker install regardless.
+    #   2. `mode:` under the long form is NOT parsed as octal digits the
+    #      way `chmod`/Docker's own `--tmpfs`/`--mount tmpfs-mode` CLI
+    #      flags are -- verified live the hard way: `mode: 1777` (typed
+    #      expecting "octal 1777") is instead applied as the *decimal*
+    #      integer 1777 read directly as a raw 12-bit permission bitmask,
+    #      producing a bizarre and genuinely-too-restrictive
+    #      `d-wxrwS--t` (setgid, owner -wx, group rw-, other --t) --
+    #      confirmed via `stat` inside a `docker compose run` shell, and
+    #      confirmed to crash mysqld's InnoDB init with a real "Permission
+    #      denied" writing to /tmp. The fix is to supply the *decimal*
+    #      value that equals the intended octal mode: octal 01777 (world
+    #      rwx + sticky bit, the permission set Docker's own CLI tmpfs
+    #      flags default to) is decimal 1023 -- that is what `mode:` is
+    #      set to on every tmpfs mount in this file, not 1777.
     deploy:
       resources:
         limits:
@@ -74,6 +143,14 @@ services:
       - "127.0.0.1:33060:3306"
     volumes:
       - ./catalog/mysql-data:/var/lib/mysql
+      - type: tmpfs
+        target: /var/run/mysqld
+        tmpfs:
+          mode: 1023  # octal 01777 (world rwx + sticky bit) -- see comment above
+      - type: tmpfs
+        target: /tmp
+        tmpfs:
+          mode: 1023  # octal 01777 (world rwx + sticky bit) -- see comment above
     security_opt:
       - no-new-privileges:true
     logging: *default-logging
@@ -88,6 +165,59 @@ services:
     image: opensearchproject/opensearch:2.11.0
     container_name: openmetadata_search
     restart: always
+    read_only: true
+    # Q14: this service already had no persistent volume for its index
+    # data before this change (Search is a rebuildable projection of
+    # MySQL, not this platform's source of truth -- OpenMetadata's own
+    # SearchIndexingApplication, triggered by several pipeline scripts,
+    # repopulates it), so tmpfs for /usr/share/opensearch/data doesn't
+    # change the existing lose-it-on-recreate behavior at all, it just
+    # gives OpenSearch a writable place to put what was already ephemeral.
+    # /usr/share/opensearch/logs and /tmp are genuinely new requirements
+    # read_only:true introduces -- verified live both are needed for the
+    # JVM to start at all (log4j2 log file handles, temp heap-related
+    # files) and that this exact set (no more, no less) results in a
+    # clean start with no permission errors. This image runs as a
+    # non-root `opensearch` user (uid 1000), which is what actually
+    # surfaced the `mode:` decimal/octal pitfall documented in full on
+    # openmetadata_db above (mode: 1023 = octal 01777, NOT the literal
+    # "1777" one would naively write) -- a wrong mode here manifested as
+    # "Permission denied" writing gc.log/PerformanceAnalyzer.log and a
+    # genuine crash loop, not a silent degradation, since this image
+    # (unlike MySQL/Grafana's entrypoints) never runs as root at all.
+    #
+    # A fourth, different-in-kind requirement surfaced after the three
+    # tmpfs mounts above: OpenSearch's core bootstrap (independent of
+    # DISABLE_SECURITY_PLUGIN, which only covers the *security plugin's*
+    # secure settings) unconditionally tries to create an empty
+    # opensearch.keystore file under /usr/share/opensearch/config on
+    # every startup that doesn't already have one -- verified live via
+    # the exact failure: "opensearch.keystore.tmp: Read-only file
+    # system". Unlike data/logs/tmp above, config/ can't just be an empty
+    # tmpfs -- it also holds the image's real opensearch.yml/jvm.options/
+    # log4j2.properties, which a bare tmpfs mount would shadow with
+    # nothing. Fixed by extracting the image's own default config/ once
+    # into catalog/opensearch-config/ (gitignored, generated -- same
+    # pattern as catalog/mysql-data/, see .gitignore) and bind-mounting
+    # that directory read-write instead of :ro; verified live that the
+    # keystore this creates on first boot is then preserved (not
+    # regenerated) on every subsequent restart, since -- unlike
+    # data/logs/tmp -- this location isn't tmpfs and isn't lost on
+    # container recreate.
+    volumes:
+      - ./catalog/opensearch-config:/usr/share/opensearch/config
+      - type: tmpfs
+        target: /usr/share/opensearch/data
+        tmpfs:
+          mode: 1023  # octal 01777 (world rwx + sticky bit) -- see comment above
+      - type: tmpfs
+        target: /usr/share/opensearch/logs
+        tmpfs:
+          mode: 1023  # octal 01777 (world rwx + sticky bit) -- see comment above
+      - type: tmpfs
+        target: /tmp
+        tmpfs:
+          mode: 1023  # octal 01777 (world rwx + sticky bit) -- see comment above
     deploy:
       resources:
         limits:
@@ -129,6 +259,16 @@ services:
     image: openmetadata/server:1.3.1
     container_name: openmetadata_server
     restart: always
+    read_only: true
+    volumes:
+      - type: tmpfs
+        target: /tmp
+        tmpfs:
+          mode: 1023  # octal 01777 -- see openmetadata_db's tmpfs comment
+      - type: tmpfs
+        target: /opt/openmetadata/logs
+        tmpfs:
+          mode: 1023  # octal 01777 -- see openmetadata_db's tmpfs comment
     deploy:
       resources:
         limits:
@@ -189,6 +329,19 @@ services:
     container_name: neo4j_knowledge_graph
     restart: always
     network_mode: "host"
+    read_only: true
+    # Q14: the official image's entrypoint, when launched as root (the
+    # default), unconditionally `chown -R neo4j:neo4j /var/lib/neo4j`
+    # (its own install directory -- jars, binaries, everything) before
+    # dropping privileges -- verified live this fails outright under
+    # read_only:true (dozens of "Read-only file system" chown errors,
+    # crash loop) since that would require the entire image tree to be
+    # writable, defeating the point. Launching directly as the image's
+    # own neo4j user (uid/gid 7474, confirmed via `id neo4j` inside the
+    # image) instead of root skips that chown branch entirely -- verified
+    # live this is exactly what the entrypoint's own root-only check
+    # gates on, not a workaround that disables something else needed.
+    user: "7474:7474"
     deploy:
       resources:
         limits:
@@ -229,6 +382,29 @@ services:
       # neo4j_jmx_agent_init downloaded.
       - jmx_exporter_agent:/jmx_exporter_agent:ro
       - ./catalog/neo4j_jmx_exporter_config.yml:/jmx_exporter/config.yml:ro
+      - type: tmpfs
+        target: /var/lib/neo4j/conf
+        tmpfs:
+          mode: 1023  # octal 01777 -- see openmetadata_db's tmpfs comment
+      - type: tmpfs
+        target: /var/lib/neo4j/run
+        tmpfs:
+          mode: 1023  # octal 01777 -- see openmetadata_db's tmpfs comment
+    # /tmp specifically needs the short-form `path:options` string here,
+    # not the long `volumes:`-with-`type: tmpfs` form used everywhere
+    # else in this file -- that long form's schema only accepts `size`/
+    # `mode`, with no way to request the `exec` mount option, and Neo4j's
+    # JVM genuinely needs it: JNA (used for native page-cache memory
+    # allocation) extracts and mmaps a native .so into /tmp at startup,
+    # which fails with "failed to map segment from shared object" against
+    # Docker's own tmpfs default of `noexec` -- verified live to be
+    # exactly this cause, not a mode/ownership problem (mode alone,
+    # correctly applied, still hit this error). This is the one tmpfs
+    # mount in the whole file that genuinely needs exec; every other
+    # service's tmpfs mounts are deliberately left at Docker's safer
+    # noexec default.
+    tmpfs:
+      - /tmp:exec,mode=1777
     depends_on:
       neo4j_jmx_agent_init:
         condition: service_completed_successfully
@@ -250,6 +426,7 @@ services:
     container_name: cube_semantic_layer
     restart: always
     network_mode: "host"
+    read_only: true
     deploy:
       resources:
         limits:
@@ -314,6 +491,7 @@ services:
     container_name: prometheus_metrics
     restart: always
     network_mode: "host"
+    read_only: true
     deploy:
       resources:
         limits:
@@ -346,6 +524,18 @@ services:
     container_name: grafana_observability_dashboard
     restart: always
     network_mode: "host"
+    read_only: true
+    # Q14: the image's own default GF_PATHS_LOGS=/var/log/grafana isn't
+    # covered by the grafana_data volume (that's only /var/lib/grafana) --
+    # verified live that without this, the container still starts and
+    # serves requests (its console/stdout logger, the one docker logs
+    # actually captures, doesn't depend on the file logger succeeding),
+    # but the file logger itself silently no-ops on every write
+    # ("Read-only file system", confirmed via a live `touch` inside the
+    # container). Added below as a `volumes:`-with-`type: tmpfs` entry
+    # (merged into the existing `volumes:` list) with mode: 1023 (= octal
+    # 01777) -- see openmetadata_db's tmpfs comment for the full
+    # decimal-vs-octal `mode:` pitfall this value works around.
     deploy:
       resources:
         limits:
@@ -363,6 +553,10 @@ services:
       # not just the provisioned-from-disk dashboards (Q14). Named volume
       # for the same host-UID-mismatch reason as Prometheus's, above.
       - grafana_data:/var/lib/grafana
+      - type: tmpfs
+        target: /var/log/grafana
+        tmpfs:
+          mode: 1023  # octal 01777 (world rwx + sticky bit) -- see comment above
     depends_on:
       prometheus:
         condition: service_healthy
@@ -418,6 +612,7 @@ services:
     container_name: tempo_tracing_backend
     restart: always
     network_mode: "host"
+    read_only: true
     deploy:
       resources:
         limits:
@@ -438,6 +633,7 @@ services:
     container_name: otel_collector
     restart: always
     network_mode: "host"
+    read_only: true
     deploy:
       resources:
         limits:
@@ -465,6 +661,7 @@ services:
     restart: always
     network_mode: "host"
     pid: host
+    read_only: true
     deploy:
       resources:
         limits:
@@ -494,6 +691,7 @@ services:
     container_name: postgres_exporter
     restart: always
     network_mode: "host"
+    read_only: true
     deploy:
       resources:
         limits:
@@ -523,6 +721,22 @@ services:
     container_name: mysqld_exporter
     restart: always
     network_mode: "host"
+    read_only: true
+    # Q14 (container capability hardening): the entrypoint below writes
+    # /tmp/.my.cnf at every startup, so read_only:true needs an explicit
+    # writable tmpfs for /tmp -- the one path this container genuinely
+    # needs to write to, sized just large enough for that one small
+    # generated credentials file and gone on every restart (never
+    # persisted to a volume, consistent with the "never commit a
+    # credential file" reasoning below). Uses the long `volumes:`-with-
+    # `type: tmpfs` form with mode: 1023 (= octal 01777) -- see
+    # openmetadata_db's tmpfs comment for why, and for the
+    # decimal-vs-octal `mode:` pitfall that value works around.
+    volumes:
+      - type: tmpfs
+        target: /tmp
+        tmpfs:
+          mode: 1023  # octal 01777 (world rwx + sticky bit) -- see comment above
     deploy:
       resources:
         limits:
@@ -560,6 +774,7 @@ services:
     container_name: cadvisor
     restart: always
     network_mode: "host"
+    read_only: true
     deploy:
       resources:
         limits:
@@ -622,6 +837,23 @@ services:
   # noted was missing there. Runs once per `docker compose up`; the volume
   # persists the jar across restarts, so this only needs network access on
   # the very first bootstrap of a fresh environment.
+  #
+  # Q14 (container capability hardening): deliberately NOT given
+  # `read_only: true`, unlike every other service in this file. `apk add
+  # --no-cache wget` below needs to write its package database and cache
+  # across a scattered set of real image paths (/var/cache/apk,
+  # /lib/apk/db, /etc/apk, plus wherever it installs the wget binary
+  # itself) -- covering all of them with tmpfs would mean making most of
+  # this Alpine image's own filesystem writable, which defeats the point
+  # of read_only for essentially no benefit here: this container is
+  # one-shot (`restart: "no"`), runs for a few seconds per fresh
+  # environment bootstrap (skips entirely via the existing-jar check
+  # below on every later `docker compose up`), and the one thing it
+  # writes that actually persists (the downloaded jar) already goes to a
+  # dedicated named volume with an explicit sha256 check, not this
+  # container's own writable layer. A reasoned, documented exception, the
+  # same spirit as the accepted-limitation items in the runbook's Known
+  # Issues section -- not an oversight.
   neo4j_jmx_agent_init:
     image: alpine:3.20
     container_name: neo4j_jmx_agent_init
@@ -646,6 +878,7 @@ services:
     container_name: alertmanager
     restart: always
     network_mode: "host"
+    read_only: true
     deploy:
       resources:
         limits:
@@ -677,6 +910,7 @@ services:
     container_name: mcp_agentic_sidecar
     restart: always
     network_mode: "host"
+    read_only: true
     deploy:
       resources:
         limits:
@@ -706,6 +940,14 @@ services:
       - MCP_TRANSPORT=sse
       - MCP_PORT=8001
       - MCP_METRICS_PORT=8000
+      # Q14: no code in mcp_server/ writes to disk (grepped -- only
+      # urllib.request.urlopen network calls), but Python itself wants to
+      # write __pycache__/*.pyc bytecode caches on first import; verified
+      # live that under read_only:true alone it silently falls back to
+      # interpreting from source every time (no crash, just a repeated
+      # warm-up cost on every restart) -- this makes that an explicit,
+      # documented choice instead of a silent degradation.
+      - PYTHONDONTWRITEBYTECODE=1
       - MCP_API_KEY=${MCP_API_KEY}
       - MCP_HOST=${MCP_HOST:-127.0.0.1}
       - POSTGRES_HOST=${POSTGRES_HOST:-127.0.0.1}
