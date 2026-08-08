@@ -50,6 +50,74 @@ models:
         type: NUMERIC
         nullable: false
 
+  # D2: three tables added 2026-08-08 to close this contract's coverage gap
+  # (previously 2 of the 5 real Deposit & Liquidity Domain tables) -- columns,
+  # types, and allowed_values below verified directly against
+  # supabase/migrations/20260722000000_create_financial_platform_schema.sql.
+  financial.deposit_transaction:
+    description: Immutable Ledger Transaction History
+    type: table
+    columns:
+      deposit_transaction_id:
+        type: UUID
+        primary_key: true
+        nullable: false
+      transaction_reference:
+        type: VARCHAR
+        nullable: false
+        description: "Business key: Transaction reference number"
+      transaction_type:
+        type: VARCHAR
+        nullable: false
+        allowed_values: ["DEPOSIT", "WITHDRAWAL", "TRANSFER_IN", "TRANSFER_OUT", "INTEREST_CREDIT", "FEE"]
+      amount:
+        type: NUMERIC
+        nullable: false
+      transaction_status:
+        type: VARCHAR
+        nullable: false
+        allowed_values: ["BOOKED", "PENDING", "REVERSED"]
+
+  financial.deposit_interest_term:
+    description: Deposit Account Interest Terms & Accrual Rates
+    type: table
+    columns:
+      deposit_interest_term_id:
+        type: UUID
+        primary_key: true
+        nullable: false
+      interest_rate:
+        type: NUMERIC
+        nullable: false
+      rate_type:
+        type: VARCHAR
+        nullable: false
+        allowed_values: ["FIXED", "VARIABLE"]
+      accrual_frequency:
+        type: VARCHAR
+        nullable: false
+        allowed_values: ["DAILY", "MONTHLY", "ANNUALLY"]
+      calculation_basis:
+        type: VARCHAR
+        nullable: false
+        allowed_values: ["ACT/360", "ACT/365", "30/360"]
+
+  financial.deposit_overdraft_facility:
+    description: Approved Overdraft Facility Bounds for Deposit Accounts
+    type: table
+    columns:
+      deposit_overdraft_facility_id:
+        type: UUID
+        primary_key: true
+        nullable: false
+      approved_limit:
+        type: NUMERIC
+        nullable: false
+      facility_status:
+        type: VARCHAR
+        nullable: false
+        allowed_values: ["ACTIVE", "SUSPENDED", "CANCELLED"]
+
 quality:
   - type: rowCountGreaterThan
     value: 1500

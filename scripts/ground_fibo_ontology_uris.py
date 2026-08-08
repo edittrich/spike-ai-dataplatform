@@ -29,32 +29,86 @@ load_env()
 from scripts._openmetadata_client import api_get, api_put, api_post  # noqa: E402
 
 # FIBO Class URI Grounding Specification Map
+#
+# D5 (hardening plan) verification pass, 2026-08-08: this map's URIs had
+# never been checked against the real, upstream FIBO ontology source
+# (github.com/edmcouncil/fibo) before this pass -- only reconciled against
+# ontology/financial_platform_ontology.ttl's own (equally unverified)
+# opinion. With live web access now available, 7 of the 19 entries below
+# were individually re-verified by fetching the actual FIBO RDF/XML source
+# files and confirming (or refuting) each URI against a real `owl:Class`
+# declaration -- not inferred from documentation or the plausible-looking
+# shape of the path. 6 of those 7 were wrong and are now corrected (each
+# with its own comment explaining what the live fetch found); "Person" was
+# confirmed correct as-is. Two systematic patterns emerged, both worth
+# knowing before trusting any *unverified* entry below at face value:
+#   1. FIBO's foundational Party/Organization classes are not actually
+#      defined under FIBO's own spec.edmcouncil.org/fibo/ontology/
+#      namespace -- they're imported from a separate OMG "Commons" ontology
+#      suite (omg.org/spec/Commons/...) that FIBO's own files extend but
+#      don't restate. A URI built by guessing "<file's own path>/<ClassName>"
+#      looks plausible but doesn't resolve to where the class is actually
+#      asserted for these.
+#   2. Several previously-mapped paths funneled everything loan-related
+#      through the generic FBC/ProductsAndServices/FinancialProductsAndServices
+#      module, which is real but doesn't contain Loan/LoanApplication/
+#      DepositAccount -- FIBO has a dedicated top-level LOAN domain
+#      (LOAN/LoansGeneral/...) the original mapping never referenced at all.
+#
+# The remaining 12 entries (Customer, PhysicalAddress, Identifier, Balance,
+# Transaction, InterestRate, CreditFacility, Disbursement, Collateral,
+# Country, Currency, IndustrySector) were NOT individually re-confirmed in
+# this pass -- given the error rate found above, treat their current URIs
+# as unverified best-effort mappings, not confirmed-correct, until someone
+# repeats this same live-fetch verification against each of their real
+# defining files.
 FIBO_GROUNDING_MAP = {
     # Party & Customer Domain
     "financial.party": {
         "tag": "Party",
-        # Matches ontology/financial_platform_ontology.ttl's fin:Party
-        # rdfs:isDefinedBy fibo-party:Party -- this used to disagree (this map
-        # said FND/AgentsAndPeople/Agents/Party), and FIBO's Agent module
-        # defines a distinct, more general Agent class, not a Party class --
-        # the TTL's grounding is the correct one; this map had drifted.
-        "fibo_uri": "https://spec.edmcouncil.org/fibo/ontology/FND/Parties/Parties/Party",
-        "fibo_label": "fibo-fnd-pty-pty:Party",
+        # D5 (hardening plan), verified live 2026-08-08 against
+        # github.com/edmcouncil/fibo's actual raw RDF/XML source (not
+        # inferred from documentation): FIBO's own
+        # FND/Parties/Parties.rdf references "Party" via the
+        # fibo-fnd-pty-pty: prefix, but does NOT define the class there --
+        # it imports and extends it (adds hasMailingAddress/hasAddress
+        # restrictions, a disjointness axiom with Role) from a separate
+        # OMG "Commons" ontology suite. The class's real, defining URI is
+        # in that Commons namespace, not under spec.edmcouncil.org/fibo/
+        # ontology/ at all -- the previous "FND/Parties/Parties/Party"
+        # value looked plausible (it's the URI you'd guess from the file's
+        # own path) but does not resolve to where the class is actually
+        # asserted with `owl:Class`.
+        "fibo_uri": "https://www.omg.org/spec/Commons/PartiesAndSituations/Party",
+        "fibo_label": "cmns-pts:Party",
         "description": "An agent that is an individual or organization, capable of entering into agreements or obligations."
     },
     "financial.party_individual": {
         "tag": "Person",
+        # D5: verified live 2026-08-08 -- confirmed correct as-is. Unlike
+        # Party above, FND/AgentsAndPeople/People.rdf genuinely defines
+        # "Person" itself (rdf:about="&fibo-fnd-aap-ppl;Person", with real
+        # cardinality restrictions on date of birth/place of birth/gender),
+        # at exactly this URI.
         "fibo_uri": "https://spec.edmcouncil.org/fibo/ontology/FND/AgentsAndPeople/People/Person",
         "fibo_label": "fibo-fnd-aap-ppl:Person",
         "description": "A natural person, human individual."
     },
     "financial.party_organization": {
         "tag": "Organization",
-        # Matches ontology/financial_platform_ontology.ttl's fin:Organization
-        # rdfs:isDefinedBy fibo-org:LegalEntity (this map previously pointed
-        # at FND/Organizations/Organizations/Organization instead).
-        "fibo_uri": "https://spec.edmcouncil.org/fibo/ontology/FBC/FunctionalMetadata/Organizations/LegalEntity",
-        "fibo_label": "fibo-fbc-fct-org:LegalEntity",
+        # D5: verified live 2026-08-08, same pattern as Party above --
+        # BE/LegalEntities/LegalPersons.rdf references "LegalEntity" via
+        # the cmns-org: prefix and adds one restriction
+        # (isOrganizedIn exactly one Jurisdiction), but the class itself is
+        # defined in the same OMG Commons namespace as Party, not under
+        # FIBO's own ontology/ path. The previous
+        # "FBC/FunctionalMetadata/Organizations/LegalEntity" value doesn't
+        # correspond to a real file in the FIBO repository at all (a live
+        # fetch 404s) -- ontology/financial_platform_ontology.ttl's
+        # fibo-org: prefix declaration has the identical wrong path and is
+        # corrected alongside this.
+        "fibo_uri": "https://www.omg.org/spec/Commons/Organizations/LegalEntity",
+        "fibo_label": "cmns-org:LegalEntity",
         "description": "A legal entity or social structure formed by people with a shared purpose."
     },
     "financial.party_role_customer": {
@@ -87,8 +141,14 @@ FIBO_GROUNDING_MAP = {
     # Deposit Domain
     "financial.deposit_account": {
         "tag": "DepositAccount",
-        "fibo_uri": "https://spec.edmcouncil.org/fibo/ontology/FBC/ProductsAndServices/FinancialProductsAndServices/DepositAccount",
-        "fibo_label": "fibo-fbc-pas-fpas:DepositAccount",
+        # D5: verified live 2026-08-08 -- DepositAccount is genuinely
+        # defined in FBC/ProductsAndServices/ClientsAndAccounts.rdf
+        # ("provides a record of money placed with a depository institution
+        # for safekeeping and management"), not under
+        # .../FinancialProductsAndServices/ as previously mapped -- that
+        # module exists and is real, but doesn't contain this class.
+        "fibo_uri": "https://spec.edmcouncil.org/fibo/ontology/FBC/ProductsAndServices/ClientsAndAccounts/DepositAccount",
+        "fibo_label": "fibo-fbc-pas-caa:DepositAccount",
         "description": "A financial account held at a bank or institution allowing funds to be deposited and withdrawn."
     },
     "financial.deposit_balance": {
@@ -118,21 +178,41 @@ FIBO_GROUNDING_MAP = {
 
     # Loan Domain
     "financial.loan_application": {
-        "tag": "CreditApplication",
-        "fibo_uri": "https://spec.edmcouncil.org/fibo/ontology/FBC/ProductsAndServices/FinancialProductsAndServices/CreditApplication",
-        "fibo_label": "fibo-fbc-pas-fpas:CreditApplication",
+        # D5: verified live 2026-08-08 -- there is no class named
+        # "CreditApplication" anywhere in the FIBO repository. The real,
+        # fully-defined class for exactly this concept ("request by a
+        # potential borrower to a potential lender to borrow money... used
+        # to decide whether to grant the loan") is "LoanApplication",
+        # living in FIBO's dedicated LOAN domain
+        # (LOAN/LoansGeneral/LoanApplications.rdf) -- a domain the previous
+        # mapping never referenced at all, routing every loan-related
+        # concept through the generic FBC/ProductsAndServices module
+        # instead. Tag corrected to match the real class name.
+        "tag": "LoanApplication",
+        "fibo_uri": "https://spec.edmcouncil.org/fibo/ontology/LOAN/LoansGeneral/LoanApplications/LoanApplication",
+        "fibo_label": "fibo-loan-ln:LoanApplication",
         "description": "A formal application submitted by a customer for a credit line or loan."
     },
     "financial.loan_agreement": {
-        "tag": "LoanContract",
-        "fibo_uri": "https://spec.edmcouncil.org/fibo/ontology/FBC/ProductsAndServices/FinancialProductsAndServices/Loan",
-        "fibo_label": "fibo-fbc-pas-fpas:Loan",
+        # D5: verified live 2026-08-08 -- "Loan" is genuinely defined in
+        # FIBO's LOAN/LoansGeneral/Loans.rdf (subclassing
+        # CreditAgreementRepaidPeriodically/DebtInstrument from imported
+        # ontologies), not under FBC/ProductsAndServices/
+        # FinancialProductsAndServices/ as previously mapped -- same
+        # never-used-the-real-LOAN-domain pattern as loan_application above.
+        "tag": "Loan",
+        "fibo_uri": "https://spec.edmcouncil.org/fibo/ontology/LOAN/LoansGeneral/Loans/Loan",
+        "fibo_label": "fibo-loan-ln:Loan",
         "description": "A binding contract under which a lender advances funds to a borrower."
     },
     "financial.loan_repayment_schedule": {
         "tag": "PaymentSchedule",
-        "fibo_uri": "https://spec.edmcouncil.org/fibo/ontology/FBC/DebtAndEquities/Debt/PaymentSchedule",
-        "fibo_label": "fibo-fbc-dae-dbt:PaymentSchedule",
+        # D5: verified live 2026-08-08 -- PaymentSchedule is genuinely
+        # defined in FND/ProductsAndServices/PaymentsAndSchedules.rdf
+        # (subclasses Schedule, has Payment members), not under
+        # FBC/DebtAndEquities/Debt/ as previously mapped.
+        "fibo_uri": "https://spec.edmcouncil.org/fibo/ontology/FND/ProductsAndServices/PaymentsAndSchedules/PaymentSchedule",
+        "fibo_label": "fibo-fnd-pas-ps:PaymentSchedule",
         "description": "Amortization schedule detailing periodic principal and interest payment installments."
     },
     "financial.loan_disbursement": {

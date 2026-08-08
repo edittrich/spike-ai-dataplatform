@@ -53,6 +53,73 @@ models:
         type: NUMERIC
         nullable: false
 
+  # D2: three tables added 2026-08-08 to close this contract's coverage gap
+  # (previously 2 of the 5 real Loan & Credit Risk Domain tables) -- columns,
+  # types, and allowed_values below verified directly against
+  # supabase/migrations/20260722000000_create_financial_platform_schema.sql.
+  financial.loan_application:
+    description: Loan Origination & Credit Application Lifecycle
+    type: table
+    columns:
+      loan_application_id:
+        type: UUID
+        primary_key: true
+        nullable: false
+      application_number:
+        type: VARCHAR
+        nullable: false
+        description: "Business key: Application reference number"
+      requested_amount:
+        type: NUMERIC
+        nullable: false
+      application_status:
+        type: VARCHAR
+        nullable: false
+        allowed_values: ["SUBMITTED", "UNDERWRITING", "APPROVED", "REJECTED"]
+
+  financial.loan_disbursement:
+    description: Loan Principal Disbursement Execution Events
+    type: table
+    columns:
+      loan_disbursement_id:
+        type: UUID
+        primary_key: true
+        nullable: false
+      disbursement_reference:
+        type: VARCHAR
+        nullable: false
+        description: "Business key: Disbursement reference number"
+      disbursed_amount:
+        type: NUMERIC
+        nullable: false
+      target_account_number:
+        type: VARCHAR
+        nullable: false
+        pii_classification: "PersonalData.Personal"
+      disbursement_status:
+        type: VARCHAR
+        nullable: false
+        allowed_values: ["COMPLETED", "PENDING", "FAILED"]
+
+  financial.loan_repayment_schedule:
+    description: Amortization Repayment Schedule Installments
+    type: table
+    columns:
+      loan_repayment_schedule_id:
+        type: UUID
+        primary_key: true
+        nullable: false
+      installment_number:
+        type: INTEGER
+        nullable: false
+      total_due:
+        type: NUMERIC
+        nullable: false
+      installment_status:
+        type: VARCHAR
+        nullable: false
+        allowed_values: ["PENDING", "PAID", "OVERDUE", "PARTIALLY_PAID"]
+
 quality:
   - type: rowCountGreaterThan
     value: 1000

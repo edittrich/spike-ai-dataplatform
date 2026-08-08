@@ -26,6 +26,7 @@ load_env()
 # _openmetadata_client reads OPENMETADATA_URL/JWT_TOKEN at import time, so it
 # must be imported after load_env() -- see its module docstring.
 from scripts._openmetadata_client import api_put, api_post  # noqa: E402
+from scripts._contracts import load_contracts, render_contract_markdown  # noqa: E402
 
 DOMAINS = [
     {
@@ -48,80 +49,44 @@ DOMAINS = [
     }
 ]
 
+# D2 fix: this list now only carries the OpenMetadata-entity identity fields
+# (name/displayName/domain/contract_file) -- the "description" markdown that
+# used to be hand-duplicated here per product is generated at registration
+# time from the real contracts/*.yaml content via render_contract_markdown(),
+# so contracts/*.yaml is the actual single source of truth, not a third,
+# independently-maintained copy of it.
 DATA_PRODUCTS = [
     {
         "name": "Party_Customer_Data_Product",
         "displayName": "Party & Customer Data Product",
         "domain": "Party_Customer_Domain",
         "contract_file": "contracts/party_customer_data_product_contract.yaml",
-        "description": """### 📜 Party & Customer Data Product Contract
-**Version:** `1.0.0` | **Status:** `ACTIVE`
-**Domain:** Party & Customer Domain | **Owner:** Master Data Management Governance Team
-
-#### ⏱️ Service Level Agreements (SLAs)
-- **Freshness SLA:** `15 minutes`
-- **Availability SLA:** `99.9%`
-- **Retention Policy:** `7 years (SCD Type 2)`
-- **Data Quality Threshold:** `>= 99.0%`
-
-#### 🛡️ Schema & Quality Guarantees
-- `financial.party`: Core Master Party Entity (`party_id` non-null PK)
-- `financial.party_individual`: Individual Person Demographics (`first_name`, `last_name` PII Personal; `date_of_birth` Special Category)
-- `financial.party_organization`: Legal Entity Corporate Metadata
-- `financial.party_role_customer`: Customer Role Profiles & KYC Status
-"""
     },
     {
         "name": "Deposit_Liquidity_Data_Product",
         "displayName": "Deposit & Liquidity Data Product",
         "domain": "Deposit_Liquidity_Domain",
         "contract_file": "contracts/deposit_liquidity_data_product_contract.yaml",
-        "description": """### 📜 Deposit & Liquidity Data Product Contract
-**Version:** `1.0.0` | **Status:** `ACTIVE`
-**Domain:** Deposit & Liquidity Domain | **Owner:** Retail & Corporate Banking Data Product Team
-
-#### ⏱️ Service Level Agreements (SLAs)
-- **Freshness SLA:** `5 minutes (Real-Time Ledger Balances)`
-- **Availability SLA:** `99.95%`
-- **Retention Policy:** `10 years (Regulatory Audit Ledger)`
-- **Data Quality Threshold:** `>= 99.5%`
-
-#### 🛡️ Schema & Quality Guarantees
-- `financial.deposit_account`: BIAN Current & Savings Accounts (`account_number` PII Personal)
-- `financial.deposit_balance`: Real-Time Position Balances & Overdraft Exposures
-- `financial.deposit_transaction`: Immutable Ledger Transaction History
-"""
     },
     {
         "name": "Loan_Credit_Risk_Data_Product",
         "displayName": "Loan & Credit Risk Data Product",
         "domain": "Loan_Credit_Risk_Domain",
         "contract_file": "contracts/loan_credit_risk_data_product_contract.yaml",
-        "description": """### 📜 Loan & Credit Risk Data Product Contract
-**Version:** `1.0.0` | **Status:** `ACTIVE`
-**Domain:** Loan & Credit Risk Domain | **Owner:** Credit Risk & Capital Management Data Team
-
-#### ⏱️ Service Level Agreements (SLAs)
-- **Freshness SLA:** `1 hour`
-- **Availability SLA:** `99.9%`
-- **Retention Policy:** `10 years (Basel III/IV Compliance)`
-- **Data Quality Threshold:** `>= 99.0%`
-
-#### 🛡️ Schema & Quality Guarantees
-- `financial.loan_agreement`: BIAN Approved Loan Contracts & Principal
-- `financial.loan_application`: Credit Assessment Requests
-- `financial.loan_repayment_schedule`: Installment Amortization Schedules
-- `financial.loan_collateral`: Pledged Asset Valuations
-"""
-    }
+    },
 ]
 
 def main() -> None:
     """Creates the 3 BIAN/FIBO domain entities (DOMAINS) and registers each
-    data product/contract's markdown description against its owning table
-    (D2: this still hand-duplicates contract content as markdown rather than
-    reading contracts/*.yaml as the source of truth -- known, open gap)."""
+    data product's description, generated from the real contracts/*.yaml
+    content (D2: previously hand-duplicated markdown that could -- and did --
+    drift from the YAML; now the YAML is parsed and rendered, not copied)."""
     print("🚀 Creating Domains & Registering Data Products / Contracts in OpenMetadata Catalog...")
+
+    # Parse contracts/*.yaml once, keyed by their own source-file path so
+    # each DATA_PRODUCTS entry's hand-specified "contract_file" can look its
+    # matching parsed contract back up.
+    contracts_by_file = {c["_source_file"]: c for c in load_contracts()}
 
     # 1. Create Domains
     for d in DOMAINS:
@@ -131,11 +96,12 @@ def main() -> None:
 
     # 2. Register Data Products
     for dp in DATA_PRODUCTS:
+        contract = contracts_by_file[dp["contract_file"]]
         payload = {
             "name": dp["name"],
             "displayName": dp["displayName"],
             "domain": dp["domain"],
-            "description": dp["description"]
+            "description": render_contract_markdown(contract),
         }
         res = api_put("dataProducts", payload)
         if res:

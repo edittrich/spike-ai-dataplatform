@@ -63,6 +63,83 @@ models:
         nullable: false
         pii_classification: "PersonalData.SpecialCategory"
 
+  # D2: three tables added 2026-08-08 to close this contract's coverage gap
+  # (previously 3 of the 6 real Party & Customer Domain tables) -- columns,
+  # types, and allowed_values below verified directly against
+  # supabase/migrations/20260722000000_create_financial_platform_schema.sql,
+  # not transcribed from schema.dbml or any other secondary source.
+  financial.party_role_customer:
+    description: Customer Role Context, KYC Status & AML Risk Rating
+    type: table
+    columns:
+      party_role_customer_id:
+        type: UUID
+        primary_key: true
+        nullable: false
+        description: Surrogate primary key UUID
+      customer_number:
+        type: VARCHAR
+        nullable: false
+        description: "Business key: Customer account reference number"
+      customer_segment:
+        type: VARCHAR
+        nullable: false
+        allowed_values: ["RETAIL", "SME", "CORPORATE", "WEALTH"]
+      kyc_status:
+        type: VARCHAR
+        nullable: false
+        allowed_values: ["VERIFIED", "PENDING", "EXPIRED"]
+      aml_risk_rating:
+        type: VARCHAR
+        nullable: false
+        allowed_values: ["LOW", "MEDIUM", "HIGH"]
+
+  financial.party_address:
+    description: Physical & Registered Address Details for Parties
+    type: table
+    columns:
+      party_address_id:
+        type: UUID
+        primary_key: true
+        nullable: false
+      address_type:
+        type: VARCHAR
+        nullable: false
+        allowed_values: ["RESIDENTIAL", "REGISTERED", "MAILING"]
+      street_address:
+        type: VARCHAR
+        nullable: false
+        pii_classification: "PersonalData.Personal"
+      city:
+        type: VARCHAR
+        nullable: false
+        pii_classification: "PersonalData.Personal"
+      postal_code:
+        type: VARCHAR
+        nullable: false
+        pii_classification: "PersonalData.Personal"
+
+  financial.party_identification:
+    description: Official Identification & Tax Documents for Parties
+    type: table
+    columns:
+      party_identification_id:
+        type: UUID
+        primary_key: true
+        nullable: false
+      id_type:
+        type: VARCHAR
+        nullable: false
+        allowed_values: ["PASSPORT", "NATIONAL_ID", "TAX_ID", "LEI"]
+      id_number:
+        type: VARCHAR
+        nullable: false
+        pii_classification: "PersonalData.SpecialCategory"
+      verification_status:
+        type: VARCHAR
+        nullable: false
+        allowed_values: ["VERIFIED", "UNVERIFIED"]
+
 quality:
   - type: rowCountGreaterThan
     value: 1000

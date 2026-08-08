@@ -5,12 +5,27 @@
 @prefix dcterms: <http://purl.org/dc/terms/> .
 
 # Standard Ontologies
-@prefix fibo-party: <https://spec.edmcouncil.org/fibo/ontology/FND/Parties/Parties/> .
+#
+# D5 (hardening plan) verification pass, 2026-08-08: fibo-party:, fibo-org:,
+# fibo-account:, and fibo-loan: below were corrected against the real,
+# upstream FIBO ontology source (github.com/edmcouncil/fibo), fetched live
+# and checked for a real owl:Class declaration at each resulting URI --
+# not inferred from documentation. See
+# scripts/ground_fibo_ontology_uris.py's FIBO_GROUNDING_MAP module comment
+# for the full verification writeup (this file's Party/Organization/
+# DepositAccount/LoanAgreement groundings had the identical wrong paths,
+# independently reconciled with that map back when it and this file only
+# needed to agree with *each other* -- neither had been checked against
+# upstream FIBO itself until now). fibo-people:/fibo-partyrole:/bian: were
+# not re-checked in this pass (fibo-people: specifically was verified via
+# the FIBO_GROUNDING_MAP pass and is correct as-is).
+@prefix fibo-party: <https://www.omg.org/spec/Commons/PartiesAndSituations/> .
 @prefix fibo-people: <https://spec.edmcouncil.org/fibo/ontology/FND/AgentsAndPeople/People/> .
-@prefix fibo-org: <https://spec.edmcouncil.org/fibo/ontology/FBC/FunctionalMetadata/Organizations/> .
+@prefix fibo-org: <https://www.omg.org/spec/Commons/Organizations/> .
 @prefix fibo-partyrole: <https://spec.edmcouncil.org/fibo/ontology/FND/Parties/Roles/> .
-@prefix fibo-account: <https://spec.edmcouncil.org/fibo/ontology/FBC/ProductsAndServices/FinancialProductsAndServices/> .
-@prefix fibo-loan: <https://spec.edmcouncil.org/fibo/ontology/LOAN/Loans/LoansGeneral/> .
+@prefix fibo-account: <https://spec.edmcouncil.org/fibo/ontology/FBC/ProductsAndServices/ClientsAndAccounts/> .
+@prefix fibo-loan: <https://spec.edmcouncil.org/fibo/ontology/LOAN/LoansGeneral/Loans/> .
+@prefix fibo-loanapp: <https://spec.edmcouncil.org/fibo/ontology/LOAN/LoansGeneral/LoanApplications/> .
 @prefix bian: <https://bian.org/ontology/v11/> .
 
 # Local Platform Namespace
@@ -45,6 +60,15 @@ fin:Organization a owl:Class ;
 fin:PartyRole a owl:Class ;
     rdfs:label "Party Role"@en ;
     rdfs:comment "Role played by a Party in a specific context."@en ;
+    # D5 CAVEAT (2026-08-08): this line rides on the fibo-party: prefix fix
+    # above (Party's real namespace is OMG Commons), but "PartyInRole"
+    # itself was NOT independently confirmed to exist there or anywhere
+    # else in FIBO -- a live search of the FIBO repository found no class
+    # by this name (FND/Parties/Parties.rdf defines PartyRoleIdentifier/
+    # PartyRoleIdentificationScheme, not PartyInRole). Neither the old nor
+    # this new URI is confirmed correct for this specific class; treat
+    # this one line as unverified pending a closer look, unlike Party/
+    # Organization/DepositAccount/LoanApplication/LoanAgreement above.
     rdfs:isDefinedBy fibo-party:PartyInRole .
 
 fin:Customer a owl:Class ;
@@ -71,12 +95,23 @@ fin:DepositBalance a owl:Class ;
 
 fin:LoanApplication a owl:Class ;
     rdfs:label "Loan Application"@en ;
-    rdfs:comment "Credit application request during origination."@en .
+    rdfs:comment "Credit application request during origination."@en ;
+    # D5: previously ungrounded. FIBO's real, fully-defined class for this
+    # concept is LoanApplication (LOAN/LoansGeneral/LoanApplications.rdf),
+    # verified live 2026-08-08 -- see scripts/ground_fibo_ontology_uris.py's
+    # matching entry, which previously (wrongly) named a nonexistent
+    # "CreditApplication" class instead.
+    rdfs:isDefinedBy fibo-loanapp:LoanApplication .
 
 fin:LoanAgreement a owl:Class ;
     rdfs:label "Loan Agreement Contract"@en ;
     rdfs:comment "Legally binding credit facility agreement."@en ;
-    rdfs:isDefinedBy fibo-loan:LoanAgreement .
+    # D5: verified live 2026-08-08 -- FIBO's real class name is "Loan", not
+    # "LoanAgreement" (no class by that name exists in the FIBO source);
+    # corrected from fibo-loan:LoanAgreement. The fibo-loan: prefix itself
+    # was also wrong (LOAN/Loans/LoansGeneral/, transposed from the real
+    # LOAN/LoansGeneral/Loans/) -- see the prefix declaration's own comment.
+    rdfs:isDefinedBy fibo-loan:Loan .
 
 fin:LoanCollateral a owl:Class ;
     rdfs:label "Pledged Collateral Asset"@en ;

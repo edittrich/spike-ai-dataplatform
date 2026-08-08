@@ -63,6 +63,7 @@ from mcp.server.fastmcp import FastMCP
 # scripts/ has no __init__.py (namespace package); make it importable regardless
 # of the working directory this module is launched from.
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from scripts._contracts import render_sla_summary
 from scripts._dotenv_boot import load_env
 from scripts._json_safe import json_safe_row
 from scripts.ai_safety_guardrails import AISafetyGuardrails
@@ -542,28 +543,60 @@ def hybrid_rag_search(
 
 @mcp.resource("financial://catalog/schema")
 def get_catalog_schema_resource() -> str:
-    """Provides full documentation of PostgreSQL schemas `ref` and `financial`."""
+    """Provides full documentation of PostgreSQL schemas `ref` and `financial`.
+
+    D8 (hardening plan): this previously hardcoded only 8 of the platform's
+    20 real tables (7 financial tables shared with 3 contracts, plus
+    `party_role_customer`) -- an agent asking this resource "what tables
+    exist" got an answer that silently omitted 12 real tables, including
+    every `deposit_*`/`loan_*` sub-entity and all 3 `ref.*` reference
+    tables. Now lists every table in `schema.dbml` (itself kept
+    non-drifting against the live DB by `scripts/generate_schema_dbml.py
+    --check` / `tests/test_schema_dbml_drift.py` -- see D7), with the same
+    one-line descriptions as that file's own `Note:` blocks so this doesn't
+    become a second, independently-drifting summary of the same 20 tables.
+    """
     return """
     PostgreSQL Database Schemas:
-    1. `financial.party`: Core BIAN/FIBO Master Party Entity (Party ID, Party BK, Status).
-    2. `financial.party_individual`: Individual Person demographics (Name, DOB, PII).
-    3. `financial.party_organization`: Legal corporate entities (Legal Name, Reg Number).
-    4. `financial.party_role_customer`: Verified Customer Role & KYC Profiles.
-    5. `financial.deposit_account`: BIAN Current & Savings Deposit Accounts.
-    6. `financial.deposit_balance`: Real-Time Position Balances & Overdraft Exposures.
-    7. `financial.loan_agreement`: Approved Loan Principal Contracts & Interest Rates.
-    8. `financial.loan_collateral`: Pledged Asset Valuations (Real Estate, Vehicle, Cash).
+
+    financial.* (BIAN/FIBO domain tables, SCD Type 2 temporal headers):
+    Party & Customer Domain:
+    1. `financial.party`: Master Party entity supertype (BIAN Party Domain).
+    2. `financial.party_individual`: Individual natural person party subtype (Name, DOB -- PII).
+    3. `financial.party_organization`: Organization legal entity party subtype (Legal Name, Reg Number -- PII).
+    4. `financial.party_role_customer`: Customer role context assigned to a party (KYC status, AML risk rating).
+    5. `financial.party_address`: Physical and registered address details for parties.
+    6. `financial.party_identification`: Official identification and tax documents for parties (Passport/National ID/Tax ID/LEI -- PII).
+
+    Deposit & Liquidity Domain:
+    7. `financial.deposit_account`: BIAN Current & Savings deposit account core contract entity.
+    8. `financial.deposit_balance`: Deposit account real-time balance snapshot.
+    9. `financial.deposit_transaction`: Deposit transaction accounting journal records.
+    10. `financial.deposit_interest_term`: Deposit account interest terms and accrual rates.
+    11. `financial.deposit_overdraft_facility`: Approved overdraft facility bounds for deposit accounts.
+
+    Loan & Credit Risk Domain:
+    12. `financial.loan_application`: Loan origination and credit application lifecycle.
+    13. `financial.loan_agreement`: Core contractual loan agreement (FIBO Loan Agreement).
+    14. `financial.loan_repayment_schedule`: Amortization repayment schedule installments.
+    15. `financial.loan_disbursement`: Loan principal disbursement execution events.
+    16. `financial.loan_collateral`: Pledged security assets securing loan contracts (Real Estate, Vehicle, Securities, Cash).
+
+    17. `financial.entity_embeddings`: pgvector HNSW embedding store for catalog entities, FIBO ontology classes, and semantic cubes (hybrid RAG retrieval).
+
+    ref.* (shared reference data, no SCD2 header -- read-only lookups):
+    18. `ref.ref_country`: ISO 3166-1 country reference table (includes AML risk flag).
+    19. `ref.ref_currency`: ISO 4217 currency reference table.
+    20. `ref.ref_nace_industry`: NACE Rev. 2 industry classification reference table (includes risk level).
     """
 
 @mcp.resource("financial://data-contracts/slas")
 def get_data_contracts_slas_resource() -> str:
-    """Provides formal Data Contract SLA specifications for enterprise data products."""
-    return """
-    Data Product SLAs:
-    - Party & Customer Data Product: Freshness 15m, Availability 99.9%, Quality Threshold >= 99.0%.
-    - Deposit & Liquidity Data Product: Freshness 5m, Availability 99.95%, Quality Threshold >= 99.5%.
-    - Loan & Credit Risk Data Product: Freshness 1h, Availability 99.9%, Quality Threshold >= 99.0%.
-    """
+    """Provides formal Data Contract SLA specifications for enterprise data
+    products, read live from contracts/*.yaml (D2: previously a third,
+    independently hand-maintained copy of the same SLA figures already
+    declared in those files -- see scripts/_contracts.py)."""
+    return render_sla_summary()
 
 def main():
     transport = os.getenv("MCP_TRANSPORT", "stdio").lower()
