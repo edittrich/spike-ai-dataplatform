@@ -19,13 +19,23 @@ For the high-level architecture, data model, and design rationale, see
 
 ## 1. Docker Container Topology & Network Configuration
 
-Most services are orchestrated by [`docker-compose.yml`](../docker-compose.yml), largely in `host`
-network mode (`network_mode: "host"`). **PostgreSQL is the one exception** — it is *not* a
-`docker-compose.yml` service. It is managed by the Supabase CLI (`npm run supabase:start`, wrapping
-`supabase start`), which runs its own Postgres container (image `supabase/postgres:15.1.0.147`,
-published on `127.0.0.1:54322`) plus its own scratch state under `supabase/.temp/`. Start it *before*
-`docker compose up -d` — `cube` and `mcp_sidecar` both connect to `127.0.0.1:54322` and will crash-loop
-against a refused connection until it's up.
+All services in [`docker-compose.yml`](../docker-compose.yml) join a single user-defined bridge
+network, `platform_network` (H4, hardening plan, done 2026-08-08 — `network_mode: "host"` was used
+by 13 services before this migration and is now gone from the file entirely). Services reach each
+other via Docker Compose's own service-name DNS (`neo4j:7687`, `cube:4000`, `prometheus:9090`, ...)
+rather than `127.0.0.1`; host-facing ports are published explicitly via `ports:`, each scoped to
+`127.0.0.1:<port>:<port>` unless a service is meant to be human-reachable only (see the per-service
+table below for each one's actual publish address). **PostgreSQL is the one exception** — it is
+*not* a `docker-compose.yml` service. It is managed by the Supabase CLI (`npm run supabase:start`,
+wrapping `supabase start`), which runs its own Postgres container (image
+`supabase/postgres:15.1.0.147`, published on `127.0.0.1:54322`) plus its own scratch state under
+`supabase/.temp/`. Start it *before* `docker compose up -d` — the 3 services that need it
+(`cube`, `postgres_exporter`, `mcp_sidecar`) reach it via `extra_hosts:
+["host.docker.internal:host-gateway"]` (required explicitly on Linux) rather than `127.0.0.1`, and
+will crash-loop against a refused connection until Postgres is up. See `CLAUDE.md`'s "Docker
+networking" section for the full migration writeup, including the security-model inversion this
+created (a service bound to `127.0.0.1` *internally* is now unreachable by its own bridge peers,
+the opposite of host-mode's behavior) and how every affected service's bind address was corrected.
 
 ### Active Service Inventory
 
@@ -305,12 +315,22 @@ Operational quirks worth knowing before you conclude something in your own setup
   HTTP-fetch procedure used for SSRF), which is why the guardrail's Cypher keyword list still blocks
   `CALL` and the plugin itself was removed rather than merely restricted.
 
-- **Five services still run on `network_mode: "host"`** (Neo4j, Cube.js, Prometheus, Grafana,
-  `mcp_sidecar`) rather than a bridge network with explicit port publishing — assessed and
-  deliberately deferred (see the comment block atop `docker-compose.yml` for the two concrete
-  reasons: reaching the host-run Postgres, and updating every cross-service URL together). MySQL,
-  OpenSearch, and now `openmetadata_server` (via `OPENMETADATA_HOST`, same secure-by-default pattern
-  as `MCP_HOST`) are the exceptions, loopback-only by default.
+- **~~Five services still run on `network_mode: "host"`~~ — fixed 2026-08-08 (H4).** All 13 services
+  that were on host mode now join a bridge network, `platform_network`, with explicit
+  `127.0.0.1:<port>:<port>` publishing. See `CLAUDE.md`'s "Docker networking" section for the full
+  writeup. MySQL, OpenSearch, and `openmetadata_server` (via `OPENMETADATA_HOST`, same
+  secure-by-default pattern as `MCP_HOST`) were already bridge-networked and loopback-only before
+  this migration and are unaffected by it.
+- **Grafana's own datasource health-check UI can report a false negative for Tempo/Alertmanager**
+  (`"Unable to load datasource metadata"` / `"Plugin unavailable"`, both HTTP 500) immediately after
+  a container recreate, even though the underlying connectivity is genuinely working — verified live
+  via `docker exec grafana_observability_dashboard sh -c "wget -qO- http://tempo:3200/status"` and
+  `.../alertmanager:9093/-/healthy"` (both succeed with real data), Grafana's own datasource proxy
+  endpoints (also succeed with real live data), and Grafana's own server logs showing the failing
+  health-check calls complete in 3-5ms — far too fast to be a real network timeout. Not a
+  bridge-networking regression (the same Tempo-search-emptiness pattern was observed before the H4
+  migration too); treat a red datasource health check as inconclusive and verify via `docker exec` +
+  `wget`/the proxy endpoint before assuming a real outage.
 - **`schema.dbml` is a generated file** (`python3 scripts/generate_schema_dbml.py`) — do not hand-edit
   it; a migration that changes the schema without regenerating it will show up as drift under
   `--check` (and in `tests/test_schema_dbml_drift.py`, when a live database is reachable).

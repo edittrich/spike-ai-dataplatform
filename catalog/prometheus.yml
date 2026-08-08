@@ -11,12 +11,17 @@ global:
 rule_files:
   - "prometheus_rules.yml"
 
+# H4: alertmanager is a bridge peer on platform_network now (docker-compose.yml),
+# not a process sharing this container's network namespace -- reached by its
+# service name, not 127.0.0.1.
 alerting:
   alertmanagers:
     - static_configs:
-        - targets: ["127.0.0.1:9093"]
+        - targets: ["alertmanager:9093"]
 
 scrape_configs:
+  # Self-scrape -- 127.0.0.1 here correctly means "this container's own
+  # port" regardless of network mode, unlike every other target below.
   - job_name: 'prometheus'
     static_configs:
       - targets: ['127.0.0.1:9090']
@@ -25,34 +30,36 @@ scrape_configs:
   # start_http_server() in mcp_server/financial_data_mcp_server.py) -- this
   # used to scrape a separate llmops_telemetry_exporter container that was
   # seeded with random.uniform() fake data, now removed.
+  # H4: service name (bridge peer), not 127.0.0.1.
   - job_name: 'mcp_sidecar'
     static_configs:
-      - targets: ['127.0.0.1:8000']
+      - targets: ['mcp_sidecar:8000']
 
   # Phase 4 (Part 5 item 3): the remaining scrape targets below are all new.
+  # H4: all service names (bridge peers) now, not 127.0.0.1.
   - job_name: 'node_exporter'
     static_configs:
-      - targets: ['127.0.0.1:9100']
+      - targets: ['node_exporter:9100']
 
   - job_name: 'postgres_exporter'
     static_configs:
-      - targets: ['127.0.0.1:9187']
+      - targets: ['postgres_exporter:9187']
 
   - job_name: 'mysqld_exporter'
     static_configs:
-      - targets: ['127.0.0.1:9104']
+      - targets: ['mysqld_exporter:9104']
 
   - job_name: 'cadvisor'
     static_configs:
-      - targets: ['127.0.0.1:8081']
+      - targets: ['cadvisor:8081']
 
   # See docker-compose.yml's `neo4j` service and
   # catalog/neo4j_jmx_exporter_config.yml -- JVM-level metrics only
   # (Neo4j Community has no domain-specific Prometheus reporter).
   - job_name: 'neo4j_jvm'
     static_configs:
-      - targets: ['127.0.0.1:9101']
+      - targets: ['neo4j:9101']
 
   - job_name: 'alertmanager'
     static_configs:
-      - targets: ['127.0.0.1:9093']
+      - targets: ['alertmanager:9093']

@@ -16,9 +16,10 @@
 #
 # OTLP receiver ports (4319/4320) are deliberately non-default -- see
 # catalog/otel-collector-config.yaml's port note for why: this receiver only
-# ever hears from the otel_collector service on this same host-networked
-# stack, never directly from application code, so the well-known 4317/4318
-# ports are left free for the collector itself.
+# ever hears from the otel_collector service (a bridge peer on
+# platform_network, reached by its service name -- see docker-compose.yml's
+# `otel_collector` service), never directly from application code, so the
+# well-known 4317/4318 ports are left free for the collector itself.
 # ==============================================================================
 
 server:

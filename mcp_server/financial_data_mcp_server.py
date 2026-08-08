@@ -603,10 +603,24 @@ def main():
     port = int(os.getenv("MCP_PORT", "8001"))
     # Defaults to loopback-only, not 0.0.0.0 -- this server executes arbitrary
     # (guardrail-checked) SQL/Cypher; binding every interface should be an
-    # explicit choice (set MCP_HOST=0.0.0.0 in .env), not the out-of-the-box
-    # behavior. docker-compose.yml's mcp_sidecar runs with network_mode: host,
-    # so "loopback" there means the *host's* loopback -- reachable from the
-    # host itself, not from the network.
+    # explicit choice, not the out-of-the-box behavior. This default is what
+    # actually applies when running this module's SSE mode directly on a
+    # host (outside Docker) -- set MCP_HOST=0.0.0.0 there to deliberately
+    # bind every interface.
+    #
+    # H4 (hardening plan): docker-compose.yml's `mcp_sidecar` service moved
+    # off `network_mode: "host"` onto a bridge network, and now hardcodes
+    # MCP_HOST=0.0.0.0 in its own `environment:` block (not read from
+    # `.env`) -- required for Docker's own port-forwarding and for
+    # Prometheus (a bridge peer scraping :8000) to reach this process at
+    # all, since a container's own 127.0.0.1 is unreachable from outside
+    # that same container under bridge networking, not just from the host.
+    # `.env`'s own MCP_HOST is a genuinely different control now: it sets
+    # the *host-side* interface docker-compose publishes mcp_sidecar's
+    # ports to (mirroring OPENMETADATA_HOST's existing role for
+    # openmetadata_server), not this process's own bind address inside
+    # that container. This `os.getenv("MCP_HOST", "127.0.0.1")` call and
+    # its safe default are otherwise unchanged.
     host = os.getenv("MCP_HOST", "127.0.0.1")
     if transport == "sse":
         if not MCP_API_KEY:

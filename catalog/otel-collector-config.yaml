@@ -13,12 +13,14 @@
 #
 # Port note: this collector's OTLP receiver stays on the conventional
 # 4317/4318 ports (the well-known ports application code targets by
-# default). tempo's own OTLP receiver is deliberately moved to 4319/4320
-# (see catalog/tempo.yaml) purely to avoid a host-network port collision --
-# every service in this docker-compose.yml still runs with
-# `network_mode: "host"` (see its top-of-file comment on why the full
-# bridge-networking migration is deferred), so two services cannot both bind
-# 0.0.0.0:4317 on the same host.
+# default). tempo's own OTLP receiver is deliberately kept on 4319/4320
+# (see catalog/tempo.yaml) -- H4: originally chosen purely to avoid a
+# host-network port collision (every service in docker-compose.yml used to
+# run with `network_mode: "host"`, sharing one namespace, so two services
+# couldn't both bind 0.0.0.0:4317). Now that every service is on its own
+# bridge-networked container (its own network namespace), that specific
+# collision can no longer happen -- the numbers are kept as-is anyway to
+# avoid unrelated renumbering churn, not because they're still required.
 # ==============================================================================
 
 receivers:
@@ -37,9 +39,11 @@ processors:
 exporters:
   # otlp_grpc, not the deprecated `otlp` alias (still accepted, but this
   # collector version already warns on it) -- exports to tempo's OTLP/gRPC
-  # receiver.
+  # receiver. H4: tempo is a bridge peer on platform_network now, reached
+  # by its service name, not 127.0.0.1 (which would mean this collector's
+  # own container).
   otlp_grpc:
-    endpoint: 127.0.0.1:4319
+    endpoint: tempo:4319
     tls:
       insecure: true
 
@@ -47,9 +51,13 @@ extensions:
   # Not wired into docker-compose.yml as a container-native `healthcheck:` --
   # the image ships no shell/wget/curl to run one from inside the container
   # (see docker-compose.yml's comment above the tempo/otel_collector
-  # services). Still useful for manual/host-side inspection, since
-  # `network_mode: host` exposes this at 127.0.0.1:13133 on the host itself:
-  # `curl http://127.0.0.1:13133/` returns 200 when the collector is healthy.
+  # services). H4: not published to the host either (docker-compose.yml's
+  # `ports:` for this service only covers the OTLP receivers) -- this
+  # endpoint is currently unreachable outside the container. Manual
+  # inspection now needs `docker exec otel_collector` (no shell/curl
+  # available, per the note above -- a `docker compose exec` debugging
+  # session would need to install one) or publishing this port explicitly
+  # if this becomes a routine need.
   health_check:
     endpoint: 0.0.0.0:13133
 

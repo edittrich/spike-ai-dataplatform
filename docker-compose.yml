@@ -7,47 +7,85 @@ x-logging: &default-logging
     max-size: "10m"
     max-file: "3"
 
-# NOT DONE HERE, deliberately (H4 in the hardening plan): migrating neo4j,
-# cube, prometheus, grafana, mcp_sidecar, tempo, and otel_collector off
-# `network_mode: "host"` onto a user-defined bridge network with explicit
-# 127.0.0.1:<port>:<port> publishing, the way
-# openmetadata_server/openmetadata_db/openmetadata_search already work.
-# (tempo/otel_collector, added after this note was first written, followed
-# the same host-networking convention as the other five for consistency --
-# introducing a new, different networking model for just two services would
-# have made the eventual bridge migration harder to reason about, not
-# easier.) This pass instead did the parts of H4 that were genuinely
-# config-only and low-risk: openmetadata_server's 0.0.0.0 publish
-# inconsistency (fixed, see OPENMETADATA_HOST below), plus :ro config mounts,
-# persistent volumes, depends_on, logging limits, and security_opt across
-# every service (Q14). The full bridge-network migration was assessed and
-# intentionally deferred -- it's a real networking restructure, not a
-# config toggle, for two concrete reasons:
-#   1. PostgreSQL/Supabase is not a compose service (see D1) -- it's reached
-#      today at 127.0.0.1:54322 because every host-mode container shares the
-#      host's network namespace. Both `cube` and `mcp_sidecar` need it.
-#      Bridge-networked containers would need `host.docker.internal` /
-#      `extra_hosts: ["host.docker.internal:host-gateway"]` instead, and
-#      every default in this file, .env.example, and the scripts that read
-#      POSTGRES_HOST would need to change consistently, not just one.
-#   2. Inter-service calls between these services (mcp_sidecar -> neo4j/cube/
-#      otel_collector, grafana -> prometheus/tempo, otel_collector -> tempo)
-#      currently all resolve via 127.0.0.1 too. Bridge networking gives real
-#      service-name DNS instead (`neo4j:7687`, `cube:4000`, `prometheus:9090`,
-#      `tempo:4319`) -- correct, but it means updating
-#      catalog/prometheus.yml's scrape targets, every
-#      catalog/grafana/provisioning/datasources/*.yml URL, and this file's
-#      own NEO4J_URI/CUBEJS_URL/OTEL_EXPORTER_OTLP_ENDPOINT defaults together,
-#      then re-verifying each cross-service call live. Get any one of these
-#      wrong and a service looks "up" while silently unable to reach its
-#      dependency -- worse for tempo/otel_collector specifically, since
-#      neither image has a healthcheck to even reveal onto (see the comment
-#      above those two services), so a wrong DNS name there would fail
-#      silently rather than show up as an unhealthy container.
-# Both are mechanically doable, but not something to rush through inside an
-# already-large hardening pass on a stack that's been carefully verified
-# working end-to-end -- this belongs in its own dedicated pass with room to
-# debug connectivity issues without extended platform downtime.
+# H4 (hardening plan) -- FULL BRIDGE-NETWORKING MIGRATION, done 2026-08-08 on
+# explicit request. Every service in this file now sits on `platform_network`
+# (a user-defined bridge network, defined at the bottom of this file) instead
+# of `network_mode: "host"`; `neo4j_jmx_agent_init` also joins it for
+# consistency even though it makes no network calls to a peer. This closes
+# H4's original finding (six -- later thirteen, as tempo/otel_collector/the
+# exporters/alertmanager were added under the same host-networking
+# convention -- services reachable on every host interface with no
+# Docker-native publishing control) for real, not just documents it as
+# deferred.
+#
+# Scope was deliberately wider than the specific services first named when
+# this was requested (Neo4j, Cube.js, Prometheus, Grafana, mcp_sidecar) --
+# confirmed with the user before starting, because a *partial* migration
+# would have silently broken real, working functionality: Prometheus's
+# scrape targets and Grafana's Alertmanager/Tempo datasources are all
+# services that would otherwise have stayed on host+loopback-bound, and **a
+# bridge container cannot reach a service bound to 127.0.0.1 on the host at
+# all** -- that address means the *bridge container's own* loopback, not the
+# host's, and even `host.docker.internal`/`extra_hosts:
+# ["host.docker.internal:host-gateway"]` doesn't help, since a connection
+# arriving via the bridge gateway is not a loopback-originated connection as
+# far as the target's own `127.0.0.1`-only bind is concerned. So every
+# service that used to be `network_mode: "host"` (neo4j, cubestore, cube,
+# prometheus, grafana, tempo, otel_collector, node_exporter,
+# postgres_exporter, mysqld_exporter, cadvisor, alertmanager, mcp_sidecar --
+# 13 total) moved together, keeping the resulting stack fully connected
+# rather than leaving some services correctly migrated and others silently
+# unreachable.
+#
+# Two real, previously-documented blockers, now actually resolved:
+#   1. PostgreSQL/Supabase is not a compose service (see D1) -- reached at
+#      127.0.0.1:54322 under host networking because every host-mode
+#      container shared the host's network namespace. `cube`,
+#      `mcp_sidecar`, and `postgres_exporter` (the three services that talk
+#      to it directly) now use `host.docker.internal` via
+#      `extra_hosts: ["host.docker.internal:host-gateway"]` instead --
+#      required explicitly on Linux (unlike Docker Desktop on macOS/Windows,
+#      where it's automatic), verified live to actually resolve and connect.
+#      `.env`/`.env.example`'s own `POSTGRES_HOST` default (127.0.0.1) is
+#      UNCHANGED and still correct -- it's read by host-run pipeline
+#      scripts, which still reach Postgres directly over the host's real
+#      loopback; only the three *containerized* services' own internal env
+#      values are hardcoded to `host.docker.internal` in this file, not
+#      derived from `.env`'s host-oriented default.
+#   2. Inter-service calls (mcp_sidecar -> neo4j/cube/otel_collector,
+#      grafana -> prometheus/tempo/alertmanager, otel_collector -> tempo,
+#      prometheus -> every exporter + alertmanager) now use real Docker
+#      service-name DNS (`neo4j:7687`, `cube:4000`, `prometheus:9090`,
+#      `tempo:4319`, ...) -- `catalog/prometheus.yml`'s scrape targets,
+#      every `catalog/grafana/provisioning/datasources/*.yml` URL,
+#      `catalog/otel-collector-config.yaml`'s tempo exporter endpoint, and
+#      this file's own container-internal env values were all updated and
+#      re-verified live, not just edited and assumed correct.
+# A third, newly-discovered requirement neither original blocker mentioned:
+# every internal `--web.listen-address=127.0.0.1:<port>`-style bind (H4's
+# own *original* hardening pattern, applied when these services still
+# shared the host's namespace) had to change to `0.0.0.0:<port>` --
+# under bridge networking, a service bound to its own container's
+# `127.0.0.1` is unreachable from *any* other container on the same
+# user-defined network too, not just from the host. The security property
+# H4's loopback-only pattern used to provide is now expressed differently:
+# by not publishing a `ports:` entry at all for a service only other
+# containers need (cubestore, neo4j's JMX exporter port), or by publishing
+# explicitly to `127.0.0.1:<port>:<port>` on the *host* side for services
+# that also need direct host/debug access (matching
+# openmetadata_server/openmetadata_db/openmetadata_search's
+# already-established pattern, now the model every service follows).
+#
+# `.env`'s `MCP_HOST` is repurposed the same way `OPENMETADATA_HOST` already
+# was: it now controls only the host-side interface `mcp_sidecar`'s ports
+# are published to (still defaults to 127.0.0.1, still overridable to
+# 0.0.0.0 for deliberate LAN access), not the container's own internal bind
+# address, which is hardcoded to 0.0.0.0 in this file's `environment:` block
+# for `mcp_sidecar` specifically (required for Docker's own port-forwarding
+# and for Prometheus, a bridge peer, to scrape its metrics endpoint) --
+# `mcp_server/financial_data_mcp_server.py`'s own `MCP_HOST` handling is
+# unchanged and still defaults safely to 127.0.0.1 for the (still-supported)
+# case of running the SSE server directly on a host, outside Docker.
 
 # Q14 (container capability hardening -- `read_only`): every service below
 # except `neo4j_jmx_agent_init` (see its own comment for the reasoned
@@ -93,6 +131,8 @@ services:
     image: mysql:8.0.35
     container_name: openmetadata_mysql
     restart: always
+    networks:
+      - platform_network
     read_only: true
     # Q14: beyond /var/lib/mysql (already a writable bind mount), mysqld
     # needs two more writable paths that read_only:true would otherwise
@@ -165,6 +205,8 @@ services:
     image: opensearchproject/opensearch:2.11.0
     container_name: openmetadata_search
     restart: always
+    networks:
+      - platform_network
     read_only: true
     # Q14: this service already had no persistent volume for its index
     # data before this change (Search is a rebuildable projection of
@@ -259,6 +301,8 @@ services:
     image: openmetadata/server:1.3.1
     container_name: openmetadata_server
     restart: always
+    networks:
+      - platform_network
     read_only: true
     volumes:
       - type: tmpfs
@@ -328,7 +372,19 @@ services:
     image: neo4j:5.18.0-community
     container_name: neo4j_knowledge_graph
     restart: always
-    network_mode: "host"
+    networks:
+      - platform_network
+    # H4: bolt (7687) is used by host-run pipeline scripts
+    # (build_knowledge_graph.py, hybrid_rag_retriever.py, ...) via
+    # NEO4J_URI in .env, which is unchanged (still 127.0.0.1:7687) --
+    # publishing preserves that. 7474 (Neo4j Browser) published for direct
+    # human access/debugging. The JMX exporter port (9101, see
+    # NEO4J_server_jvm_additional below) is deliberately NOT published --
+    # only Prometheus, a bridge peer, ever reads it, via the `neo4j:9101`
+    # service name.
+    ports:
+      - "127.0.0.1:7474:7474"
+      - "127.0.0.1:7687:7687"
     read_only: true
     # Q14: the official image's entrypoint, when launched as root (the
     # default), unconditionally `chown -R neo4j:neo4j /var/lib/neo4j`
@@ -370,9 +426,14 @@ services:
       # documented/verified to *append* to the image's own default JVM flags
       # (G1GC, AlwaysPreTouch, etc.), not replace them -- confirmed live via
       # `ps aux` showing both the shipped flags and this one together. Binds
-      # the exporter's own HTTP listener to 127.0.0.1 (H4's pattern), not the
-      # JMX RMI port itself, which never leaves the JVM process.
-      - NEO4J_server_jvm_additional=-javaagent:/jmx_exporter_agent/jmx_prometheus_javaagent.jar=127.0.0.1:9101:/jmx_exporter/config.yml
+      # the exporter's own HTTP listener to 0.0.0.0 (H4: this port is never
+      # published to the host -- see the `ports:` comment above -- so
+      # 0.0.0.0 here only means "reachable by other containers on
+      # platform_network", i.e. Prometheus, not "reachable from the LAN";
+      # binding 127.0.0.1 here, this container's *own* loopback, would make
+      # it unreachable even from Prometheus, a bridge peer). The JMX RMI
+      # port itself never leaves the JVM process either way.
+      - NEO4J_server_jvm_additional=-javaagent:/jmx_exporter_agent/jmx_prometheus_javaagent.jar=0.0.0.0:9101:/jmx_exporter/config.yml
     volumes:
       - ./neo4j/data:/data
       - ./neo4j/logs:/logs
@@ -432,15 +493,17 @@ services:
   # Postgres instance, single Neo4j instance, no HA anywhere); a real
   # multi-node router/worker Cube Store cluster would be disproportionate.
   # All three of its ports (HTTP for cube's own queries, MySQL-wire, and the
-  # status probe) are explicitly bound to loopback (H4's established pattern
-  # for internal services under network_mode: host) via CUBESTORE_*_BIND_ADDR
-  # -- verified live these are genuine, working env vars (`grep -a -o
-  # 'CUBESTORE_[A-Z_]*'` against the binary), not guessed from partial docs.
+  # status probe) are genuine, working env vars, not guessed from partial
+  # docs (verified live via `grep -a -o 'CUBESTORE_[A-Z_]*'` against the
+  # binary). H4: none of these three are published to the host at all --
+  # only `cube`, a bridge peer on platform_network, ever talks to this
+  # service, via the `cubestore` service name.
   cubestore:
     image: cubejs/cubestore:v1.7.17
     container_name: cube_store
     restart: always
-    network_mode: "host"
+    networks:
+      - platform_network
     read_only: true
     tmpfs:
       - /tmp:mode=1777
@@ -449,9 +512,16 @@ services:
         limits:
           memory: 768m
     environment:
-      - CUBESTORE_HTTP_BIND_ADDR=127.0.0.1:3030
-      - CUBESTORE_BIND_ADDR=127.0.0.1:3306
-      - CUBESTORE_STATUS_BIND_ADDR=127.0.0.1:3031
+      # H4: 0.0.0.0, not 127.0.0.1 -- this is the container's *own*
+      # loopback under bridge networking, unreachable even from `cube`, a
+      # peer on the same platform_network (see the module comment above
+      # for why H4's original loopback-only pattern doesn't carry over
+      # unchanged). No `ports:` entry publishes any of these to the host,
+      # so "0.0.0.0" here means "reachable by bridge peers," not "exposed
+      # to the LAN."
+      - CUBESTORE_HTTP_BIND_ADDR=0.0.0.0:3030
+      - CUBESTORE_BIND_ADDR=0.0.0.0:3306
+      - CUBESTORE_STATUS_BIND_ADDR=0.0.0.0:3031
       - CUBESTORE_TELEMETRY=false
     volumes:
       # Persists metastore + partition data across container recreates --
@@ -481,7 +551,21 @@ services:
     image: cubejs/cube:v0.35
     container_name: cube_semantic_layer
     restart: always
-    network_mode: "host"
+    networks:
+      - platform_network
+    # H4: reaches the host-run Postgres (see D1 -- not a compose service)
+    # via host.docker.internal instead of 127.0.0.1, now that this
+    # container has its own network namespace. Required explicitly on
+    # Linux (Docker Desktop on macOS/Windows provides this automatically);
+    # verified live it resolves and connects on this host.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # 4000 published for host-run script/human access (CUBEJS_URL in
+    # .env, unchanged, still 127.0.0.1:4000) -- mcp_sidecar, a bridge
+    # peer, reaches this via the `cube:4000` service name instead,
+    # regardless of this publish.
+    ports:
+      - "127.0.0.1:4000:4000"
     read_only: true
     # H1: production mode (CUBEJS_REFRESH_WORKER=true below) writes
     # temporary CSV export/import staging files to /tmp while building
@@ -506,7 +590,12 @@ services:
           memory: 768m
     environment:
       - CUBEJS_DB_TYPE=postgres
-      - CUBEJS_DB_HOST=${POSTGRES_HOST:-127.0.0.1}
+      # H4: hardcoded, not ${POSTGRES_HOST:-127.0.0.1} -- .env's
+      # POSTGRES_HOST default is correct for host-run scripts (which
+      # still reach Postgres over the host's real loopback), but this
+      # container needs host.docker.internal (see extra_hosts above)
+      # specifically, which reading .env's own default would not give it.
+      - CUBEJS_DB_HOST=host.docker.internal
       - CUBEJS_DB_PORT=54322
       - CUBEJS_DB_NAME=${POSTGRES_DB:-postgres}
       # H1: connects as the least-privilege cube_readonly role (see
@@ -540,7 +629,10 @@ services:
       # consistent with this being a single-operator local PoC, not a
       # multi-node deployment.
       - CUBEJS_DEV_MODE=false
-      - CUBEJS_CUBESTORE_HOST=127.0.0.1
+      # H4: the cubestore service name, not 127.0.0.1 -- cubestore is a
+      # separate container on the same platform_network now, not a
+      # process sharing this one's network namespace.
+      - CUBEJS_CUBESTORE_HOST=cubestore
       - CUBEJS_CUBESTORE_PORT=3030
       - CUBEJS_REFRESH_WORKER=true
       # H1: two real, independently-issued roles (see cube/cube.js's
@@ -575,7 +667,16 @@ services:
     image: prom/prometheus:v2.51.0
     container_name: prometheus_metrics
     restart: always
-    network_mode: "host"
+    networks:
+      - platform_network
+    # H4: published for host/human UI access, unchanged address
+    # (127.0.0.1:9090); every scrape target below and the `alerting:`
+    # block in catalog/prometheus.yml now use service names instead
+    # (`mcp_sidecar:8000`, `node_exporter:9100`, ...), since those targets
+    # are all bridge peers now, not processes sharing this container's
+    # network namespace.
+    ports:
+      - "127.0.0.1:9090:9090"
     read_only: true
     deploy:
       resources:
@@ -608,7 +709,15 @@ services:
     image: grafana/grafana:10.4.0
     container_name: grafana_observability_dashboard
     restart: always
-    network_mode: "host"
+    networks:
+      - platform_network
+    # H4: published for host/human UI access, unchanged address
+    # (127.0.0.1:3000); its 3 datasources
+    # (catalog/grafana/provisioning/datasources/*.yml) now point at
+    # `prometheus`/`tempo`/`alertmanager` service names instead of
+    # 127.0.0.1, since all three are bridge peers now.
+    ports:
+      - "127.0.0.1:3000:3000"
     read_only: true
     # Q14: the image's own default GF_PATHS_LOGS=/var/log/grafana isn't
     # covered by the grafana_data volume (that's only /var/lib/grafana) --
@@ -696,7 +805,17 @@ services:
     image: grafana/tempo:3.0.2
     container_name: tempo_tracing_backend
     restart: always
-    network_mode: "host"
+    networks:
+      - platform_network
+    # H4: 3200 (query API) published for host debugging/verification and
+    # because Grafana's Tempo datasource previously (pre-migration) relied
+    # on host-reachability; Grafana now reaches it via the `tempo` service
+    # name instead, but publishing costs nothing and preserves direct
+    # `curl 127.0.0.1:3200/...` access. The OTLP receiver ports
+    # (4319/4320) are NOT published -- only otel_collector, a bridge peer,
+    # ever sends to them.
+    ports:
+      - "127.0.0.1:3200:3200"
     read_only: true
     deploy:
       resources:
@@ -717,7 +836,18 @@ services:
     image: otel/opentelemetry-collector:0.158.0
     container_name: otel_collector
     restart: always
-    network_mode: "host"
+    networks:
+      - platform_network
+    # H4: OTLP receiver ports published, unchanged addresses
+    # (127.0.0.1:4317/4318) -- host-run scripts (scripts/_otel_tracing.py,
+    # used by scripts/hybrid_rag_retriever.py when run directly on the
+    # host, not just by the containerized mcp_sidecar) send spans here via
+    # .env's OTEL_EXPORTER_OTLP_ENDPOINT, unchanged. mcp_sidecar, a bridge
+    # peer, reaches this via the `otel_collector` service name instead,
+    # regardless of this publish.
+    ports:
+      - "127.0.0.1:4317:4317"
+      - "127.0.0.1:4318:4318"
     read_only: true
     deploy:
       resources:
@@ -736,21 +866,28 @@ services:
   # ---------------------------------------------------------------------------
   # Phase 4 (hardening plan, Part 5 item 3): real host/service exporters, so
   # Prometheus has more than 2 scrape targets (itself + mcp_sidecar) to alert
-  # on. All bound to 127.0.0.1 explicitly (H4's established pattern) even
-  # though `network_mode: host` would otherwise expose them on every
-  # interface -- none of these have any auth of their own.
+  # on. H4: each publishes its metrics port to 127.0.0.1 on the host
+  # (unchanged addresses, direct debug access preserved) while binding
+  # 0.0.0.0 internally so Prometheus, a bridge peer, can also scrape it via
+  # its service name -- neither of these have any auth of their own, so
+  # loopback-only host publishing (not 0.0.0.0:<port>:<port>) is what
+  # actually keeps them off the LAN now, the same property H4's original
+  # bind-to-127.0.0.1-inside-the-container pattern provided under host
+  # networking.
   # ---------------------------------------------------------------------------
   node_exporter:
     image: prom/node-exporter:v1.8.2
     container_name: node_exporter
     restart: always
-    network_mode: "host"
+    networks:
+      - platform_network
+    # `pid: host` (needed to see host processes/mounts) is independent of
+    # network mode -- this and the host bind mounts below are unaffected
+    # by the H4 migration.
     pid: host
     read_only: true
-    deploy:
-      resources:
-        limits:
-          memory: 128m
+    ports:
+      - "127.0.0.1:9100:9100"
     volumes:
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
@@ -760,7 +897,7 @@ services:
       - "--path.sysfs=/host/sys"
       - "--path.rootfs=/rootfs"
       - "--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)"
-      - "--web.listen-address=127.0.0.1:9100"
+      - "--web.listen-address=0.0.0.0:9100"
     security_opt:
       - no-new-privileges:true
     logging: *default-logging
@@ -775,8 +912,16 @@ services:
     image: prometheuscommunity/postgres-exporter:v0.15.0
     container_name: postgres_exporter
     restart: always
-    network_mode: "host"
+    networks:
+      - platform_network
+    # H4: reaches the host-run Postgres (D1 -- not a compose service) via
+    # host.docker.internal instead of 127.0.0.1 -- see `cube`'s identical
+    # comment for why this needs an explicit extra_hosts entry on Linux.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     read_only: true
+    ports:
+      - "127.0.0.1:9187:9187"
     deploy:
       resources:
         limits:
@@ -787,9 +932,10 @@ services:
       # Verified live: every collector works under mcp_readonly except `wal`
       # (needs pg_ls_waldir(), a superuser-only function), disabled below
       # rather than widening the role's grants for a metrics nicety.
-      - DATA_SOURCE_NAME=postgresql://${MCP_PG_READONLY_USER:-mcp_readonly}:${MCP_PG_READONLY_PASSWORD}@127.0.0.1:54322/${POSTGRES_DB:-postgres}?sslmode=disable
+      # H4: host.docker.internal, not 127.0.0.1 -- see extra_hosts above.
+      - DATA_SOURCE_NAME=postgresql://${MCP_PG_READONLY_USER:-mcp_readonly}:${MCP_PG_READONLY_PASSWORD}@host.docker.internal:54322/${POSTGRES_DB:-postgres}?sslmode=disable
     command:
-      - "--web.listen-address=127.0.0.1:9187"
+      - "--web.listen-address=0.0.0.0:9187"
       - "--no-collector.wal"
     security_opt:
       - no-new-privileges:true
@@ -805,8 +951,11 @@ services:
     image: prom/mysqld-exporter:v0.15.1
     container_name: mysqld_exporter
     restart: always
-    network_mode: "host"
+    networks:
+      - platform_network
     read_only: true
+    ports:
+      - "127.0.0.1:9104:9104"
     # Q14 (container capability hardening): the entrypoint below writes
     # /tmp/.my.cnf at every startup, so read_only:true needs an explicit
     # writable tmpfs for /tmp -- the one path this container genuinely
@@ -837,10 +986,17 @@ services:
     # above (themselves sourced from .env, never hardcoded) rather than
     # committing any credential file to the repo.
     entrypoint: ["/bin/sh", "-c"]
+    # H4: host=openmetadata_db (the bridge peer's service name), port=3306
+    # (its real internal MySQL port) -- previously host=127.0.0.1,
+    # port=33060, which only worked because network_mode: host meant this
+    # container shared openmetadata_db's *published debug port* on the
+    # host's own loopback; now that both are separate containers on
+    # platform_network, this connects directly to openmetadata_db's own
+    # port instead of routing through its host-facing debug publish.
     command:
       - |
-        printf '[client]\nuser=%s\npassword=%s\nhost=127.0.0.1\nport=33060\n' "$$MYSQLD_EXPORTER_USER" "$$MYSQLD_EXPORTER_PASSWORD" > /tmp/.my.cnf &&
-        exec mysqld_exporter --web.listen-address=127.0.0.1:9104 --config.my-cnf=/tmp/.my.cnf --no-collect.slave_status
+        printf '[client]\nuser=%s\npassword=%s\nhost=openmetadata_db\nport=3306\n' "$$MYSQLD_EXPORTER_USER" "$$MYSQLD_EXPORTER_PASSWORD" > /tmp/.my.cnf &&
+        exec mysqld_exporter --web.listen-address=0.0.0.0:9104 --config.my-cnf=/tmp/.my.cnf --no-collect.slave_status
     depends_on:
       openmetadata_db:
         condition: service_healthy
@@ -858,8 +1014,11 @@ services:
     image: gcr.io/cadvisor/cadvisor:v0.49.1
     container_name: cadvisor
     restart: always
-    network_mode: "host"
+    networks:
+      - platform_network
     read_only: true
+    ports:
+      - "127.0.0.1:8081:8081"
     deploy:
       resources:
         limits:
@@ -883,7 +1042,10 @@ services:
       - /var/lib/docker/:/var/lib/docker:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
     command:
-      - "--listen_ip=127.0.0.1"
+      # H4: 0.0.0.0, not 127.0.0.1 -- see the exporters' group comment
+      # above for why (this port isn't published beyond 127.0.0.1 on the
+      # host regardless, via the `ports:` entry above).
+      - "--listen_ip=0.0.0.0"
       - "--port=8081"
       - "--docker_only=true"
     security_opt:
@@ -943,6 +1105,8 @@ services:
     image: alpine:3.20
     container_name: neo4j_jmx_agent_init
     restart: "no"
+    networks:
+      - platform_network
     volumes:
       - jmx_exporter_agent:/agent
     entrypoint: ["/bin/sh", "-c"]
@@ -962,8 +1126,20 @@ services:
     image: prom/alertmanager:v0.27.0
     container_name: alertmanager
     restart: always
-    network_mode: "host"
+    networks:
+      - platform_network
     read_only: true
+    # H4: published for host/human UI access, unchanged address
+    # (127.0.0.1:9093); Prometheus's `alerting:` block and Grafana's
+    # Alertmanager datasource both now reach this via the `alertmanager`
+    # service name instead -- this is *why* alertmanager had to move to
+    # bridge networking alongside the 5 originally-named services rather
+    # than staying on host+loopback-bound: once Grafana is a bridge
+    # container, it cannot reach a service bound to 127.0.0.1 on the host
+    # at all (see this file's top-of-file H4 comment for the full
+    # reasoning).
+    ports:
+      - "127.0.0.1:9093:9093"
     deploy:
       resources:
         limits:
@@ -974,7 +1150,7 @@ services:
     command:
       - "--config.file=/etc/alertmanager/alertmanager.yml"
       - "--storage.path=/alertmanager"
-      - "--web.listen-address=127.0.0.1:9093"
+      - "--web.listen-address=0.0.0.0:9093"
     security_opt:
       - no-new-privileges:true
     logging: *default-logging
@@ -994,8 +1170,26 @@ services:
       dockerfile: mcp_server/Dockerfile.mcp
     container_name: mcp_agentic_sidecar
     restart: always
-    network_mode: "host"
+    networks:
+      - platform_network
+    # H4: reaches the host-run Postgres (D1 -- not a compose service) via
+    # host.docker.internal instead of 127.0.0.1 -- see `cube`'s identical
+    # comment for why this needs an explicit extra_hosts entry on Linux.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     read_only: true
+    # H4: ${MCP_HOST:-127.0.0.1} here controls the *host-side* publish
+    # interface only (same pattern as OPENMETADATA_HOST for
+    # openmetadata_server) -- not this container's own internal bind
+    # address, which is hardcoded to 0.0.0.0 below regardless of what
+    # MCP_HOST resolves to, since Docker's own port-forwarding (and
+    # Prometheus, a bridge peer, scraping :8000) both require it. See the
+    # `environment:` block below and
+    # mcp_server/financial_data_mcp_server.py's own comment on MCP_HOST's
+    # dual meaning (host-run vs. containerized).
+    ports:
+      - "${MCP_HOST:-127.0.0.1}:8001:8001"
+      - "${MCP_HOST:-127.0.0.1}:8000:8000"
     deploy:
       resources:
         limits:
@@ -1034,20 +1228,39 @@ services:
       # documented choice instead of a silent degradation.
       - PYTHONDONTWRITEBYTECODE=1
       - MCP_API_KEY=${MCP_API_KEY}
-      - MCP_HOST=${MCP_HOST:-127.0.0.1}
-      - POSTGRES_HOST=${POSTGRES_HOST:-127.0.0.1}
+      # H4: hardcoded 0.0.0.0, NOT ${MCP_HOST:-127.0.0.1} -- this is the
+      # container's own internal bind address (read by
+      # mcp_server/financial_data_mcp_server.py's `main()`), a genuinely
+      # different thing from the `ports:` block's host-publish-interface
+      # use of the same env var name above. Reading .env's MCP_HOST here
+      # too would very likely give the wrong value: .env's own default
+      # (127.0.0.1) is meant for a host-run SSE instance, and binding this
+      # container to its own loopback would make it unreachable by
+      # Docker's port-forwarding and by Prometheus (a bridge peer) alike.
+      - MCP_HOST=0.0.0.0
+      # H4: hardcoded host.docker.internal -- see extra_hosts above. .env's
+      # own POSTGRES_HOST default (127.0.0.1) is correct for host-run
+      # scripts and is left unchanged; reading it here via
+      # ${POSTGRES_HOST:-127.0.0.1} would resolve to this container's own
+      # loopback instead of the real host.
+      - POSTGRES_HOST=host.docker.internal
       - POSTGRES_PORT=54322
       # Connects as the least-privilege mcp_readonly role, not the postgres
       # superuser -- see the comment above POSTGRES_USER in
       # mcp_server/financial_data_mcp_server.py for why.
       - MCP_PG_READONLY_USER=${MCP_PG_READONLY_USER:-mcp_readonly}
       - MCP_PG_READONLY_PASSWORD=${MCP_PG_READONLY_PASSWORD}
-      - NEO4J_URI=${NEO4J_URI:-bolt://127.0.0.1:7687}
+      # H4: neo4j/cube/openmetadata_server/otel_collector below are all
+      # hardcoded to their bridge service names, not read from `.env` via
+      # a `${VAR:-...}` fallback -- those `.env` defaults are for host-run
+      # scripts (still correct, unchanged, still 127.0.0.1-based) and
+      # would resolve to the wrong address if read here instead.
+      - NEO4J_URI=bolt://neo4j:7687
       - NEO4J_USER=${NEO4J_USER:-neo4j}
       - NEO4J_PASSWORD=${NEO4J_PASSWORD}
-      - CUBEJS_URL=${CUBEJS_URL:-http://127.0.0.1:4000/cubejs-api/v1/load}
+      - CUBEJS_URL=http://cube:4000/cubejs-api/v1/load
       - CUBEJS_API_SECRET=${CUBEJS_API_SECRET}
-      - OPENMETADATA_URL=${OPENMETADATA_URL:-http://127.0.0.1:8585/api/v1}
+      - OPENMETADATA_URL=http://openmetadata_server:8585/api/v1
       - OPENMETADATA_JWT_TOKEN=${OPENMETADATA_JWT_TOKEN}
       # This image doesn't install sentence-transformers/torch (see .env.example's
       # comment) -- hybrid_rag_search fails closed by default rather than
@@ -1056,11 +1269,11 @@ services:
       - ALLOW_DEGRADED_EMBEDDINGS=${ALLOW_DEGRADED_EMBEDDINGS:-0}
       - EMBEDDING_MODEL_NAME=${EMBEDDING_MODEL_NAME:-sentence-transformers/all-MiniLM-L6-v2}
       # Real distributed-tracing spans -- see scripts/_otel_tracing.py.
-      # otel_collector shares this container's host network namespace, so
-      # it's reachable at 127.0.0.1 like every other compose-internal
-      # service this file's services talk to over host networking.
+      # H4: otel_collector is a bridge peer now, reached by its service
+      # name -- not 127.0.0.1, which used to work only because this
+      # container shared its network namespace under host networking.
       - OTEL_TRACES_ENABLED=${OTEL_TRACES_ENABLED:-1}
-      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://127.0.0.1:4317}
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel_collector:4317
       - OTEL_SERVICE_NAME=${OTEL_SERVICE_NAME:-ai-dataplatform-mcp-server}
 
 volumes:
@@ -1079,4 +1292,17 @@ volumes:
   cubestore_data:
   jmx_exporter_agent:
   alertmanager_data:
+
+# H4: the one user-defined bridge network every service in this file now
+# joins, replacing `network_mode: "host"` on the 13 services that used to
+# have it. A single flat network (not per-tier subnets) -- this is a
+# single-node PoC stack where every service already implicitly trusted
+# every other one under host networking (shared namespace, no firewalling
+# between them at all); a bridge network's own container-to-container
+# isolation from the rest of the host/LAN is the entire security
+# improvement being made here, not additional segmentation *between* these
+# services.
+networks:
+  platform_network:
+    driver: bridge
 

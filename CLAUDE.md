@@ -131,7 +131,67 @@ Three BIAN/FIBO-aligned domains, each with its own OpenMetadata data product and
 
 ### Docker networking
 
-`docker-compose.yml` runs most services with `network_mode: "host"` (Neo4j, Cube.js, the standalone `cubestore` service Cube.js's production mode depends on (H1), Prometheus, Grafana, MCP sidecar, the tracing pair `tempo`/`otel_collector`, `alertmanager`, and the exporters `node_exporter`/`postgres_exporter`/`mysqld_exporter`/`cadvisor`) — only the OpenMetadata trio (MySQL, OpenSearch, server) uses bridge networking with published ports. Host-mode services reach each other over `127.0.0.1`, not Docker DNS names; keep this in mind when adding a service or debugging connectivity. Migrating these host-mode services onto bridge networking was assessed and deliberately deferred (see the comment block at the top of `docker-compose.yml`) — it needs `host.docker.internal`/`extra_hosts` to reach the host-run Postgres, plus consistent updates to `catalog/prometheus.yml`'s scrape targets and every `catalog/grafana/provisioning/datasources/*.yml` URL, not a one-line toggle.
+**H4 (hardening plan), full bridge-networking migration done 2026-08-08.** Every service in
+`docker-compose.yml` now joins one user-defined bridge network, `platform_network` — `network_mode:
+"host"` is gone from the file entirely. This was widened from the 5 services originally named
+(Neo4j, Cube.js, Prometheus, Grafana, `mcp_sidecar`) to all 13 that were on host mode, on explicit
+request: migrating only the 5 would have silently broken Prometheus's other 4 scrape targets
+(`node_exporter`/`postgres_exporter`/`mysqld_exporter`/`cadvisor`) and Grafana's Alertmanager/Tempo
+datasources, since a bridge container cannot reach a `127.0.0.1`-bound host-mode service at all —
+not even via `host.docker.internal`, whose traffic arrives via the bridge gateway, not the loopback
+interface such a service listens on.
+
+Services now reach each other via Docker Compose's real service-name DNS (`neo4j:7687`, `cube:4000`,
+`prometheus:9090`, `tempo:3200`, `otel_collector:4317`, `openmetadata_server:8585`, ...) instead of
+`127.0.0.1` — `catalog/prometheus.yml`'s scrape targets and its `alerting:` block, and every
+`catalog/grafana/provisioning/datasources/*.yml` URL, were all updated to match. PostgreSQL isn't a
+compose service (see D1), so the 3 services that need it (`cube`, `postgres_exporter`,
+`mcp_sidecar`) reach it via `extra_hosts: ["host.docker.internal:host-gateway"]` — required
+explicitly on Linux (unlike Docker Desktop), and confirmed this mechanism cannot reach a
+host-loopback-bound service either, for the same gateway-vs-loopback reason above.
+
+**A security-model inversion this created, and the fix applied everywhere it mattered:** H4's own
+original hardening pattern — bind a service's listener to `127.0.0.1` to keep it off the LAN under
+host networking — becomes actively harmful under bridge networking, since it also makes the service
+unreachable by its bridge peers. The replacement pattern, applied to every service that had an
+explicit internal bind-address flag/env var (Neo4j's JMX exporter, `cubestore`'s 3 ports,
+`node_exporter`, `postgres_exporter`, `mysqld_exporter`, `cadvisor`, `alertmanager`): bind
+internally to `0.0.0.0` (safe now — bridge networking's own container-to-container isolation means
+"reachable by peers on `platform_network`" is not the same as "reachable from the LAN"), and control
+host/LAN exposure exclusively via the `ports:` mapping's host-side address —
+`127.0.0.1:<port>:<port>` preserves the original loopback-only-from-host guarantee; a service with
+no `ports:` entry at all (`cubestore`) is reachable by nothing outside `platform_network`, the
+tightest exposure of any service in the file.
+
+`MCP_HOST` was repurposed the same way `OPENMETADATA_HOST` already was: it now controls only the
+*host-side* interface `docker-compose.yml`'s `ports:` publishes `mcp_sidecar`'s 8001/8000 to
+(`${MCP_HOST:-127.0.0.1}:8001:8001`, evaluated by Compose itself before container creation) — the
+container's own internal bind is hardcoded to `0.0.0.0` in its `environment:` block, required for
+Docker's port-forwarding and for Prometheus to scrape it now that this service is bridge-networked.
+If you run `financial_data_mcp_server.py`'s SSE mode directly on a host instead of in Docker,
+`MCP_HOST` still controls that process's own bind address exactly as before — see `.env.example`'s
+comment on it for the full dual-context explanation. The same pattern applies to `cube`'s and
+`mcp_sidecar`'s other internal env vars (`CUBEJS_DB_HOST`, `NEO4J_URI`, `CUBEJS_URL`,
+`OPENMETADATA_URL`, `OTEL_EXPORTER_OTLP_ENDPOINT`): each is hardcoded to the correct service name or
+`host.docker.internal` directly in that service's own `environment:` block rather than derived from
+`.env` via `${VAR:-default}`, specifically so a host-oriented `.env` default is never silently
+inherited inside a container where it would resolve to the wrong address (that container's own
+loopback, not the host's or another service's). `.env`'s own `127.0.0.1`-based defaults for these
+same variable names are unchanged and still correct — they're what host-run pipeline scripts use,
+and those scripts still reach every service correctly via Docker's published ports.
+
+Any `healthcheck:` that targets `127.0.0.1:<own-port>` (the large majority) needed no changes — it
+runs `docker exec`-style inside the container it's checking, so it's checking itself regardless of
+network mode.
+
+MySQL (`33060`), OpenSearch (`9200`), and `openmetadata_server` (`8585`, via `OPENMETADATA_HOST`,
+default `127.0.0.1`) all publish to `127.0.0.1` only, not `0.0.0.0` — reachable from the host for
+local debugging/UI access, but not from the network (OpenSearch in particular runs with
+`DISABLE_SECURITY_PLUGIN=true`, so it must never be exposed beyond localhost; same
+`MCP_HOST`-style configurable-but-secure-by-default pattern). Every host-facing port in the file
+(Neo4j Browser/Bolt, Cube.js, Prometheus, Grafana, Tempo's query API, the OTLP receivers, every
+exporter, Alertmanager, `mcp_sidecar`'s SSE/metrics ports) now follows the identical
+`127.0.0.1:<port>:<port>` convention for exactly the same reason.
 
 MySQL (`33060`), OpenSearch (`9200`), and `openmetadata_server` (`8585`, via `OPENMETADATA_HOST`, default `127.0.0.1`) all publish to `127.0.0.1` only, not `0.0.0.0` — reachable from the host for local debugging/UI access, but not from the network (OpenSearch in particular runs with `DISABLE_SECURITY_PLUGIN=true`, so it must never be exposed beyond localhost; same `MCP_HOST`-style configurable-but-secure-by-default pattern as `OPENMETADATA_HOST`, in case LAN access to the catalog UI is deliberately wanted). Every service except `tempo`/`otel_collector` declares a `healthcheck:` — both of those images are deliberately minimal/distroless (no shell, wget, curl, or nc; verified via `docker run --entrypoint sh ...` failing on both) with no way to express a Docker-native healthcheck, so they rely on `restart: always` alone; `depends_on` targeting either uses `condition: service_started` rather than `service_healthy` for exactly that reason. `openmetadata_server` waits on `openmetadata_db`/`openmetadata_search`, `mcp_sidecar` waits on `neo4j`+`cube`, `grafana` waits on `prometheus` (`service_healthy`) and `tempo` (`service_started`), and `otel_collector` waits on `tempo` (`service_started`). Every service also sets `security_opt: no-new-privileges:true` and a bounded `logging:` driver (10MB × 3 files); config bind mounts (Cube.js's model/`cube.js`, Prometheus's config, Grafana's provisioning, `tempo.yaml`, `otel-collector-config.yaml`) are `:ro`; Prometheus, Grafana, and Tempo persist to named volumes (`prometheus_data`/`grafana_data`/`tempo_data`) rather than losing all history on every container recreate. Every service except `neo4j_jmx_agent_init` (a one-shot `apk add`-based init container, see its own comment for why) also sets `read_only: true` on the root filesystem, with an explicit, per-image-audited `tmpfs`/writable-mount allowlist for whatever it genuinely needs to write (Q14 in the hardening plan) — see `docker-compose.yml`'s own top-of-file comment for two real, non-obvious pitfalls hit doing this (Docker's tmpfs mount defaulting to non-writable for a non-root container user; its `mode:` field expecting the *decimal* value equal to the intended *octal* permission bits, not the literal octal digits). `cap_drop`/`pids_limit`/CPU limits remain a separate, not-yet-implemented follow-up.
 

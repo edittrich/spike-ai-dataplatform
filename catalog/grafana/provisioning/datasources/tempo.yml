@@ -4,7 +4,9 @@ datasources:
   - name: Tempo
     type: tempo
     access: proxy
-    url: http://127.0.0.1:3200
+    # H4: tempo is a bridge peer on platform_network now, reached by its
+    # service name, not 127.0.0.1.
+    url: http://tempo:3200
     isDefault: false
     editable: false
     # No tracesToMetrics/serviceMap cross-linking to the Prometheus

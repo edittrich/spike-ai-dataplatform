@@ -9,6 +9,9 @@ datasources:
     uid: prometheus
     type: prometheus
     access: proxy
-    url: http://127.0.0.1:9090
+    # H4: prometheus is a bridge peer on platform_network now, reached by
+    # its service name, not 127.0.0.1 (which would mean Grafana's own
+    # container).
+    url: http://prometheus:9090
     isDefault: true
     editable: false

@@ -8,7 +8,9 @@ datasources:
     uid: alertmanager
     type: alertmanager
     access: proxy
-    url: http://127.0.0.1:9093
+    # H4: alertmanager is a bridge peer on platform_network now, reached
+    # by its service name, not 127.0.0.1.
+    url: http://alertmanager:9093
     jsonData:
       implementation: prometheus
     editable: false
