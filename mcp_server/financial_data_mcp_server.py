@@ -448,11 +448,17 @@ def hybrid_rag_search(prompt: str) -> str:
         retriever = _get_hybrid_retriever()
         payload = retriever.hybrid_retrieve(prompt)
         return json.dumps(payload, indent=2)
-    except RuntimeError as e:
-        # Raised by scripts._embedding_backend when the real embedding/
-        # cross-encoder model can't load and ALLOW_DEGRADED_EMBEDDINGS isn't
-        # set -- surface this as a clear tool error rather than an unhandled
-        # 500, matching every other tool's error-handling convention here.
+    except Exception as e:
+        # Broad on purpose, matching every other tool's error-handling
+        # convention here (search_data_catalog, check_data_quality, ...) --
+        # this used to catch only RuntimeError (raised by
+        # scripts._embedding_backend when the real embedding/cross-encoder
+        # model can't load and ALLOW_DEGRADED_EMBEDDINGS isn't set), which
+        # was Q6's "only tool with no try/except" finding in a different
+        # guise: a downstream connection failure (e.g. no live Postgres/Neo4j
+        # reachable) raises psycopg2/neo4j exceptions, not RuntimeError, and
+        # those escaped straight to the transport instead of surfacing as a
+        # clean tool error.
         logger.error(f"Hybrid RAG search error: {e}")
         return f"Hybrid RAG Search Error: {e}"
 
