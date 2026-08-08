@@ -27,10 +27,10 @@ jobs:
 
     steps:
       - name: Check out Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python 3.11
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
           cache: "pip"
@@ -114,6 +114,6 @@ jobs:
         # git history was already deliberately purged once (see C7) rather
         # than something this gate should re-block on indefinitely.
         continue-on-error: true
-        uses: gitleaks/gitleaks-action@v2
+        uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
