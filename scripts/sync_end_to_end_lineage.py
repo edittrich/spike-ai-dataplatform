@@ -14,8 +14,11 @@ Actions:
 ===============================================================================
 """
 
+import re
 import sys
 import os
+
+import yaml
 
 # scripts/ has no __init__.py (namespace package); make it importable regardless
 # of the working directory this script is launched from.
@@ -29,6 +32,110 @@ load_env()
 # .env -- importing them earlier silently captures empty credentials.
 from scripts._neo4j_conn import get_driver  # noqa: E402
 from scripts._openmetadata_client import api_get, api_put, api_post  # noqa: E402
+
+# D4 (hardening plan): this used to register a `Cube_*` OpenMetadata entity
+# per table with two invented columns (`measure_count` BIGINT, `dimension_id`
+# UUID) matching nothing in cube/model/cubes/*.yml, and only table-level
+# lineage edges. Fixed to parse the real cube definitions -- same source of
+# truth Cube.js itself loads -- and to emit real columnsLineage
+# (table.column -> cube.measure/dimension) wherever a measure/dimension's
+# `sql:` is a bare column reference resolvable to a source column, not a
+# cross-cube join or a computed expression.
+CUBES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "cube", "model", "cubes")
+
+# Bare-identifier sql: values only (e.g. "principal_amount") -- deliberately
+# excludes cross-cube references ("{deposit_balance.available_balance}"),
+# computed expressions ("interest_rate * 100.0"), and measure-of-measure
+# ratios ("100.0 * {npl_default_count} / NULLIF(...)"). Those establish real
+# lineage too but from a different source column or no single source column
+# at all -- out of scope for this pass; a bare match is unambiguous today and
+# covers the majority of dimensions and simple sum/avg measures.
+_BARE_COLUMN_SQL_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+
+_DIMENSION_TYPE_TO_OM_DTYPE = {
+    "string": "VARCHAR",
+    "number": "DOUBLE",
+    "boolean": "BOOLEAN",
+    "time": "TIMESTAMP",
+}
+_MEASURE_TYPE_TO_OM_DTYPE = {
+    "count": "BIGINT",
+    "countDistinct": "BIGINT",
+    "sum": "DOUBLE",
+    "avg": "DOUBLE",
+    "number": "DOUBLE",
+}
+
+
+def load_cube_definition(tbl_name):
+    """Parses cube/model/cubes/{tbl_name}.yml and returns its single cube dict,
+    or None if the file doesn't exist (e.g. a table with no cube -- see D9)."""
+    path = os.path.join(CUBES_DIR, f"{tbl_name}.yml")
+    if not os.path.isfile(path):
+        return None
+    with open(path, "r", encoding="utf-8") as f:
+        parsed = yaml.safe_load(f)
+    cubes = parsed.get("cubes") or []
+    return cubes[0] if cubes else None
+
+
+def build_cube_columns_and_lineage(cube_def, pg_fqn, om_table_name):
+    """Returns (om_columns, columns_lineage) for a real Cube.js cube definition.
+    om_columns: OpenMetadata `columns` list for the Cube_* table entity.
+    columns_lineage: list of {"fromColumns": [<source column FQN>], "toColumn": <cube column FQN>}
+    for every dimension/measure whose `sql:` is a bare source-table column.
+
+    om_table_name is the *registered OpenMetadata table entity name*
+    (e.g. "Cube_Party") -- deliberately not cube_def["name"] (the Cube.js-
+    internal name, e.g. "party"): a real bug caught live, the FQN built from
+    the latter 400'd with "Invalid fully qualified column name" because it
+    didn't match any entity OpenMetadata actually has registered."""
+    om_columns = []
+    columns_lineage = []
+
+    for dim in cube_def.get("dimensions", []):
+        om_dtype = _DIMENSION_TYPE_TO_OM_DTYPE.get(dim.get("type"), "VARCHAR")
+        om_column = {
+            "name": dim["name"],
+            "dataType": om_dtype,
+            "description": dim.get("title") or dim.get("description") or f"Cube.js dimension `{dim['name']}`.",
+        }
+        if om_dtype == "VARCHAR":
+            # OpenMetadata rejects char/varchar/binary/varbinary columns with
+            # no dataLength (verified live: PUT tables 400s otherwise) --
+            # same 255 default populate_openmetadata_tables.py uses for the
+            # real source tables' own VARCHAR columns.
+            om_column["dataLength"] = 255
+        om_columns.append(om_column)
+        sql = str(dim.get("sql", "")).strip()
+        if _BARE_COLUMN_SQL_RE.match(sql):
+            columns_lineage.append({
+                "fromColumns": [f"{pg_fqn}.{sql}"],
+                "toColumn": f"Cube_Semantic_Engine.semantic_layer.cubes.{om_table_name}.{dim['name']}",
+            })
+
+    for measure in cube_def.get("measures", []):
+        om_dtype = _MEASURE_TYPE_TO_OM_DTYPE.get(measure.get("type"), "DOUBLE")
+        om_columns.append({
+            "name": measure["name"],
+            "dataType": om_dtype,
+            "description": measure.get("title") or measure.get("description") or f"Cube.js measure `{measure['name']}`.",
+        })
+        sql = str(measure.get("sql", "")).strip()
+        if _BARE_COLUMN_SQL_RE.match(sql):
+            columns_lineage.append({
+                "fromColumns": [f"{pg_fqn}.{sql}"],
+                "toColumn": f"Cube_Semantic_Engine.semantic_layer.cubes.{om_table_name}.{measure['name']}",
+            })
+
+    if not om_columns:
+        # Every real cube in this repo has at least one measure -- an empty
+        # result means the YAML was malformed/unreadable, not a legitimately
+        # column-less cube. Fail loudly rather than register a schema-less
+        # table entity that silently carries no lineage at all.
+        raise ValueError(f"Cube '{om_table_name}' parsed with zero measures/dimensions -- check its YAML.")
+
+    return om_columns, columns_lineage
 
 # Lineage Mapping Definition (Table -> Semantic Cube -> Knowledge Graph Node)
 LINEAGE_MAP = [
@@ -94,45 +201,70 @@ def sync_openmetadata_lineage():
     })
 
     cube_id_map = {}
+    cube_columns_lineage_map = {}
+    skipped_cubes = []
     for schema, tbl_name, cube_name, kg_entity, desc in LINEAGE_MAP:
+        pg_fqn = f"PostgreSQL_Financial_Platform.postgres.{schema}.{tbl_name}"
+        cube_def = load_cube_definition(tbl_name)
+        if cube_def is None:
+            # D9's ref.* cubes previously didn't exist at all -- now they do
+            # (cube/model/cubes/ref_country.yml etc.), so this branch should
+            # be unreachable for every entry in LINEAGE_MAP today. Kept as a
+            # loud skip rather than a silent one in case LINEAGE_MAP is ever
+            # extended ahead of the corresponding cube file being written.
+            skipped_cubes.append(tbl_name)
+            print(f"  ⚠️  No cube/model/cubes/{tbl_name}.yml found -- skipping {cube_name} (no fabricated placeholder registered).")
+            continue
+
+        om_columns, columns_lineage = build_cube_columns_and_lineage(cube_def, pg_fqn, cube_name)
         cube_payload = {
             "name": cube_name,
-            "displayName": f"Cube.{cube_name}",
-            "description": f"Cube.js Semantic Cube for {desc}",
+            "displayName": f"Cube.{cube_def['name']}",
+            "description": cube_def.get("description") or f"Cube.js Semantic Cube for {desc}",
             "databaseSchema": "Cube_Semantic_Engine.semantic_layer.cubes",
-            "columns": [
-                {"name": "measure_count", "dataType": "BIGINT", "description": "Row/Entity count metric"},
-                {"name": "dimension_id", "dataType": "UUID", "description": "Primary dimension key"}
-            ],
+            "columns": om_columns,
             "tableType": "View"
         }
         res = api_put("tables", cube_payload)
         if res and "id" in res:
             cube_id_map[cube_name] = res["id"]
+            cube_columns_lineage_map[cube_name] = columns_lineage
 
-    # Create Lineage Edges (PostgreSQL Table -> Cube.js Cube)
+    # Create Lineage Edges (PostgreSQL Table -> Cube.js Cube), now with
+    # columnsLineage wherever a measure/dimension resolves to a bare source
+    # column (see build_cube_columns_and_lineage) -- previously table-level
+    # only, per D4.
     edge_count = 0
+    column_edge_count = 0
     for schema, tbl_name, cube_name, kg_entity, desc in LINEAGE_MAP:
+        if cube_name not in cube_id_map:
+            continue
         pg_fqn = f"PostgreSQL_Financial_Platform.postgres.{schema}.{tbl_name}"
         from_id = table_id_map.get(pg_fqn)
         to_id = cube_id_map.get(cube_name)
 
         if from_id and to_id:
+            columns_lineage = cube_columns_lineage_map.get(cube_name, [])
+            lineage_details = {
+                "description": f"Derives semantic metrics from physical table `{schema}.{tbl_name}` into `{cube_name}`"
+            }
+            if columns_lineage:
+                lineage_details["columnsLineage"] = columns_lineage
             lineage_payload = {
                 "edge": {
                     "fromEntity": {"id": from_id, "type": "table"},
                     "toEntity": {"id": to_id, "type": "table"},
-                    "lineageDetails": {
-                        "description": f"Derives semantic metrics from physical table `{schema}.{tbl_name}` into `{cube_name}`"
-                    }
+                    "lineageDetails": lineage_details,
                 }
             }
             res = api_put("lineage", lineage_payload)
             if res:
                 edge_count += 1
-                print(f"  🔗 Connected Lineage: {schema}.{tbl_name} ➔ Cube.{cube_name}")
+                column_edge_count += len(columns_lineage)
+                print(f"  🔗 Connected Lineage: {schema}.{tbl_name} ➔ Cube.{cube_name} ({len(columns_lineage)} column-level edges)")
 
-    print(f"✅ OpenMetadata Lineage Sync Complete: Created {edge_count} 3-Tier Lineage Edges.")
+    print(f"✅ OpenMetadata Lineage Sync Complete: Created {edge_count} table-level lineage edges "
+          f"({column_edge_count} column-level edges within them); {len(skipped_cubes)} tables skipped (no cube definition).")
 
 def sync_neo4j_lineage():
     print("\n🕸️ Phase 2: Neo4j Knowledge Graph Meta-Lineage Sync")

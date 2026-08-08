@@ -23,12 +23,41 @@ import asyncio
 from mcp_server.financial_data_mcp_server import mcp
 from scripts.hybrid_rag_retriever import HybridRAGRetriever
 from scripts.rag_triad_evaluator import RAGTriadEvaluator
+from scripts.llm_judge_evaluator import LLMJudgeEvaluator
 
 class AgenticEvaluator:
     def __init__(self):
         self.retriever = HybridRAGRetriever()
         self.triad_evaluator = RAGTriadEvaluator()
+        # Phase 4 (hardening plan, Q7): a real local Ollama model judges
+        # faithfulness/relevance semantically instead of by token overlap --
+        # see llm_judge_evaluator.py's module docstring for the exact defect
+        # this fixes (empty response scoring 1.0, digit-substring "grounding").
+        # Checked once here (not per-scenario) since is_available() does a
+        # real network round-trip; every scenario shares this one result.
+        self.llm_judge = LLMJudgeEvaluator()
+        self.llm_judge_available = self.llm_judge.is_available()
+        if self.llm_judge_available:
+            print(f"🧑‍⚖️  LLM-as-judge scoring enabled (Ollama model: {self.llm_judge.model}).")
+        else:
+            print("⚠️  LLM-as-judge unavailable (Ollama unreachable or model not pulled) -- "
+                  "falling back to RAGTriadEvaluator's substring-based scorer for this run.")
         self.benchmark_results = []
+
+    def score_triad(self, prompt: str, context_text: str, response_text: str):
+        """Tries the real LLM judge first (Q7's fix); falls back to the
+        substring scorer if the judge is unavailable or fails for this one
+        call specifically (e.g. a transient Ollama timeout) -- fail open per
+        llm_judge_evaluator.py's documented contract, not fail the whole
+        benchmark run over one optional scorer."""
+        if self.llm_judge_available:
+            judged = self.llm_judge.evaluate_triad(prompt, context_text, response_text)
+            if judged is not None:
+                return judged
+        fallback = self.triad_evaluator.evaluate_triad(prompt, context_text, response_text)
+        fallback["judge_mode"] = "substring_fallback"
+        fallback["judge_model"] = None
+        return fallback
 
     async def run_benchmark_suite(self):
         print("🚀 Starting Cluster 2 Agentic Evaluation Benchmark & RAG Triad Suite...")
@@ -60,13 +89,20 @@ class AgenticEvaluator:
 
         # Assertions
         vector_match = any(any(k in v["display_name"] for k in ["party", "deposit", "overdraft", "account"]) for v in payload["vector_schema_context"])
-        sql_match = any("INDIVIDUAL" in line for line in payload["relational_sql_context"])
+        # Q2 (Phase 3, already fixed elsewhere) changed relational_sql_context
+        # from a list[str] to list[dict] (real Python values, no more pipe-
+        # delimited text parsing) -- this benchmark script was never updated
+        # to match, so `"INDIVIDUAL" in line` silently checked dict *keys*
+        # (always False, a false-negative rather than a crash) and the triad
+        # context line below crashed outright on `" ".join(...)` over dicts.
+        # Both fixed by stringifying each row instead of assuming str rows.
+        sql_match = any("INDIVIDUAL" in json.dumps(row) for row in payload["relational_sql_context"])
         score = 100 if (vector_match and sql_match) else 50
 
         # RAG Triad Evaluation
-        context_str = json.dumps(payload["vector_schema_context"]) + " " + " ".join(payload["relational_sql_context"])
+        context_str = json.dumps(payload["vector_schema_context"]) + " " + json.dumps(payload["relational_sql_context"])
         response_str = "Found overdrawn deposit account customer risk exposure under party_individual and deposit_overdraft_facility."
-        triad_metrics = self.triad_evaluator.evaluate_triad(prompt, context_str, response_str)
+        triad_metrics = self.score_triad(prompt, context_str, response_str)
 
         self.record_result("AML & Overdrawn Risk Exposure", score, elapsed_ms, triad_metrics, {
             "Vector Schema Matched": vector_match,
@@ -98,7 +134,7 @@ class AgenticEvaluator:
         # RAG Triad Evaluation, against the value actually returned -- not a
         # hardcoded figure repeated into the "context" to guarantee a match.
         context_str = f"cube deposit_balance measure total_available_balance {metric_value if metric_value is not None else 'N/A'}"
-        triad_metrics = self.triad_evaluator.evaluate_triad(prompt, context_str, res_str)
+        triad_metrics = self.score_triad(prompt, context_str, res_str)
 
         self.record_result("Cube.js Semantic Metric (total_available_balance)", score, elapsed_ms, triad_metrics, {
             "Total Available Balance Returned": f"${metric_value:,.2f}" if metric_value is not None else "N/A"
@@ -171,7 +207,10 @@ class AgenticEvaluator:
             "triad_metrics": triad_metrics,
             "details": details
         })
-        triad_note = f" — Triad Score: {triad_metrics['triad_score_percent']}" if triad_metrics else " — Triad: N/A (execution check only, no generated response to evaluate)"
+        if triad_metrics:
+            triad_note = f" — Triad Score: {triad_metrics['triad_score_percent']} ({triad_metrics.get('judge_mode', 'unknown')})"
+        else:
+            triad_note = " — Triad: N/A (execution check only, no generated response to evaluate)"
         print(f"  Result: [{status}] Score: {score}% — Latency: {latency_ms}ms{triad_note}")
 
     def print_summary_report(self):
@@ -207,15 +246,15 @@ class AgenticEvaluator:
         print("-------------------------------------------------------")
 
         print("\n🎯 Scenario Quality Breakdown & RAG Triad Scorecard Table:")
-        print(f"{'Scenario':<42} | {'Status':<6} | {'Accuracy':<8} | {'Context Rel':<11} | {'Faithful':<8} | {'Ans Rel':<8} | {'Triad':<6}")
-        print("-" * 105)
+        print(f"{'Scenario':<42} | {'Status':<6} | {'Accuracy':<8} | {'Context Rel':<11} | {'Faithful':<8} | {'Ans Rel':<8} | {'Triad':<6} | {'Judge Mode':<24}")
+        print("-" * 135)
         for r in self.benchmark_results:
             tm = r["triad_metrics"]
             scen = r['scenario'][:40]
             if tm:
-                print(f"{scen:<42} | {r['status']:<6} | {r['score']}%     | {tm['context_relevance']*100:5.1f}%      | {tm['faithfulness']*100:5.1f}%   | {tm['answer_relevance']*100:5.1f}%   | {tm['triad_score_percent']:<6}")
+                print(f"{scen:<42} | {r['status']:<6} | {r['score']}%     | {tm['context_relevance']*100:5.1f}%      | {tm['faithfulness']*100:5.1f}%   | {tm['answer_relevance']*100:5.1f}%   | {tm['triad_score_percent']:<6} | {tm.get('judge_mode', 'unknown'):<24}")
             else:
-                print(f"{scen:<42} | {r['status']:<6} | {r['score']}%     | {'N/A':<11}  | {'N/A':<8} | {'N/A':<8} | {'N/A':<6}")
+                print(f"{scen:<42} | {r['status']:<6} | {r['score']}%     | {'N/A':<11}  | {'N/A':<8} | {'N/A':<8} | {'N/A':<6} | {'N/A':<24}")
 
         print(f"\nBenchmark run complete: {passed_tests}/{total_tests} scenarios passed (score >= 80%).")
 

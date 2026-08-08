@@ -9,6 +9,11 @@ cubes:
         sql: "{CUBE}.party_id = {party.party_id}"
         relationship: belongs_to
 
+      # D9: unlocks AML high-risk-citizenship-country slicing (see ref_country.yml).
+      - name: ref_country
+        sql: "{CUBE}.citizenship_country_code = {ref_country.country_code}"
+        relationship: belongs_to
+
     measures:
       - name: total_individuals
         type: count

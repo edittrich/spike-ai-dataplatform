@@ -9,6 +9,27 @@ cubes:
         sql: "{CUBE}.deposit_account_id = {deposit_account.deposit_account_id}"
         relationship: belongs_to
 
+    pre_aggregations:
+      # Phase 4 (Part 5 item 6 / H3): the balance-sum rollup deposit_account.yml's
+      # account_activity_rollup deliberately excludes (see its comment for the
+      # `missing FROM-clause entry` bug this sidesteps by living on the cube that
+      # owns available_balance/ledger_balance/accrued_interest directly).
+      # account_type/account_status pulled in via the existing belongs_to
+      # deposit_account join -- confirmed live this direction (fact table ->
+      # dimension table) doesn't hit the same rollup SQL generation bug the
+      # reverse direction did.
+      - name: balance_totals_rollup
+        measures:
+          - total_available_balance
+          - total_ledger_balance
+          - total_accrued_interest
+        dimensions:
+          - currency_code
+          - deposit_account.account_type
+          - deposit_account.account_status
+        refresh_key:
+          every: "1 hour"
+
     measures:
       - name: total_current_balance
         sql: current_balance

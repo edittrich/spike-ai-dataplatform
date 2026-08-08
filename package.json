@@ -26,10 +26,5 @@
   },
   "devDependencies": {
     "supabase": "^1.145.0"
-  },
-  "dependencies": {
-    "@cubejs-backend/postgres": "^0.35.0",
-    "@cubejs-backend/server": "^0.35.0",
-    "@supabase/supabase-js": "^2.39.8"
   }
 }

@@ -13,9 +13,44 @@ cubes:
         sql: "{CUBE}.deposit_account_id = {deposit_balance.deposit_account_id} AND {deposit_balance.md_is_active} = TRUE"
         relationship: has_one
 
+      # D9: unlocks currency-sliced deposit analytics (see ref_currency.yml).
+      - name: ref_currency
+        sql: "{CUBE}.currency_code = {ref_currency.currency_code}"
+        relationship: belongs_to
+
       - name: deposit_interest_term
         sql: "{CUBE}.deposit_account_id = {deposit_interest_term.deposit_account_id} AND {deposit_interest_term.md_is_active} = TRUE"
         relationship: has_one
+
+    pre_aggregations:
+      # Phase 4 (Part 5 item 6 / H3): rollup over deposit_account's own columns
+      # (account counts, overdrawn flags -- both `count`-type measures, resolvable
+      # without joining out to deposit_balance's actual columns). See
+      # party_role_customer.yml's customer_risk_rollup for the feasibility note --
+      # verified live that CUBEJS_DEV_MODE=true's bundled cubestore-dev builds and
+      # serves this correctly with no external Cube Store service.
+      #
+      # Deliberately excludes total_available_balance/total_ledger_balance/
+      # total_accrued_interest/average_account_balance/total_overdrawn_amount:
+      # each has `sql: "{deposit_balance.X}"`, a `sum`/`avg` computed directly off
+      # a *joined* cube's column rather than this cube's own. Tried including
+      # them here first -- Cube.js v0.35's rollup SQL generator broke with
+      # `missing FROM-clause entry for table "deposit_account_measure_join__
+      # deposit_account"` (reproduced even with a single such measure and no
+      # other measures alongside it, so it's not a combination issue). That
+      # rollup is instead defined correctly on deposit_balance.yml itself, the
+      # cube that actually owns those columns, per Cube.js's own documented
+      # rollup-placement convention -- see balance_totals_rollup there.
+      - name: account_activity_rollup
+        measures:
+          - total_deposit_accounts
+          - overdrawn_account_count
+        dimensions:
+          - account_type
+          - account_status
+          - currency_code
+        refresh_key:
+          every: "1 hour"
 
     measures:
       - name: total_deposit_accounts

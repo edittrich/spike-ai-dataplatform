@@ -1,0 +1,9 @@
+# Dagster orchestration for the data pipeline (Part 5 item 1 in the
+# hardening plan). Deliberately a separate requirements file, not folded
+# into the root requirements.txt: this is optional tooling for anyone who
+# wants retries/backfill/run-history/a UI over the pipeline, not a runtime
+# dependency of the MCP server, the retrieval path, or any individual
+# pipeline script, all of which still run standalone exactly as before with
+# no Dagster import anywhere in scripts/ or mcp_server/.
+dagster>=1.13.0
+dagster-webserver>=1.13.0

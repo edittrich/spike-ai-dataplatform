@@ -59,6 +59,10 @@ supabase/snippets/
 *.db
 *.sqlite
 
+# Dagster's own run history/logs/event storage (DAGSTER_HOME) -- local
+# operational state, not source; see orchestration/README.md.
+orchestration/.dagster_home/
+
 # Docker container volumes & data directories (bind-mounted, not source)
 catalog/mysql-data/
 catalog/mysql-data.bak-*/

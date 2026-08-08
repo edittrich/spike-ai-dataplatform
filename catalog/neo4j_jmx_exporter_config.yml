@@ -1,0 +1,10 @@
+# Phase 4 (hardening plan, Part 5 item 3): config for the jmx_prometheus_javaagent
+# attached in-process to the Neo4j JVM (see docker-compose.yml's `neo4j` service
+# NEO4J_server_jvm_additional). Wildcard rule -- Neo4j Community exposes no
+# custom MBeans beyond the standard `java.lang:*` JVM ones (verified live: an
+# unfiltered scrape lists only java_lang_*/jvm_*/process_* metric families,
+# nothing neo4j-specific), so there is nothing more specific worth filtering to.
+startDelaySeconds: 0
+lowercaseOutputName: true
+rules:
+  - pattern: ".*"

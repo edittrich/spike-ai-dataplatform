@@ -34,13 +34,19 @@ against a refused connection until it's up.
 | `openmetadata_mysql` | `mysql:8.0.35` | `3306` (published loopback-only as `127.0.0.1:33060`) | `MYSQL_ROOT_PASSWORD`, `MYSQL_PASSWORD` (both `${OPENMETADATA_MYSQL_PASSWORD}`, no fallback — required) | OpenMetadata catalog backend database |
 | `openmetadata_search` | `opensearchproject/opensearch:2.11.0` | `9200` (published loopback-only as `127.0.0.1:9200`) | `DISABLE_SECURITY_PLUGIN=true` | Catalog search index (security plugin off; only reachable from the host or the internal Docker network, never externally) |
 | `openmetadata_server` | `openmetadata/server:1.3.1` | `8585` (published loopback-only as `127.0.0.1:8585` unless `OPENMETADATA_HOST` overrides it) | `OPENMETADATA_URL`, `OPENMETADATA_JWT_TOKEN`, `DB_USER_PASSWORD` (⚠️ not `DB_PASSWORD` — see Troubleshooting) | Enterprise Data Catalog UI & REST API |
-| `neo4j_knowledge_graph` | `neo4j:5.18.0-community` | `7474` / `7687` | `NEO4J_AUTH=neo4j/${NEO4J_PASSWORD}` (no fallback — required) | Knowledge Graph database & Bolt driver |
+| `neo4j_knowledge_graph` | `neo4j:5.18.0-community` | `7474` / `7687`, plus `9101` (bound `127.0.0.1`, JVM-only Prometheus metrics — Neo4j Community has no native reporter, this is a `jmx_prometheus_javaagent` attached in-process via `NEO4J_server_jvm_additional`) | `NEO4J_AUTH=neo4j/${NEO4J_PASSWORD}` (no fallback — required) | Knowledge Graph database & Bolt driver |
 | `cube_semantic_layer` | `cubejs/cube:v0.35` | `4000` | `CUBEJS_DB_TYPE=postgres`, `CUBEJS_API_SECRET` — **enforced**: [`cube/cube.js`](../cube/cube.js)'s `checkAuth` rejects any request whose `Authorization: Bearer` token doesn't match this secret, in both dev and production mode. No `CUBEJS_SQL_PORT` — the Postgres-wire SQL API it would open has no equivalent auth check and nothing uses it. | Open-Source Semantic Layer (REST API) |
 | `prometheus_metrics` | `prom/prometheus:v2.51.0` | `9090` | [catalog/prometheus.yml](../catalog/prometheus.yml) | Operational time-series metrics engine |
 | `grafana_observability_dashboard` | `grafana/grafana:10.4.0` | `3000` | `GF_SECURITY_ADMIN_PASSWORD` | Visual monitoring dashboard portal |
 | `mcp_agentic_sidecar` | [`mcp_server/Dockerfile.mcp`](../mcp_server/Dockerfile.mcp) | `8001` (SSE, bound to `127.0.0.1` unless `MCP_HOST` overrides it) and `8000` (`/metrics`) | `MCP_TRANSPORT=sse`, `MCP_PORT=8001`, `MCP_METRICS_PORT=8000`, `MCP_HOST`, `MCP_API_KEY` — required; the SSE endpoint now **refuses to start** without it, rather than falling back to unauthenticated. Connects to Postgres as `MCP_PG_READONLY_USER`/`MCP_PG_READONLY_PASSWORD` (the `mcp_readonly` role), not the superuser. | FastMCP Server SSE HTTP agent daemon **and** the platform's real Prometheus metrics source (`prometheus_client.start_http_server()`); runs as non-root `appuser` |
 | `otel_collector` | `otel/opentelemetry-collector:0.158.0` | `4317` (OTLP/gRPC), `4318` (OTLP/HTTP), `13133` (health, host-side only — see below) | [catalog/otel-collector-config.yaml](../catalog/otel-collector-config.yaml) | Receives real trace spans from `mcp_sidecar`, batches, forwards to `tempo` |
 | `tempo_tracing_backend` | `grafana/tempo:3.0.2` | `3200` (query API, used by Grafana's datasource), `4319`/`4320` (OTLP receiver, collector-only — see config comment for why these aren't 4317/4318) | [catalog/tempo.yaml](../catalog/tempo.yaml) | Trace storage + TraceQL query backend (monolithic mode, local filesystem storage) |
+| `node_exporter` | `prom/node-exporter:v1.8.2` | `9100` (bound `127.0.0.1`) | mounts `/proc`/`/sys`/`/` read-only | Host OS metrics (CPU, memory, disk, filesystem) |
+| `postgres_exporter` | `prometheuscommunity/postgres-exporter:v0.15.0` | `9187` (bound `127.0.0.1`) | `DATA_SOURCE_NAME` built from `MCP_PG_READONLY_USER`/`MCP_PG_READONLY_PASSWORD` — connects as the least-privilege role, not the superuser; `--no-collector.wal` (needs a superuser-only function) | Postgres metrics (`pg_up`, connection counts, etc.) |
+| `mysqld_exporter` | `prom/mysqld-exporter:v0.15.1` | `9104` (bound `127.0.0.1`) | generates a `.my.cnf` at container startup from `OPENMETADATA_MYSQL_PASSWORD` (v0.15.x removed `DATA_SOURCE_NAME` env-var support) | MySQL metrics (OpenMetadata's backend DB) |
+| `cadvisor` | `gcr.io/cadvisor/cadvisor:v0.49.1` | `8081` (bound `127.0.0.1`) | mounts `/var/run/docker.sock:ro` (see the service's own comment on what `:ro` does and doesn't buy) | Container resource metrics — per-container discovery is environment-dependent, see the service comment; falls back to the aggregate root-cgroup metric where it doesn't work |
+| `neo4j_jmx_agent_init` | `alpine:3.20` | n/a (one-shot, `restart: "no"`) | downloads `jmx_prometheus_javaagent` (pinned version + sha256) into the `jmx_exporter_agent` named volume | Init container only — populates the jar the `neo4j` service's javaagent needs; not a long-running service |
+| `alertmanager` | `prom/alertmanager:v0.27.0` | `9093` (bound `127.0.0.1`) | [catalog/alertmanager.yml](../catalog/alertmanager.yml) — receiver is a deliberate no-op (`local-null`), no real notification channel configured | Receives/dedupes alerts fired by `catalog/prometheus_rules.yml`; alerts visible via its own UI/API and a provisioned Grafana datasource |
 
 There is no separate telemetry-exporter service for *metrics* — `mcp_sidecar` serves real per-call
 metrics itself (the process that actually executes tool calls is the only one that can; Prometheus
@@ -49,17 +55,23 @@ exporter container had to fabricate its data — see [Known Issues](#5-known-iss
 a two-service backend (`otel_collector` + `tempo`) because that's genuinely how OTel's reference
 architecture separates ingestion/batching from storage/query — see `scripts/_otel_tracing.py`.
 
-Every service except `otel_collector`/`tempo` declares a `healthcheck:` in `docker-compose.yml` --
-both of those images are deliberately minimal/distroless (no shell, wget, curl, or nc) with no way to
-express one; `restart: always` is their resilience mechanism instead, and anything depending on them
-uses `condition: service_started` rather than `service_healthy`. `openmetadata_server` gates on
-`openmetadata_db`/`openmetadata_search`, `mcp_sidecar` gates on `neo4j`/`cube`, `grafana` gates on
-`prometheus` (healthy) and `tempo` (started), and `otel_collector` gates on `tempo` (started) — all
-via `depends_on` (fixes real startup races — see Troubleshooting). Every service also sets
-`security_opt: no-new-privileges:true` and a bounded `logging:` driver; Prometheus, Grafana, and Tempo
-persist to named volumes (`prometheus_data`/`grafana_data`/`tempo_data`) instead of losing all history
-on every recreate; config bind mounts (Cube.js's model/`cube.js`, Prometheus's config, Grafana's
-provisioning, `tempo.yaml`, `otel-collector-config.yaml`) are `:ro`.
+Every long-running service except `otel_collector`/`tempo` declares a `healthcheck:` in
+`docker-compose.yml` -- both of those images are deliberately minimal/distroless (no shell, wget,
+curl, or nc) with no way to express one; `restart: always` is their resilience mechanism instead, and
+anything depending on them uses `condition: service_started` rather than `service_healthy`.
+`neo4j_jmx_agent_init` is a one-shot init container (`restart: "no"`), not a long-running service, so
+it has no healthcheck either -- `neo4j` gates on it via `condition: service_completed_successfully`.
+`openmetadata_server` gates on `openmetadata_db`/`openmetadata_search`, `mcp_sidecar` gates on
+`neo4j`/`cube`, `grafana` gates on `prometheus` (healthy) and `tempo` (started), `otel_collector` gates
+on `tempo` (started), and `mysqld_exporter` gates on `openmetadata_db` (healthy) — all via `depends_on`
+(fixes real startup races — see Troubleshooting). Every service also sets
+`security_opt: no-new-privileges:true` and a bounded `logging:` driver; Prometheus, Grafana, Tempo,
+Cube.js's embedded `cubestore-dev`, and the Neo4j JMX agent's jar persist to named volumes
+(`prometheus_data`/`grafana_data`/`tempo_data`/`cube_store_data`/`jmx_exporter_agent`, plus
+`alertmanager_data`) instead of losing all history (or, for the two agent/jar cases, having to
+re-download/rebuild) on every recreate; config bind mounts (Cube.js's model/`cube.js`, Prometheus's
+config + rules, Grafana's provisioning, `tempo.yaml`, `otel-collector-config.yaml`,
+`alertmanager.yml`, `neo4j_jmx_exporter_config.yml`) are `:ro`.
 
 ---
 
@@ -77,13 +89,18 @@ provisioning, `tempo.yaml`, `otel-collector-config.yaml`) are `:ro`.
    `generate_synthetic_data.py` (below) only *writes* `supabase/seed.sql`; nothing in the pipeline
    applies the schema or loads that file automatically. Before step 1, run the schema migrations and
    load the seed via the Supabase CLI: `npm run supabase:start` (first time) or
-   `npm run supabase:db:reset` (re-seed), both defined in [`package.json`](../package.json). This also
-   applies `supabase/migrations/20260807151500_create_mcp_readonly_role.sql`, which creates the
+   `npm run supabase:db:reset` (re-seed), both defined in [`package.json`](../package.json). A reset
+   also silently resets the `postgres` role's TCP password back to the Supabase CLI's fixed local-dev
+   default, overriding `POSTGRES_PASSWORD` in `.env` — run
+   [`scripts/sync_postgres_superuser_password.py`](../scripts/sync_postgres_superuser_password.py)
+   right after every reset to fix that (idempotent; see its module docstring for the full story,
+   including why it connects as `supabase_admin`, not `postgres` itself, to perform the fix). This
+   also applies `supabase/migrations/20260807151500_create_mcp_readonly_role.sql`, which creates the
    `mcp_readonly` role the MCP server connects as — its password isn't set by the migration itself
    (checked-in files can't hold real secrets), so also run
    `python3 scripts/configure_readonly_role.py` once `MCP_PG_READONLY_PASSWORD` is set in `.env`.
-   Skipping any of this leaves later steps running against an empty database, or leaves the MCP server
-   unable to authenticate.
+   Skipping any of this leaves later steps running against an empty database, running against the
+   wrong postgres password, or leaves the MCP server unable to authenticate.
 1. **[`scripts/generate_synthetic_data.py`](../scripts/generate_synthetic_data.py):** Generates synthetic BIAN/FIBO aligned records and writes them to `supabase/seed.sql`. Does not connect to PostgreSQL itself — see the prerequisite above for how the file actually gets loaded.
 2. **[`scripts/populate_openmetadata_tables.py`](../scripts/populate_openmetadata_tables.py):** Registers database services and table metadata into OpenMetadata via REST API. **Required before steps 4–8** — those all fetch table entities from the catalog and no-op silently if this hasn't run.
 3. **[`scripts/build_knowledge_graph.py`](../scripts/build_knowledge_graph.py):** Extracts PostgreSQL relational tables and loads them into Neo4j via Cypher transactions; prints the resulting node/relationship counts at the end of each run (deterministic given the seeded synthetic dataset from `generate_synthetic_data.py`, but re-run it for the current number rather than trusting a number written here). Its schema step (constraints + two full-text indexes) reads from committed DDL at [`neo4j/schema/constraints_and_indexes.cypher`](../neo4j/schema/constraints_and_indexes.cypher) rather than hardcoding Cypher inline — the Neo4j analogue of `supabase/migrations/*.sql`. `party_name_fulltext` (over `Individual`/`Organization` name properties) and `reference_name_fulltext` (over `RefCountry`/`RefCurrency`/`RefIndustry`) let an agent resolve a party or reference entity by free-text name instead of requiring an exact code/ID match, e.g. `CALL db.index.fulltext.queryNodes('party_name_fulltext', 'Schmidt') YIELD node, score ...`.
@@ -97,7 +114,7 @@ or on step 3 — and can run in any order or in parallel.
 5. **[`scripts/ground_fibo_ontology_uris.py`](../scripts/ground_fibo_ontology_uris.py):** Grounds table entities to W3C FIBO class URIs (e.g. `Party` $\rightarrow$ `https://spec.edmcouncil.org/.../Party`).
 6. **[`scripts/register_openmetadata_data_contracts.py`](../scripts/register_openmetadata_data_contracts.py):** Registers 3 formal Data Products & Contracts under `contracts/`.
 7. **[`scripts/execute_openmetadata_data_quality_tests.py`](../scripts/execute_openmetadata_data_quality_tests.py):** Runs 59 automated data quality assertions across 12 of the platform's 19 tables.
-8. **[`scripts/sync_end_to_end_lineage.py`](../scripts/sync_end_to_end_lineage.py):** Syncs table-to-cube and table-to-graph lineage nodes in OpenMetadata. Depends on step 2 (table entities to attach lineage to).
+8. **[`scripts/sync_end_to_end_lineage.py`](../scripts/sync_end_to_end_lineage.py):** Syncs table-to-cube and table-to-graph lineage nodes in OpenMetadata. Depends on step 2 (table entities to attach lineage to). Parses the real `cube/model/cubes/*.yml` definitions (not hardcoded placeholder columns) for each `Cube_*` entity's measures/dimensions, and emits real `columnsLineage` (table.column → cube.measure/dimension) wherever a dimension/measure's `sql:` is a bare source-table column reference.
 
 ### C. Context, Search & Hybrid RAG Retrieval
 
@@ -113,8 +130,9 @@ or on step 3 — and can run in any order or in parallel.
 16. **[`mcp_server/financial_data_mcp_server.py`](../mcp_server/financial_data_mcp_server.py):** FastMCP server exposing 6 tools (`search_data_catalog`, `query_semantic_metrics`, `query_knowledge_graph`, `query_financial_database`, `check_data_quality`, `hybrid_rag_search`).
 
 ### E. Evaluation, Web UI & Benchmarks
-17. **[`scripts/rag_triad_evaluator.py`](../scripts/rag_triad_evaluator.py):** Heuristic (token-overlap) scorer for Context Relevance, Faithfulness, and Answer Relevance. Useful as a fast smoke test; treat its scores as pass/fail sanity checks, not as accuracy or hallucination measurements — it has no model in the loop.
-18. **[`scripts/evaluate_agentic_retrieval.py`](../scripts/evaluate_agentic_retrieval.py):** 5-scenario smoke-test suite that checks each subsystem responds without error, plus the RAG Triad scores above. Not an accuracy benchmark for the same reason as #17.
+17. **[`scripts/rag_triad_evaluator.py`](../scripts/rag_triad_evaluator.py):** Heuristic (token-overlap) scorer for Context Relevance, Faithfulness, and Answer Relevance. Now the *fallback* scorer, used only when the LLM judge (below) is unavailable — on its own, treat its scores as pass/fail sanity checks, not as accuracy or hallucination measurements, since it has no model in the loop.
+17b. **[`scripts/llm_judge_evaluator.py`](../scripts/llm_judge_evaluator.py):** Real semantic RAG-Triad scoring via the local `gemma4:latest` Ollama model, replacing #17 as the primary scorer whenever Ollama is reachable and the model is pulled (checked once via `is_available()`). Fails open, not closed — an unavailable judge falls back to #17 rather than aborting the benchmark. Empty responses are scored 0 via a deterministic code-level short-circuit rather than a prompt instruction — verified live that the model itself doesn't reliably self-correct on that degenerate case when merely asked to.
+18. **[`scripts/evaluate_agentic_retrieval.py`](../scripts/evaluate_agentic_retrieval.py):** 5-scenario smoke-test suite that checks each subsystem responds without error, plus the RAG Triad scores above (LLM judge first, substring fallback second, via its own `score_triad()` method). Not an accuracy benchmark for the same reason as #17.
 19. **[`scripts/rag_explorer_dashboard.py`](../scripts/rag_explorer_dashboard.py):** Interactive 6-Tab Streamlit Web Dashboard (`http://localhost:8501`).
 
 ---
@@ -170,15 +188,28 @@ or on step 3 — and can run in any order or in parallel.
    against the `mcp_readonly` role / the DB-introspected schema when a database is reachable, and
    skip cleanly (not fail) otherwise.
 
-5. **Test Autonomous Ollama Gemma 4 Function Calling:**
+6. **Test Autonomous Ollama Gemma 4 Function Calling:**
    ```bash
    python3 scripts/ollama_agentic_tool_runner.py
    ```
 
-6. **Launch Streamlit Web UI:**
+7. **Launch Streamlit Web UI:**
    ```bash
    streamlit run scripts/rag_explorer_dashboard.py
    ```
+
+8. **Run the Data Pipeline via Dagster** (real asset graph — dependencies, retries, backfill, run
+   history — instead of the hand-run sequence above):
+   ```bash
+   pip install -r orchestration/requirements.txt
+   export DAGSTER_HOME="$(pwd)/orchestration/.dagster_home" && mkdir -p "$DAGSTER_HOME"
+   dagster dev -f orchestration/definitions.py -p 3001   # UI at http://127.0.0.1:3001
+   ```
+   See [`orchestration/README.md`](../orchestration/README.md) for the full design rationale
+   (including the one non-obvious dependency edge the hand-run sequence's prose ordering never made
+   explicit: `lineage_dag` must run *after* `knowledge_graph`'s graph wipe, not before, or its writes
+   get lost on the next rebuild) and `scripts/bootstrap_platform.sh` for the simpler,
+   dependency-free equivalent that's still the right choice for a first-time or CI-style bring-up.
 
 ### Troubleshooting Guide
 
@@ -255,6 +286,36 @@ Operational quirks worth knowing before you conclude something in your own setup
 - **`schema.dbml` is a generated file** (`python3 scripts/generate_schema_dbml.py`) — do not hand-edit
   it; a migration that changes the schema without regenerating it will show up as drift under
   `--check` (and in `tests/test_schema_dbml_drift.py`, when a live database is reachable).
+- **`OPENMETADATA_JWT_TOKEN` unset makes GET requests to `openmetadata_server` crash, not just run
+  unauthenticated.** With no token, every request sends `Authorization: Bearer ` (empty token,
+  trailing space). PUT/POST calls to most endpoints handle this fine (unauthenticated write, per
+  H10's original note); some GET endpoints (e.g. `GET /api/v1/tables`) instead 500 with
+  `StringIndexOutOfBoundsException: begin 7, end 6, length 6` — a server-side bug parsing the
+  malformed header, not something this repo's code can fix. If you hit this, log in as this
+  deployment's default basic-auth admin (`admin@openmetadata.org` / `admin`, from
+  `AUTHENTICATION_PROVIDER=basic` with no `ADMIN_PRINCIPALS` override — see
+  `docker-compose.yml`'s `openmetadata_server` env) via `POST /api/v1/users/login` to get a
+  short-lived session token, or mint a real long-lived bot token through the OpenMetadata UI and set
+  `OPENMETADATA_JWT_TOKEN` in `.env` properly. Affects `scripts/sync_end_to_end_lineage.py`'s
+  `sync_openmetadata_lineage()` and any MCP tool that calls `search_data_catalog`/
+  `check_data_quality` (both degrade to a clean logged error string, not a crash, in that case).
+- **`cadvisor`'s per-container metric discovery may not work in every Docker environment.** It logs
+  `failed to identify the read-write layer ID` for every real container in some environments (this
+  repo's own dev environment among them) and only exposes the aggregate root-cgroup metric
+  (`container_memory_usage_bytes{id="/"}`, etc.) in that case — root-caused to `/var/lib/docker` not
+  corresponding to the actual dockerd's overlayfs layer metadata as seen from inside the container;
+  confirmed not a permissions issue (`--privileged` made no difference). `catalog/prometheus_rules.yml`'s
+  container alert is written against the aggregate metric for exactly this reason. On a host where
+  cAdvisor's normal discovery works, the same config should populate real per-container series with
+  no changes needed.
+- **Neo4j Community Edition has no Prometheus/Graphite/JMX metrics reporter at all** — that's an
+  Enterprise-only feature (verified live: scanning every jar in the image finds no
+  `PrometheusOutput`-style class, and Neo4j's own config validator rejects
+  `metrics.prometheus.endpoint` as unrecognized). The `neo4j_jvm` Prometheus target (`:9101`) only
+  ever exposes generic `java_lang_*`/`jvm_*`/`process_*` metrics (heap, GC, threads, FDs, CPU) via a
+  `jmx_prometheus_javaagent` attached to the JVM's standard JMX endpoint — genuine JVM-health
+  alerting, but never transaction rate, page cache hit ratio, or other Neo4j-domain metrics; Community
+  registers no custom MBeans for those either.
 
 These are tracked for remediation; this section exists so they read as known behavior rather than
 new bugs when you hit them.

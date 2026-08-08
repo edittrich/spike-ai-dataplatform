@@ -112,7 +112,12 @@ jobs:
         # the checked-out repo (no data leaves the runner); informational
         # here because it scans full history on every run and the repo's
         # git history was already deliberately purged once (see C7) rather
-        # than something this gate should re-block on indefinitely.
+        # than something this gate should re-block on indefinitely. The
+        # blocking half of C7's "pre-commit hook and a CI job" remediation
+        # lives client-side instead: .pre-commit-config.yaml ->
+        # scripts/git-hooks/gitleaks-pre-commit.sh, scanning only the
+        # staged diff on every commit (`pre-commit install` once per
+        # checkout -- see README.md/CLAUDE.md).
         continue-on-error: true
         uses: gitleaks/gitleaks-action@v3
         env:

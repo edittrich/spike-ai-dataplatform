@@ -122,6 +122,13 @@ implemented (CDC ingestion, a lakehouse/warehouse tier, hybrid lexical+vector se
 cp .env.example .env
 ```
 
+Also, once per checkout, before your first commit — installs a local git hook that blocks a commit
+containing a likely secret (`gitleaks protect --staged`, via Docker):
+```bash
+pip install pre-commit
+pre-commit install
+```
+
 ### 2. Start PostgreSQL (Supabase CLI) and the Docker Compose Stack
 PostgreSQL is managed separately by the Supabase CLI, not by `docker-compose.yml` — start it first,
 then the rest of the platform (OpenMetadata Catalog, MySQL, OpenSearch, Neo4j Graph DB, Cube.js

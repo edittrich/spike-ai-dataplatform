@@ -1,0 +1,34 @@
+cubes:
+  - name: ref_country
+    sql_table: ref.ref_country
+    title: "ISO 3166-1 Country Reference"
+    description: "Reference dimension for country-sliced analytics, including AML high-risk-country flagging -- joined from party_individual (citizenship/tax residence) and party_organization (incorporation). See D9 in the hardening plan: 'no is_high_risk_aml ... slicing, despite AML being a marquee feature of the seed data' -- this is the fix."
+
+    measures:
+      - name: total_countries
+        type: count
+        title: "Total Reference Country Count"
+
+      - name: high_risk_aml_country_count
+        type: count
+        title: "High-Risk AML Country Count"
+        filters:
+          - sql: "{CUBE}.is_high_risk_aml = TRUE"
+        description: "Count of countries flagged high-risk for AML purposes -- the dimension this cube exists to unlock slicing by."
+
+    dimensions:
+      - name: country_code
+        sql: country_code
+        type: string
+        primary_key: true
+        title: "ISO 3166-1 Alpha-2 Country Code"
+
+      - name: country_name
+        sql: country_name
+        type: string
+        title: "Country Name"
+
+      - name: is_high_risk_aml
+        sql: is_high_risk_aml
+        type: boolean
+        title: "AML High-Risk Country Flag"

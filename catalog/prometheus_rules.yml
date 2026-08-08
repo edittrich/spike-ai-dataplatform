@@ -1,0 +1,127 @@
+# Phase 4 (hardening plan, Part 5 item 3): real alerting rules against the
+# platform's real metrics -- every metric name below was verified live
+# (`curl 127.0.0.1:9090/api/v1/query`) to actually exist and carry a real
+# value before being referenced here, not assumed from documentation.
+groups:
+  - name: platform-availability
+    rules:
+      - alert: ServiceDown
+        expr: up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Prometheus scrape target {{ $labels.job }} is down"
+          description: "{{ $labels.job }} ({{ $labels.instance }}) has been unreachable for over 2 minutes."
+
+  - name: mcp-sidecar
+    rules:
+      - alert: MCPToolCallFailureRateHigh
+        expr: |
+          (
+            sum(rate(mcp_tool_calls_total{outcome="error"}[15m]))
+            /
+            sum(rate(mcp_tool_calls_total[15m]))
+          ) > 0.25
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "MCP tool call error rate is high"
+          description: "Over 25% of mcp_sidecar tool calls have failed over the last 15 minutes."
+
+      - alert: MCPToolCallLatencyHigh
+        expr: |
+          histogram_quantile(0.95, sum(rate(llmops_tier_latency_ms_bucket[15m])) by (le, tier)) > 5000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "RAG tier {{ $labels.tier }} p95 latency exceeds 5s"
+          description: "hybrid_rag_search's {{ $labels.tier }} tier p95 latency has been above 5000ms for 10 minutes."
+
+  - name: postgres
+    rules:
+      - alert: PostgresDown
+        expr: pg_up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Postgres is unreachable by postgres_exporter"
+          description: "pg_up has been 0 for over 2 minutes -- the Supabase-managed Postgres instance may be down."
+
+      - alert: PostgresTooManyConnections
+        expr: sum(pg_stat_activity_count) > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Postgres connection count is high"
+          description: "More than 80 active Postgres connections for over 5 minutes -- check for a connection leak (mcp_server's pool, Cube.js, or a stuck pipeline script)."
+
+  - name: mysql
+    rules:
+      - alert: MySQLDown
+        expr: mysql_up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "MySQL (OpenMetadata's backend DB) is unreachable"
+          description: "mysql_up has been 0 for over 2 minutes -- openmetadata_server will be unable to serve catalog requests."
+
+  - name: host-resources
+    rules:
+      - alert: HostHighMemoryUsage
+        expr: |
+          (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) > 0.9
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Host memory usage above 90%"
+          description: "Available memory has been below 10% of total for over 10 minutes -- risk of an OOM kill among the platform's 9+ containers."
+
+      - alert: HostLowDiskSpace
+        expr: |
+          (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) < 0.1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Host root filesystem below 10% free"
+          description: "Postgres, Neo4j, Prometheus, and every other volume-backed service write to this host -- exhausting it will fail writes across the platform."
+
+  - name: containers
+    rules:
+      # No per-container breakdown here (no alert keyed on a specific
+      # container name) -- see the cadvisor service comment in
+      # docker-compose.yml: this environment's cAdvisor can only resolve the
+      # aggregate root cgroup ("id=/"), not individual containers, so a rule
+      # like "container X restarted 3 times" would reference a `name` label
+      # that never populates and silently never fire -- exactly the kind of
+      # looks-configured-but-isn't gap this hardening pass has fought since
+      # C4. This alerts on the real aggregate signal that IS available:
+      # whole-machine container memory approaching the host's total.
+      - alert: ContainerFleetMemoryHigh
+        expr: |
+          container_memory_usage_bytes{id="/"} / node_memory_MemTotal_bytes > 0.85
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Combined container memory usage above 85% of host total"
+          description: "cAdvisor's aggregate root-cgroup memory usage has exceeded 85% of node_memory_MemTotal_bytes for 10 minutes."
+
+  - name: neo4j-jvm
+    rules:
+      - alert: Neo4jJVMHeapPressureHigh
+        expr: |
+          (java_lang_memory_heapmemoryusage_used / java_lang_memory_heapmemoryusage_max) > 0.9
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Neo4j JVM heap usage above 90%"
+          description: "Sustained heap pressure risks GC thrashing or an OutOfMemoryError inside the neo4j container."

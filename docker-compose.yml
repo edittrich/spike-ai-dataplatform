@@ -211,10 +211,27 @@ services:
       # actually allowed to use. 256m leaves headroom under the 1536m limit
       # alongside the 1024m max heap and the JVM's own overhead.
       - NEO4J_dbms_memory_pagecache_size=256m
+      # Phase 4 (Part 5 item 3): Neo4j Community has no built-in Prometheus
+      # reporter (Enterprise-only -- verified live, see
+      # neo4j_jmx_agent_init's comment below). NEO4J_server_jvm_additional is
+      # documented/verified to *append* to the image's own default JVM flags
+      # (G1GC, AlwaysPreTouch, etc.), not replace them -- confirmed live via
+      # `ps aux` showing both the shipped flags and this one together. Binds
+      # the exporter's own HTTP listener to 127.0.0.1 (H4's pattern), not the
+      # JMX RMI port itself, which never leaves the JVM process.
+      - NEO4J_server_jvm_additional=-javaagent:/jmx_exporter_agent/jmx_prometheus_javaagent.jar=127.0.0.1:9101:/jmx_exporter/config.yml
     volumes:
       - ./neo4j/data:/data
       - ./neo4j/logs:/logs
       - ./neo4j/import:/var/lib/neo4j/import
+      # Named volume mounted as a directory (not a single-file mount -- a
+      # volume mount always presents as a directory), containing the jar
+      # neo4j_jmx_agent_init downloaded.
+      - jmx_exporter_agent:/jmx_exporter_agent:ro
+      - ./catalog/neo4j_jmx_exporter_config.yml:/jmx_exporter/config.yml:ro
+    depends_on:
+      neo4j_jmx_agent_init:
+        condition: service_completed_successfully
     security_opt:
       - no-new-privileges:true
     logging: *default-logging
@@ -270,6 +287,15 @@ services:
       # reason to modify either mount (Q14).
       - ./cube/model:/cube/conf/model:ro
       - ./cube/cube.js:/cube/conf/cube.js:ro
+      # Phase 4 (Part 5 item 6 / H3): CUBEJS_DEV_MODE=true bundles an embedded
+      # `cubestore-dev` process (verified live via `find` inside the container
+      # -- /cube/conf/.cubestore) that materializes pre_aggregations rollups.
+      # Named volume, not a bind mount (same reasoning as prometheus_data/
+      # grafana_data below): without it, every rollup is silently rebuilt from
+      # scratch on the next container recreate -- not data loss (it's a
+      # regenerable cache, unlike Prometheus/Grafana's history), but real,
+      # avoidable rebuild cost this closes for free.
+      - cube_store_data:/cube/conf/.cubestore
     security_opt:
       - no-new-privileges:true
     logging: *default-logging
@@ -294,6 +320,10 @@ services:
           memory: 512m
     volumes:
       - ./catalog/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      # rule_files: "prometheus_rules.yml" in prometheus.yml resolves relative
+      # to /etc/prometheus/ (the config file's own directory), so this needs
+      # its own mount alongside prometheus.yml, not just a volumes: entry.
+      - ./catalog/prometheus_rules.yml:/etc/prometheus/prometheus_rules.yml:ro
       # Previously no volume at all for /prometheus -- every metric sample,
       # not just dashboards/alerts, was destroyed on container recreate
       # (Q14). Named volume rather than a bind mount: the image runs as a
@@ -422,6 +452,221 @@ services:
       - no-new-privileges:true
     logging: *default-logging
 
+  # ---------------------------------------------------------------------------
+  # Phase 4 (hardening plan, Part 5 item 3): real host/service exporters, so
+  # Prometheus has more than 2 scrape targets (itself + mcp_sidecar) to alert
+  # on. All bound to 127.0.0.1 explicitly (H4's established pattern) even
+  # though `network_mode: host` would otherwise expose them on every
+  # interface -- none of these have any auth of their own.
+  # ---------------------------------------------------------------------------
+  node_exporter:
+    image: prom/node-exporter:v1.8.2
+    container_name: node_exporter
+    restart: always
+    network_mode: "host"
+    pid: host
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - "--path.procfs=/host/proc"
+      - "--path.sysfs=/host/sys"
+      - "--path.rootfs=/rootfs"
+      - "--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)"
+      - "--web.listen-address=127.0.0.1:9100"
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:9100/metrics"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  postgres_exporter:
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    container_name: postgres_exporter
+    restart: always
+    network_mode: "host"
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+    environment:
+      # Connects as mcp_readonly (C2's least-privilege role), not the
+      # superuser -- consistent with every other read path in this platform.
+      # Verified live: every collector works under mcp_readonly except `wal`
+      # (needs pg_ls_waldir(), a superuser-only function), disabled below
+      # rather than widening the role's grants for a metrics nicety.
+      - DATA_SOURCE_NAME=postgresql://${MCP_PG_READONLY_USER:-mcp_readonly}:${MCP_PG_READONLY_PASSWORD}@127.0.0.1:54322/${POSTGRES_DB:-postgres}?sslmode=disable
+    command:
+      - "--web.listen-address=127.0.0.1:9187"
+      - "--no-collector.wal"
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:9187/metrics"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  mysqld_exporter:
+    image: prom/mysqld-exporter:v0.15.1
+    container_name: mysqld_exporter
+    restart: always
+    network_mode: "host"
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+    environment:
+      - MYSQLD_EXPORTER_USER=openmetadata_user
+      - MYSQLD_EXPORTER_PASSWORD=${OPENMETADATA_MYSQL_PASSWORD}
+    # v0.15.x removed DATA_SOURCE_NAME env-var support (upstream: credentials
+    # visible via `docker inspect`/`ps` otherwise) in favor of a `.my.cnf`
+    # file read at startup -- verified live, DATA_SOURCE_NAME alone now fails
+    # with "no user specified in section or parent". This generates that file
+    # inside the container's own ephemeral filesystem from the env vars
+    # above (themselves sourced from .env, never hardcoded) rather than
+    # committing any credential file to the repo.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        printf '[client]\nuser=%s\npassword=%s\nhost=127.0.0.1\nport=33060\n' "$$MYSQLD_EXPORTER_USER" "$$MYSQLD_EXPORTER_PASSWORD" > /tmp/.my.cnf &&
+        exec mysqld_exporter --web.listen-address=127.0.0.1:9104 --config.my-cnf=/tmp/.my.cnf --no-collect.slave_status
+    depends_on:
+      openmetadata_db:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:9104/metrics"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    container_name: cadvisor
+    restart: always
+    network_mode: "host"
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+    # docker.sock mounted :ro -- but be clear-eyed about what that actually
+    # buys: the :ro flag only stops this container from *replacing* the
+    # socket file, not what it can do over it. Any process with access to
+    # the Docker socket can ask the daemon to run a new container with an
+    # arbitrary host bind mount, which is root-equivalent host access -- the
+    # exact class of exposure C6 deliberately removed from the pipeline
+    # scripts' `docker exec` usage. cAdvisor itself only issues read-only
+    # `docker stats`-style API calls and is the standard, plan-recommended
+    # OSS answer for container metrics; accepted here as a deliberate,
+    # documented tradeoff for a single-operator local PoC, not a production
+    # posture -- do not add this mount to a multi-tenant or internet-facing
+    # deployment without re-evaluating it.
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command:
+      - "--listen_ip=127.0.0.1"
+      - "--port=8081"
+      - "--docker_only=true"
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8081/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    # KNOWN LIMITATION, discovered live and left unresolved rather than
+    # hidden: cAdvisor logs "failed to identify the read-write layer ID"
+    # for every real container and never populates per-container labels
+    # (`name`, `id=/docker/<hash>`) -- only the aggregate root cgroup
+    # (`id="/"`) is queryable. Root-caused to this environment's
+    # `/var/lib/docker` (bind-mounted into cadvisor) not corresponding to
+    # the overlayfs layer metadata the actual dockerd process uses --
+    # confirmed this is not a permissions problem: retried with
+    # `--privileged` and the identical errors persisted, then reverted
+    # `--privileged` since it bought nothing here and is a real capability
+    # widening not worth keeping for zero benefit. `prometheus_rules.yml`'s
+    # container alert is written against the aggregate metric this actually
+    # does expose (whole-machine container memory), not a per-container one
+    # that would silently never fire. On a host where cAdvisor's normal
+    # per-container discovery works, this same config should populate real
+    # per-container series with no changes needed.
+
+  # Phase 4: a one-shot init container that downloads the Apache-2.0
+  # `jmx_prometheus_javaagent` jar (pinned exact version + sha256, unlike C3's
+  # original NEO4J_PLUGINS finding) into a shared named volume the `neo4j`
+  # service below mounts read-only. Committing the ~570KB binary jar to git
+  # was considered and rejected in favor of this -- consistent with how
+  # NEO4J_PLUGINS already fetches APOC at container start rather than
+  # vendoring it, just with the version pin and checksum verification C3
+  # noted was missing there. Runs once per `docker compose up`; the volume
+  # persists the jar across restarts, so this only needs network access on
+  # the very first bootstrap of a fresh environment.
+  neo4j_jmx_agent_init:
+    image: alpine:3.20
+    container_name: neo4j_jmx_agent_init
+    restart: "no"
+    volumes:
+      - jmx_exporter_agent:/agent
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        if [ -f /agent/jmx_prometheus_javaagent.jar ]; then
+          echo "jmx_prometheus_javaagent.jar already present, skipping download."
+          exit 0
+        fi
+        apk add --no-cache wget >/dev/null
+        wget -qO /agent/jmx_prometheus_javaagent.jar \
+          https://repo1.maven.org/maven2/io/prometheus/jmx/jmx_prometheus_javaagent/0.20.0/jmx_prometheus_javaagent-0.20.0.jar
+        echo "8b67ed40485d475648c36d11d21464b484406f85faf912b3363f71a6a7861320  /agent/jmx_prometheus_javaagent.jar" | sha256sum -c -
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: alertmanager
+    restart: always
+    network_mode: "host"
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+    volumes:
+      - ./catalog/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+      - "--storage.path=/alertmanager"
+      - "--web.listen-address=127.0.0.1:9093"
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:9093/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
   # ===========================================================================
   # 5. FastMCP Agentic Protocol Sidecar Container Service
   # ===========================================================================
@@ -498,4 +743,7 @@ volumes:
   prometheus_data:
   grafana_data:
   tempo_data:
+  cube_store_data:
+  jmx_exporter_agent:
+  alertmanager_data:
 

@@ -1,0 +1,33 @@
+# Phase 4 (hardening plan, Part 5 item 3): Alertmanager config for a
+# single-operator local PoC with no configured outbound notification channel
+# (no SMTP server, no Slack/PagerDuty webhook credentials exist anywhere in
+# this repo's .env convention). Rather than fabricate a fake webhook URL that
+# would silently fail every time an alert actually fires -- exactly the kind
+# of dishonest "looks configured but isn't" gap this whole hardening pass has
+# been fighting since C4 -- this uses Alertmanager's own `webhook_configs`
+# pointed at nothing external at all: none. Alerts are still fully visible
+# and queryable through Alertmanager's own UI/API (http://127.0.0.1:9093)
+# and through Grafana's provisioned Alertmanager datasource -- this file
+# governs *routing to external notification channels*, which genuinely does
+# not exist yet, not whether alerts fire or are visible.
+#
+# To wire up a real channel later: add a `receiver:` block under `receivers:`
+# with `email_configs:`/`slack_configs:`/`webhook_configs:` pointing at a
+# real endpoint, sourced from a new .env variable per this repo's secrets
+# convention (never hardcoded), and reference its name in `route.receiver`.
+
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: "local-null"
+  group_by: ["alertname", "severity"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+receivers:
+  - name: "local-null"
+    # Intentionally no email_configs/slack_configs/webhook_configs -- see the
+    # header comment. Alerts still appear in Alertmanager's UI/API; nothing
+    # is sent anywhere.

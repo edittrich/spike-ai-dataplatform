@@ -9,6 +9,16 @@ cubes:
         sql: "{CUBE}.party_id = {party.party_id}"
         relationship: belongs_to
 
+      # D9: unlocks AML high-risk-incorporation-country slicing (see ref_country.yml).
+      - name: ref_country
+        sql: "{CUBE}.incorporation_country_code = {ref_country.country_code}"
+        relationship: belongs_to
+
+      # D9: unlocks NACE industry-risk-level slicing (see ref_nace_industry.yml).
+      - name: ref_nace_industry
+        sql: "{CUBE}.nace_code = {ref_nace_industry.nace_code}"
+        relationship: belongs_to
+
     measures:
       - name: total_organizations
         type: count

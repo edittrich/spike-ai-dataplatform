@@ -1,0 +1,32 @@
+cubes:
+  - name: ref_currency
+    sql_table: ref.ref_currency
+    title: "ISO 4217 Currency Reference"
+    description: "Reference dimension for currency-sliced analytics -- joined from deposit_account/deposit_balance/loan_agreement/loan_disbursement/loan_collateral (D9 in the hardening plan: previously the 3 ref.* tables had no cubes at all, since CUBEJS_DB_SCHEMA=financial put them out of scope for cube generation -- explicit schema-qualified sql_table below works around that regardless of the default schema, since CUBEJS_DB_SCHEMA only affects introspection, not a cube's own runtime SQL)."
+
+    measures:
+      - name: total_currencies
+        type: count
+        title: "Total Reference Currency Count"
+
+    dimensions:
+      - name: currency_code
+        sql: currency_code
+        type: string
+        primary_key: true
+        title: "ISO 4217 Currency Code"
+
+      - name: currency_name
+        sql: currency_name
+        type: string
+        title: "Currency Name"
+
+      - name: symbol
+        sql: symbol
+        type: string
+        title: "Currency Symbol"
+
+      - name: is_active
+        sql: is_active
+        type: boolean
+        title: "Reference Active Status"

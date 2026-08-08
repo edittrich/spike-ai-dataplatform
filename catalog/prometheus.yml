@@ -2,6 +2,20 @@ global:
   scrape_interval: 15s
   evaluation_interval: 15s
 
+# Phase 4 (hardening plan, Part 5 item 3): rule_files + alerting were
+# entirely absent before -- Prometheus scraped 2 targets and evaluated
+# nothing. See catalog/prometheus_rules.yml for the rules themselves and
+# catalog/alertmanager.yml for why the receiver is intentionally a no-op
+# local sink (no real notification channel is configured anywhere in this
+# repo).
+rule_files:
+  - "prometheus_rules.yml"
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["127.0.0.1:9093"]
+
 scrape_configs:
   - job_name: 'prometheus'
     static_configs:
@@ -14,3 +28,31 @@ scrape_configs:
   - job_name: 'mcp_sidecar'
     static_configs:
       - targets: ['127.0.0.1:8000']
+
+  # Phase 4 (Part 5 item 3): the remaining scrape targets below are all new.
+  - job_name: 'node_exporter'
+    static_configs:
+      - targets: ['127.0.0.1:9100']
+
+  - job_name: 'postgres_exporter'
+    static_configs:
+      - targets: ['127.0.0.1:9187']
+
+  - job_name: 'mysqld_exporter'
+    static_configs:
+      - targets: ['127.0.0.1:9104']
+
+  - job_name: 'cadvisor'
+    static_configs:
+      - targets: ['127.0.0.1:8081']
+
+  # See docker-compose.yml's `neo4j` service and
+  # catalog/neo4j_jmx_exporter_config.yml -- JVM-level metrics only
+  # (Neo4j Community has no domain-specific Prometheus reporter).
+  - job_name: 'neo4j_jvm'
+    static_configs:
+      - targets: ['127.0.0.1:9101']
+
+  - job_name: 'alertmanager'
+    static_configs:
+      - targets: ['127.0.0.1:9093']

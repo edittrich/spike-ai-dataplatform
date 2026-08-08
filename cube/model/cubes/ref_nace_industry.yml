@@ -1,0 +1,33 @@
+cubes:
+  - name: ref_nace_industry
+    sql_table: ref.ref_nace_industry
+    title: "NACE Rev. 2 Industry Classification Reference"
+    description: "Reference dimension for industry-risk-sliced analytics -- joined from party_organization.nace_code. See D9 in the hardening plan: previously no industry risk-level slicing existed for organization/loan exposure analysis."
+
+    measures:
+      - name: total_industries
+        type: count
+        title: "Total Reference Industry Classification Count"
+
+      - name: high_risk_industry_count
+        type: count
+        title: "High-Risk Industry Classification Count"
+        filters:
+          - sql: "{CUBE}.risk_level = 'HIGH'"
+
+    dimensions:
+      - name: nace_code
+        sql: nace_code
+        type: string
+        primary_key: true
+        title: "NACE Rev. 2 Industry Code"
+
+      - name: nace_title
+        sql: nace_title
+        type: string
+        title: "Industry Sector Title"
+
+      - name: risk_level
+        sql: risk_level
+        type: string
+        title: "Industry Risk Level (Low, Medium, High)"

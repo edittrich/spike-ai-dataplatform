@@ -9,6 +9,23 @@ cubes:
         sql: "{CUBE}.party_id = {party.party_id}"
         relationship: belongs_to
 
+      # D9: direct joins on the shared party_id, bypassing the `party` supertype cube.
+      # Empirically verified that Cube.js's join-graph resolver cannot route a query
+      # through `party` when it fans out to two subtype cubes (party_individual,
+      # party_organization) both declaring `belongs_to party` -- a query like
+      # "loan_agreement.total_principal_exposure sliced by ref_nace_industry.risk_level"
+      # failed with "Can't find join path" even though party_organization already
+      # joins to ref_nace_industry. These two edges give deposit_account/loan_agreement
+      # (which already join to party_role_customer) a direct, unambiguous path to
+      # customer name/industry/citizenship-country slicing -- the exact gap D9 names.
+      - name: party_individual
+        sql: "{CUBE}.party_id = {party_individual.party_id}"
+        relationship: has_one
+
+      - name: party_organization
+        sql: "{CUBE}.party_id = {party_organization.party_id}"
+        relationship: has_one
+
     measures:
       - name: total_customers
         type: count
@@ -42,6 +59,28 @@ cubes:
         sql: "100.0 * {high_aml_risk_count} / NULLIF({active_customers_count}, 0)"
         format: percent
         description: "Percentage of active customers classified as High AML risk."
+
+    pre_aggregations:
+      # Phase 4 feasibility probe (hardening plan, Part 5 item 6 / H3): does a rollup
+      # pre-aggregation actually build and get used under this compose file's
+      # CUBEJS_DEV_MODE=true with no dedicated Cube Store service deployed? See H1's
+      # update note -- disabling dev mode failed outright without one. Verified live:
+      # yes -- Cube.js's dev server bundles an in-process Cube Store (a lightweight
+      # embedded instance, not the external clustered service prod mode needs), so
+      # rollups build and serve correctly here. Left in place as the template the
+      # other cubes below copy.
+      - name: customer_risk_rollup
+        measures:
+          - total_customers
+          - active_customers_count
+          - high_aml_risk_count
+          - verified_kyc_count
+        dimensions:
+          - customer_segment
+          - kyc_status
+          - aml_risk_rating
+        refresh_key:
+          every: "1 hour"
 
     dimensions:
       - name: party_role_customer_id

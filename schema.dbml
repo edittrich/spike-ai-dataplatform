@@ -63,6 +63,7 @@ Table financial.deposit_balance {
   Indexes {
     (md_is_active, deposit_account_id) [name: 'idx_deposit_balance_account']
     currency_code [name: 'idx_deposit_balance_currency_code']
+    deposit_account_id [name: 'uq_deposit_balance_account_active', unique, note: 'WHERE (md_is_active = true)']
   }
 
   Note: 'Deposit account real-time balance snapshot -- Constraints: CHECK ((md_valid_from_utc < md_valid_to_utc))'

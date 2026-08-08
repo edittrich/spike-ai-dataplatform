@@ -1,0 +1,17 @@
+# Pre-commit hook configuration. Install once per checkout:
+#   pip install pre-commit
+#   pre-commit install
+#
+# See scripts/git-hooks/gitleaks-pre-commit.sh for what this actually runs
+# and why (C7's residual gap in the hardening plan: a blocking local
+# secret-scan hook, complementing .github/workflows/ci.yml's informational
+# full-history gitleaks scan). Requires Docker (the platform already does).
+repos:
+  - repo: local
+    hooks:
+      - id: gitleaks
+        name: gitleaks (block commit on a likely secret in the staged diff)
+        entry: scripts/git-hooks/gitleaks-pre-commit.sh
+        language: script
+        pass_filenames: false
+        stages: [pre-commit]

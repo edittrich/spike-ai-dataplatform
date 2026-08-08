@@ -68,7 +68,7 @@ cutting across every layer.
 | 4. Retrieval | Turns tiers 2–3 into LLM-ready context | `scripts/hybrid_rag_retriever.py` (vector + graph + metrics + SQL), `scripts/neural_reranker.py`, `scripts/text_to_cypher_builder.py` |
 | 5. Agentic protocol | Standardized tool interface for AI agents | `mcp_server/financial_data_mcp_server.py` (FastMCP, stdio or SSE) |
 | 6. Consumption | Human and agent-facing surfaces | Streamlit dashboard, Grafana |
-| Cross-cutting | Security and operational visibility | `scripts/ai_safety_guardrails.py`, `scripts/llmops_telemetry.py`, Prometheus, real OTel distributed tracing (`scripts/_otel_tracing.py` -> `otel_collector` -> `tempo`) |
+| Cross-cutting | Security and operational visibility | `scripts/ai_safety_guardrails.py`, `scripts/llmops_telemetry.py`, Prometheus (+ `node_exporter`/`postgres_exporter`/`mysqld_exporter`/`cadvisor`/Neo4j JVM exporter, `catalog/prometheus_rules.yml`, `alertmanager`), real OTel distributed tracing (`scripts/_otel_tracing.py` -> `otel_collector` -> `tempo`) |
 
 See [`../CLAUDE.md`](../CLAUDE.md) for the exact commands that start and operate this stack, and the
 runbook for a script-by-script breakdown of every component named above.
@@ -278,14 +278,15 @@ directions, not currently-working features — nothing below has any implementat
 - **Hybrid lexical + vector enterprise search.** Retrieval today is HNSW cosine similarity only. Adding
   a lexical (BM25) index alongside it — e.g. via Postgres full-text search or OpenSearch, which is
   already in the stack for OpenMetadata — would let retrieval combine keyword and semantic matching.
-- **Orchestration.** The eight-step data pipeline (see the runbook) is run by hand today. A scheduler
-  (Dagster or Airflow, both open-source and locally hostable) would encode the real dependency graph,
-  add retries, and provide run history.
 - **Full observability of the data itself.** Prometheus/Grafana currently observe application-level
   telemetry only; there is no data freshness, volume, or drift monitoring against the SLAs declared in
   `contracts/*.yaml`.
 
-Capabilities that exist only partially today (per-tool audit logging, alerting rules, agent-facing
-PII redaction consistently applied to every MCP tool) are tracked as fixes to the existing
-implementation rather than roadmap items, since the components they extend already exist. (A real
-pytest suite, previously listed here, was completed — see `tests/`.)
+Capabilities that exist only partially today (per-tool audit logging, agent-facing PII redaction
+consistently applied to every MCP tool) are tracked as fixes to the existing implementation rather
+than roadmap items, since the components they extend already exist. (A real pytest suite, previously
+listed here, was completed — see `tests/`. Orchestration, also previously listed here, was completed
+too — see `orchestration/definitions.py`'s Dagster asset graph and `orchestration/README.md`.
+Alerting, also previously listed here, was completed too — see `catalog/prometheus_rules.yml` and
+the `alertmanager`/`node_exporter`/`postgres_exporter`/`mysqld_exporter`/`cadvisor` services in
+`docker-compose.yml`.)
