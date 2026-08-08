@@ -330,16 +330,24 @@ Operational quirks worth knowing before you conclude something in your own setup
   writeup. MySQL, OpenSearch, and `openmetadata_server` (via `OPENMETADATA_HOST`, same
   secure-by-default pattern as `MCP_HOST`) were already bridge-networked and loopback-only before
   this migration and are unaffected by it.
-- **Grafana's own datasource health-check UI can report a false negative for Tempo/Alertmanager**
-  (`"Unable to load datasource metadata"` / `"Plugin unavailable"`, both HTTP 500) immediately after
-  a container recreate, even though the underlying connectivity is genuinely working — verified live
-  via `docker exec grafana_observability_dashboard sh -c "wget -qO- http://tempo:3200/status"` and
-  `.../alertmanager:9093/-/healthy"` (both succeed with real data), Grafana's own datasource proxy
-  endpoints (also succeed with real live data), and Grafana's own server logs showing the failing
-  health-check calls complete in 3-5ms — far too fast to be a real network timeout. Not a
-  bridge-networking regression (the same Tempo-search-emptiness pattern was observed before the H4
-  migration too); treat a red datasource health check as inconclusive and verify via `docker exec` +
-  `wget`/the proxy endpoint before assuming a real outage.
+- **~~Grafana's own datasource health-check UI can report a false negative for Tempo/Alertmanager~~
+  — Tempo's fixed 2026-08-08; Alertmanager's is permanent, by Grafana's own design.** Root-caused,
+  not just worked around: **Alertmanager**'s built-in datasource plugin has no backend component at
+  all (confirmed via its `plugin.json` lacking a `backend` key, contrasted with Prometheus's/Tempo's,
+  both of which have one) — there's no backend for Grafana's generic
+  `/api/datasources/uid/.../health` endpoint to route the check to, confirmed permanent via the real
+  upstream issue `grafana/grafana#83794`, closed **"Not planned"**. No Grafana version will ever fix
+  this from this repo's side; its real integration (Grafana's own Alerting UI, the datasource proxy)
+  works fine regardless — only the generic health-check button is affected. **Tempo**'s was a genuine
+  version-lag gap: its plugin binary bundled in the then-pinned `grafana/grafana:10.4.0` predated
+  `CheckHealth` support (verified: the plugin's real upstream source implements it as a live call to
+  Tempo's own `/api/echo` endpoint, which this platform's Tempo answers correctly). Fixed by upgrading
+  the pinned image to `grafana/grafana:13.1.3` — verified live, Tempo's health check now returns a
+  genuine `"Data source is working"`/`OK`. The upgrade also required a new `/tmp` tmpfs mount for
+  `grafana` (matching Q14's established pattern) — 13.1.3 bundles several additional, unused plugins
+  (`elasticsearch`, `zipkin`, a few "app" plugins) whose background self-installer needs a writable
+  `/tmp` at startup regardless of whether they're actually used, which this service's `read_only:
+  true` previously didn't allow.
 - **`schema.dbml` is a generated file** (`python3 scripts/generate_schema_dbml.py`) — do not hand-edit
   it; a migration that changes the schema without regenerating it will show up as drift under
   `--check` (and in `tests/test_schema_dbml_drift.py`, when a live database is reachable).
