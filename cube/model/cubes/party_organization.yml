@@ -44,6 +44,25 @@ cubes:
       - name: registration_number
         sql: registration_number
         type: string
+        # H2: contracts/party_customer_data_product_contract.yaml classifies
+        # this PersonalData.SpecialCategory (via scripts/_pii_classification.py,
+        # the shared source of truth) -- was exposed as a plain queryable
+        # dimension with no security context. `public: false` is set here,
+        # but verified live it does NOT by itself block a REST /load query
+        # against this field -- Cube.js v0.35 only checks `public` for
+        # GraphQL schema generation, never the REST query path (confirmed by
+        # reading api-gateway's own source: `cube.public === false` appears
+        # solely in graphql.js). The actual enforcement is
+        # `queryRewrite` in cube/cube.js, which rejects any query
+        # referencing this field regardless of this flag; kept here anyway
+        # as the correct declarative signal for GraphQL/Playground/BI-tool
+        # discovery, consistent with how the field is genuinely meant to be
+        # used. See tests/test_pii_cube_enforcement.py (checks this flag is
+        # set) and cube/cube.js's MASKED_PII_MEMBERS (the real access
+        # control, which must be kept in sync with every `public: false`
+        # dimension by hand -- no automated cross-check exists between the
+        # two, a known gap documented in cube.js's own comment).
+        public: false
 
       - name: incorporation_date
         sql: incorporation_date

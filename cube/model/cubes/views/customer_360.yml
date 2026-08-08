@@ -1,0 +1,75 @@
+# H3 (hardening plan): this replaces the previous example_view.yml, which
+# was entirely commented-out Cube.js scaffolding referencing nonexistent
+# `orders`/`customers` cubes -- inert (Cube.js never parses commented-out
+# YAML as a view), and the finding's own words: "no curated marts exist."
+#
+# customer_360 is a real, working view combining customer identity/risk
+# (party_role_customer), deposit exposure (deposit_account), and credit
+# exposure (loan_agreement) into one queryable data mart -- the standard
+# Cube.js "views are data marts" use case the original stub only described
+# in comments. Verified live against the running Cube.js container: a real
+# authenticated query against this view returns real customer risk +
+# deposit + loan figures in one call (see the hardening plan's H3 entry for
+# the exact verification query/response).
+#
+# join_path traverses party_role_customer -> deposit_account and
+# party_role_customer -> loan_agreement even though both joins are declared
+# on the *other* side (deposit_account.yml/loan_agreement.yml's own
+# `joins:` blocks) -- Cube.js's join graph is resolved the same way
+# regardless of which cube declared the edge (confirmed during D9's join-path
+# work this same hardening pass).
+#
+# KNOWN LIMITATION, verified live rather than assumed: querying
+# customer + deposit measures together works, and customer + loan measures
+# together works, but querying a deposit measure and a loan measure in the
+# SAME request fails with "Can't find join path" -- deposit_account's
+# balance measures implicitly need deposit_balance joined in too (see
+# deposit_account.yml's own measures), and Cube.js's resolver can't route a
+# single query through two branches that both fan out from the
+# party_role_customer hub with their own additional implicit joins. This is
+# the same class of Cube.js join-graph constraint D9's work hit and fixed
+# for party_individual/party_organization by adding a *direct* join edge;
+# no equivalent direct edge exists between deposit_account and
+# loan_agreement (they have no real business relationship to join on), so
+# this constraint is accepted here rather than worked around. Each of the
+# view's two branches is independently real and useful -- this limits only
+# the specific case of asking for both a deposit figure and a loan figure
+# in one call.
+views:
+  - name: customer_360
+    description: >
+      Curated customer risk + deposit exposure + loan exposure data mart.
+      Prefixed measures/dimensions below avoid name collisions between the
+      three underlying cubes' own `total_*`-style naming.
+
+    cubes:
+      - join_path: party_role_customer
+        includes:
+          - customer_number
+          - customer_segment
+          - kyc_status
+          - aml_risk_rating
+          - onboarding_date
+          - total_customers
+          - active_customers_count
+          - high_aml_risk_count
+
+      - join_path: party_role_customer.deposit_account
+        prefix: true
+        includes:
+          - account_type
+          - account_status
+          - currency_code
+          - total_deposit_accounts
+          - total_available_balance
+          - overdrawn_account_count
+
+      - join_path: party_role_customer.loan_agreement
+        prefix: true
+        includes:
+          - agreement_status
+          - is_npl
+          - currency_code
+          - total_loan_contracts
+          - total_principal_exposure
+          - npl_default_count

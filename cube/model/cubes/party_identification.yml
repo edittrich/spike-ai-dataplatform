@@ -30,6 +30,12 @@ cubes:
       - name: id_number
         sql: id_number
         type: string
+        # H2: PersonalData.SpecialCategory (passport/national ID/tax ID) --
+        # see party_organization.yml's registration_number dimension for
+        # the full rationale/verification note, including the important
+        # caveat that `public: false` alone does not block a REST query;
+        # cube/cube.js's queryRewrite is the real enforcement.
+        public: false
 
       - name: issuing_country_code
         sql: issuing_country_code

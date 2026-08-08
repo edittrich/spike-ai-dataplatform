@@ -234,12 +234,22 @@ WHERE p.md_is_active = TRUE;
   respectively. Neither has a hardcoded fallback — see `CLAUDE.md`'s Secrets convention. The MCP SSE
   endpoint refuses to start at all without `MCP_API_KEY` set (rather than falling back to
   unauthenticated), and defaults to binding `127.0.0.1` only.
-- **PII handling:** `scripts/ai_safety_guardrails.py` redacts PII from RAG context payloads before
-  they reach an LLM, and `scripts/automate_openmetadata_pii_and_profiling.py` tags PII columns in the
-  catalog. The PII regexes are pattern-based (not NER), so treat them as a coarse filter — a fixed
-  false positive (the phone-number pattern previously matched plain decimal monetary values) is
-  documented as fixed in the runbook's script deep dive; unlabeled names and less common formats can
-  still slip through.
+- **PII handling:** `scripts/_pii_classification.py` is the single shared source of truth for which
+  column names count as PII (`PII_PERSONAL_PATTERNS`/`PII_SPECIAL_PATTERNS`), consumed by three
+  independent enforcement points that previously disagreed: `scripts/automate_openmetadata_pii_and_profiling.py`
+  (catalog tagging), `cube/model/cubes/*.yml`'s `public: false` dimensions + `cube/cube.js`'s
+  `queryRewrite` (Cube.js — `public: false` alone only affects GraphQL/Playground introspection in
+  this Cube.js version, verified live it does not block a REST query; `queryRewrite` is the real
+  block, kept in sync with the YAML by `tests/test_pii_cube_enforcement.py`), and
+  `AISafetyGuardrails.redact_row`/`redact_rows` (field-aware redaction by real column name, used by
+  `query_financial_database`/`query_knowledge_graph`'s MCP tool responses and recursively within
+  `sanitize_context_payload`). `AISafetyGuardrails.redact_pii`'s blanket value-shape regexes remain as
+  the fallback for genuinely free-text content with no fixed schema (descriptions, prompts) — label-
+  anchored where shape alone is ambiguous (DOB, passport/national-ID/tax-ID mentions), the same
+  tradeoff `name_pattern` already made; the returned redaction mapping now stores only a PII category
+  label, never the original un-redacted value. `sanitize_context_payload` also now actually quarantines
+  detected prompt-injection spans (replacing them, not just flagging `safety_status` in metadata
+  nothing read) and always attaches an explicit untrusted-data notice.
 - **Retrieval honesty:** `scripts/hybrid_rag_retriever.py` and `scripts/neural_reranker.py` fail
   closed (raise, don't silently substitute) if the real embedding/cross-encoder models can't load,
   via `scripts/_embedding_backend.py` — set `ALLOW_DEGRADED_EMBEDDINGS=1` to explicitly opt into a

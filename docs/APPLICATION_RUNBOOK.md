@@ -124,7 +124,8 @@ or on step 3 — and can run in any order or in parallel.
 12. **[`scripts/hybrid_rag_retriever.py`](../scripts/hybrid_rag_retriever.py):** 4-tier Hybrid RAG orchestrator combining Vector Search + Cypher + Cube.js Metrics + PostgreSQL SQL.
 
 ### D. Guardrails, Telemetry & Agentic Execution
-13. **[`scripts/ai_safety_guardrails.py`](../scripts/ai_safety_guardrails.py):** Implements PII redaction, prompt injection defense, and read-only query enforcement (regex/keyword-based, with separate SQL and Cypher keyword lists and string-literal-aware tokenization). This is the first of two enforcement layers, not the only one: the MCP server's database connections carry their own privilege- and access-mode-level restrictions regardless of what this scan misses — see `mcp_readonly` in [`mcp_server/financial_data_mcp_server.py`](../mcp_server/financial_data_mcp_server.py) and `docs/ARCHITECTURE.md`'s Security Model. The prompt-injection check is still a fixed regex list (paraphrase, other languages, or encoding easily evade it) and only warns rather than blocking on a match found in *retrieved* content — treat it as a coarse filter, not a guarantee.
+13. **[`scripts/ai_safety_guardrails.py`](../scripts/ai_safety_guardrails.py):** Implements PII redaction, prompt injection defense, and read-only query enforcement (regex/keyword-based, with separate SQL and Cypher keyword lists and string-literal-aware tokenization). This is the first of two enforcement layers, not the only one: the MCP server's database connections carry their own privilege- and access-mode-level restrictions regardless of what this scan misses — see `mcp_readonly` in [`mcp_server/financial_data_mcp_server.py`](../mcp_server/financial_data_mcp_server.py) and `docs/ARCHITECTURE.md`'s Security Model. The prompt-injection check is still a fixed regex list (paraphrase, other languages, or encoding easily evade it), but a detected match is now actually quarantined (replaced in the payload) via `sanitize_context_payload`/`quarantine_injection_matches`, not just flagged in metadata — treat detection itself as a coarse filter, not a guarantee, but what it *does* detect no longer reaches an LLM unchanged. PII redaction has two paths: `redact_pii` (blanket value-shape regexes over free text, label-anchored for DOB/passport/national-ID/tax-ID to cut false positives, IBAN checked before the credit-card pattern to avoid a spaced IBAN being partially leaked/mislabeled, returned mapping now holds only a category label never the original value) and `redact_row`/`redact_rows` (field-aware, by real column name against `scripts/_pii_classification.py`'s shared patterns — used by the MCP tools below and recursively inside `sanitize_context_payload`).
+13b. **[`scripts/_pii_classification.py`](../scripts/_pii_classification.py):** Single shared source of truth for "what counts as PII" (`PII_PERSONAL_PATTERNS`/`PII_SPECIAL_PATTERNS`/`PII_CUBEJS_MASK_PATTERNS`), consumed by the catalog auto-tagger, the guardrails module above, and Cube.js's dimension masking (`cube/cube.js`'s `queryRewrite`) — previously three independent, drifted opinions.
 14. **[`scripts/llmops_telemetry.py`](../scripts/llmops_telemetry.py):** Tracks per-call latencies, token accounting, and model cost estimates as structured JSON trace spans, as real `prometheus_client` Counters/Histograms served by `mcp_sidecar` itself (no separate metrics-exporter process — see [Known Issues](#5-known-issues) for why one used to exist and was removed), and as real OTel spans (one per RAG tier, nested under the calling tool's span) exported via [`scripts/_otel_tracing.py`](../scripts/_otel_tracing.py) to `otel_collector` -> `tempo`.
 15. **[`scripts/ollama_agentic_tool_runner.py`](../scripts/ollama_agentic_tool_runner.py):** Native tool-calling runner allowing a local Ollama model (default `gemma4:latest`) to execute FastMCP tools autonomously.
 16. **[`mcp_server/financial_data_mcp_server.py`](../mcp_server/financial_data_mcp_server.py):** FastMCP server exposing 6 tools (`search_data_catalog`, `query_semantic_metrics`, `query_knowledge_graph`, `query_financial_database`, `check_data_quality`, `hybrid_rag_search`).
@@ -263,7 +264,26 @@ Operational quirks worth knowing before you conclude something in your own setup
   requires a Cube Store service for its cache/queue driver that isn't deployed in this compose file —
   flipping the flag alone breaks every query (`CUBEJS_CUBESTORE_HOST`/`PORT` not set). `checkAuth` in
   `cube/cube.js` is enforced in both modes (verified live), so authentication itself isn't weaker in
-  dev mode — only the Playground/relaxed-defaults surface is. Add a Cube Store service before flipping this.
+  dev mode — only the Playground/relaxed-defaults surface is. Also still open in the same area:
+  `checkAuth` compares the bearer token with `!==` rather than a timing-safe comparison (the MCP
+  sidecar's `hmac.compare_digest` got this right; Cube.js never did), it sets an empty
+  `req.securityContext = {}` so there is no row-level/tenant authorization — one secret grants every
+  cube — and Cube.js still connects to Postgres as the `postgres` superuser rather than a restricted
+  role. **Accepted limitation — not planned; do not implement a fix for any part of this (Cube Store
+  deployment, timing-safe compare, `queryRewrite`-based row-level/tenant authorization via
+  `securityContext`, or a restricted Cube.js DB role) without an explicit request.** Note:
+  `cube/cube.js` *does* now define a `queryRewrite` (added for H2, below) — that one blocks specific
+  special-category-PII *columns* unconditionally for every caller; it does not touch
+  `req.securityContext` and implements no per-tenant/per-role *row* filtering, so it doesn't overlap
+  with the row-level-authorization gap this accepted limitation covers.
+- **H2: `public: false` on a Cube.js dimension does not, by itself, block a REST query against it in
+  this Cube.js version.** Verified live by reading `api-gateway`'s own source: `cube.public === false`
+  is checked only in `graphql.js` (GraphQL schema generation), never in the REST `/load` query path. A
+  dimension marked `public: false` in `cube/model/cubes/*.yml` still needs a matching entry in
+  `cube/cube.js`'s `MASKED_PII_MEMBERS` (the real enforcement, via `queryRewrite`) or it's just hidden
+  from the Playground/GraphQL schema while still directly queryable. `tests/test_pii_cube_enforcement.py`
+  cross-checks the two lists stay in sync; if you add a new special-category PII dimension, both the
+  YAML `public: false` flag and the `cube.js` entry are required.
 - **The Neo4j `apoc` plugin was removed** (nothing in this repo called any APOC procedure, and it was
   previously configured with every procedure unrestricted — an SSRF/file-access surface for no
   benefit). If a script genuinely needs a specific APOC procedure in the future, re-add the plugin with
@@ -307,7 +327,9 @@ Operational quirks worth knowing before you conclude something in your own setup
   confirmed not a permissions issue (`--privileged` made no difference). `catalog/prometheus_rules.yml`'s
   container alert is written against the aggregate metric for exactly this reason. On a host where
   cAdvisor's normal discovery works, the same config should populate real per-container series with
-  no changes needed.
+  no changes needed. **Accepted limitation for this environment specifically — not planned; do not
+  attempt further workarounds (e.g. alternate storage-driver mounts, a different cAdvisor version)
+  without an explicit request.**
 - **Neo4j Community Edition has no Prometheus/Graphite/JMX metrics reporter at all** — that's an
   Enterprise-only feature (verified live: scanning every jar in the image finds no
   `PrometheusOutput`-style class, and Neo4j's own config validator rejects
@@ -315,7 +337,17 @@ Operational quirks worth knowing before you conclude something in your own setup
   ever exposes generic `java_lang_*`/`jvm_*`/`process_*` metrics (heap, GC, threads, FDs, CPU) via a
   `jmx_prometheus_javaagent` attached to the JVM's standard JMX endpoint — genuine JVM-health
   alerting, but never transaction rate, page cache hit ratio, or other Neo4j-domain metrics; Community
-  registers no custom MBeans for those either.
+  registers no custom MBeans for those either. **Accepted limitation — not planned; closing this gap
+  would require a paid Neo4j Enterprise license, out of scope under the open-source-only constraint,
+  so do not attempt to work around it (e.g. scraping internal APIs, a third-party unofficial exporter)
+  without an explicit request.**
+- **No backup/restore or disaster-recovery path exists for Postgres, Neo4j, or MySQL** — no scheduled
+  dump/snapshot job, no documented restore procedure, and none has ever been tested. Part 5 item 8 of
+  the hardening plan names `pgBackRest`/`neo4j-admin dump` on a schedule as the eventual OSS answer.
+  **Accepted limitation — not planned; do not implement any backup/restore/DR tooling without an
+  explicit request.**
 
-These are tracked for remediation; this section exists so they read as known behavior rather than
-new bugs when you hit them.
+The items above marked "Accepted limitation" are deliberate, out-of-scope trade-offs for this PoC —
+not scheduled for remediation, and not to be fixed proactively. Everything else in this section is
+tracked for remediation; this section exists so all of it reads as known/expected behavior rather than
+new bugs when you hit it.

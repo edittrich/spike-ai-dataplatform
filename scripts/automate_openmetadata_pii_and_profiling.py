@@ -22,27 +22,18 @@ import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from scripts._dotenv_boot import load_env  # noqa: E402
 from scripts._sql_identifier import is_known_column, load_known_columns  # noqa: E402
+# H2/H8: these two lists used to be defined here only -- extracted to a
+# shared module so Cube.js's dimension masking, MCP row redaction, and this
+# script's own catalog tagging all agree on what counts as PII instead of
+# three independent (and previously drifted) opinions. See
+# scripts/_pii_classification.py's module docstring.
+from scripts._pii_classification import PII_PERSONAL_PATTERNS, PII_SPECIAL_PATTERNS  # noqa: E402,F401
 
 load_env()
 
 # _openmetadata_client reads OPENMETADATA_URL/JWT_TOKEN at import time, so it
 # must be imported after load_env() -- see its module docstring.
 from scripts._openmetadata_client import api_get, api_put, api_post  # noqa: E402
-
-PII_PERSONAL_PATTERNS = [
-    # street_address/building_number (not address_line1/address_line2, which
-    # don't exist in supabase/migrations/20260722000000_create_financial_platform_schema.sql --
-    # the phantom names meant street addresses were never actually tagged).
-    "first_name", "last_name", "street_address", "building_number",
-    "city", "postal_code", "account_number", "target_account_number"
-]
-
-PII_SPECIAL_PATTERNS = [
-    # registration_number (not tax_identifier, same phantom-column issue --
-    # see contracts/party_customer_data_product_contract.yaml, which had the
-    # identical mistake).
-    "id_number", "date_of_birth", "registration_number"
-]
 
 def query_pg(sql):
     cmd = [

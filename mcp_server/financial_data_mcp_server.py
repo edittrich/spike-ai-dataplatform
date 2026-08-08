@@ -390,10 +390,23 @@ def query_knowledge_graph(cypher_query: str) -> str:
         # from a multi-line string property, would have silently truncated
         # mid-record instead).
         records = query_neo4j(cypher_query)[:10]
-        return json.dumps(records, indent=2) if records else "No records returned."
+        # H6: this and query_financial_database were the two most powerful
+        # tools with no output-side control at all -- a query returning
+        # first_name/last_name/date_of_birth (etc.) passed the read-only
+        # keyword check and returned unredacted PII to the calling agent;
+        # only hybrid_rag_search sanitized anything. Field-aware redaction
+        # by real property name (see AISafetyGuardrails.redact_row) instead
+        # of guessing from value shape -- the same mechanism H2 uses to mask
+        # Cube.js dimensions and H8's own recommended fix.
+        redacted_records = guardrails.redact_rows(records)
+        return json.dumps(redacted_records, indent=2) if redacted_records else "No records returned."
     except Exception as e:
+        # H6: exception text used to be returned verbatim to the caller --
+        # a driver error can embed hostnames, schema/table/column names, or
+        # fragments of the query itself. Full detail still goes to the
+        # server-side log; the caller gets a generic, non-identifying message.
         logger.error(f"Cypher execution error: {e}")
-        return f"Cypher Execution Error: {e}"
+        return "Cypher Execution Error: the query could not be executed. See server logs for detail."
 
 @mcp.tool()
 @track_tool_call
@@ -408,10 +421,13 @@ def query_financial_database(sql_query: str) -> str:
         return reason
     try:
         rows = query_pg(sql_query)
-        return json.dumps(rows, indent=2) if rows else "No records returned."
+        # H6: see query_knowledge_graph's identical comment above.
+        redacted_rows = guardrails.redact_rows(rows)
+        return json.dumps(redacted_rows, indent=2) if redacted_rows else "No records returned."
     except Exception as e:
+        # H6: see query_knowledge_graph's identical comment above.
         logger.error(f"SQL execution error: {e}")
-        return f"SQL Query Error: {e}"
+        return "SQL Query Error: the query could not be executed. See server logs for detail."
 
 @mcp.tool()
 @track_tool_call

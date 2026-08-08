@@ -39,10 +39,18 @@ cubes:
       - name: date_of_birth
         sql: date_of_birth
         type: time
+        # H2: PersonalData.SpecialCategory (see party_organization.yml's
+        # registration_number dimension for the full rationale/verification
+        # note -- identical fix, same shared classification source, and the
+        # same caveat: `public: false` alone does not block a REST query;
+        # cube/cube.js's queryRewrite is the real enforcement).
+        public: false
 
       - name: gender
         sql: gender
         type: string
+        # H2: PersonalData.SpecialCategory -- see date_of_birth above.
+        public: false
 
       - name: citizenship_country_code
         sql: citizenship_country_code
