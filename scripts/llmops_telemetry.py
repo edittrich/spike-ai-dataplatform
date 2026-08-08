@@ -20,14 +20,25 @@ import json
 import uuid
 import logging
 import collections
-from typing import Dict, List, Any, Optional
+from typing import Dict, Any
 
+from opentelemetry import trace as otel_trace_api
+from opentelemetry.trace import Status, StatusCode
 from prometheus_client import Counter, Histogram
 
+from scripts._dotenv_boot import load_env
+
+# This script is runnable directly (see main() below) as well as imported, so
+# it calls load_env() itself rather than assuming a caller already has --
+# _otel_tracing reads OTEL_* env config at import time, so it must come after.
+load_env()
+from scripts._otel_tracing import get_tracer
 from scripts.ai_safety_guardrails import AISafetyGuardrails
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("LLMOpsTelemetry")
+
+_tracer = get_tracer(__name__)
 
 # Process-global Prometheus metrics (module-level, per prometheus_client's own
 # convention -- Counter/Histogram accumulate across every LLMOpsTelemetry
@@ -99,7 +110,17 @@ class LLMOpsTelemetry:
         return round(cost_in + cost_out, 6)
 
     def start_trace(self, prompt: str, model: str = "ollama/gemma4") -> Dict[str, Any]:
-        """Starts a new OpenTelemetry-compatible trace span."""
+        """Starts a new trace -- both the JSON-dict view this class has
+        always returned (trace_id, tier_latencies_ms, ...; still the shape
+        export_telemetry_dashboard()/the MCP response payload use) and, now,
+        a real OTel root span exported via OTLP to the otel_collector service
+        (see scripts/_otel_tracing.py). The two trace/span IDs are
+        deliberately different: `trace_id`/`span_id` below are this class's
+        own human-readable IDs (kept for backward compatibility with existing
+        log lines and dashboard views); `otel_trace_id`/`otel_span_id` are
+        the real OTel-generated hex IDs a trace can be looked up by in Tempo/
+        Grafana -- both are included in the returned dict.
+        """
         trace_id = f"trace-{uuid.uuid4().hex[:12]}"
         span_id = f"span-{uuid.uuid4().hex[:8]}"
         # Token/cost accounting uses the real prompt length; only the text
@@ -109,9 +130,26 @@ class LLMOpsTelemetry:
         prompt_tokens = self.estimate_tokens(prompt)
         redacted_prompt, _ = self.guardrails.redact_pii(prompt)
 
+        # start_span (not start_as_current_span): this span must stay open
+        # across multiple later calls to record_tier_latency()/finalize_trace()
+        # on this same `trace` dict, well past the lifetime of this method's
+        # own stack frame -- start_as_current_span's context-manager semantics
+        # don't fit that. The captured otel_context is passed explicitly to
+        # each child span created below instead of relying on ambient
+        # thread-local "current span" state, which would break as soon as two
+        # traces are in flight on different threads/coroutines at once.
+        otel_span = _tracer.start_span(
+            "hybrid_rag_search",
+            attributes={"model": model, "prompt_tokens": prompt_tokens},
+        )
+        otel_context = otel_trace_api.set_span_in_context(otel_span)
+        otel_span_context = otel_span.get_span_context()
+
         return {
             "trace_id": trace_id,
             "span_id": span_id,
+            "otel_trace_id": format(otel_span_context.trace_id, "032x"),
+            "otel_span_id": format(otel_span_context.span_id, "016x"),
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "prompt": redacted_prompt[:100] + ("..." if len(redacted_prompt) > 100 else ""),
             "model": model,
@@ -121,13 +159,39 @@ class LLMOpsTelemetry:
             "tier_latencies_ms": {},
             "total_latency_ms": 0.0,
             "cost_usd": 0.0,
-            "status": "IN_PROGRESS"
+            "status": "IN_PROGRESS",
+            # Internal-only: the live Span/Context objects, needed by
+            # record_tier_latency()/finalize_trace() below. Not JSON-
+            # serializable -- always popped off in finalize_trace() before the
+            # trace dict is returned, logged, or stored in trace_history.
+            "_otel_span": otel_span,
+            "_otel_context": otel_context,
         }
 
     def record_tier_latency(self, trace: Dict[str, Any], tier_name: str, latency_ms: float):
-        """Records sub-millisecond execution latency for a specific retrieval tier."""
+        """Records sub-millisecond execution latency for a specific retrieval
+        tier -- both as a Prometheus histogram observation (unchanged) and,
+        now, as a real OTel child span nested under this trace's root span.
+
+        The child span is created *after* the tier has already run (this
+        method receives an already-elapsed duration, not a live operation to
+        wrap), so its start time is backdated via start_time= to when the
+        tier actually began rather than when this method happens to be
+        called -- OTel's Span API supports this explicitly for exactly this
+        "I have a duration after the fact" case, and it keeps the exported
+        span's timing accurate rather than compressing every tier to zero
+        width at the moment record_tier_latency() runs.
+        """
         trace["tier_latencies_ms"][tier_name] = round(latency_ms, 2)
         TIER_LATENCY_MS.labels(tier=tier_name).observe(latency_ms)
+
+        otel_context = trace.get("_otel_context")
+        if otel_context is not None:
+            end_ns = time.time_ns()
+            start_ns = end_ns - int(latency_ms * 1_000_000)
+            child_span = _tracer.start_span(tier_name, context=otel_context, start_time=start_ns)
+            child_span.set_attribute("latency_ms", latency_ms)
+            child_span.end(end_time=end_ns)
 
     def finalize_trace(self, trace: Dict[str, Any], output_text: str, total_latency_ms: float) -> Dict[str, Any]:
         """Finalizes trace span with completion tokens, cost, and total latency."""
@@ -139,6 +203,20 @@ class LLMOpsTelemetry:
         trace["total_tokens"] = total_tokens
         trace["total_latency_ms"] = round(total_latency_ms, 2)
         trace["cost_usd"] = cost_usd
+
+        # Close the real OTel root span (pop, not just get, since these
+        # objects must never survive into the dict this method returns --
+        # they're not JSON-serializable, and finalize_trace()'s return value
+        # is what main() below, and every real caller, eventually
+        # json.dumps()'s or stores in trace_history).
+        otel_span = trace.pop("_otel_span", None)
+        trace.pop("_otel_context", None)
+        if otel_span is not None:
+            otel_span.set_attribute("total_tokens", total_tokens)
+            otel_span.set_attribute("cost_usd", cost_usd)
+            otel_span.set_attribute("total_latency_ms", total_latency_ms)
+            otel_span.set_status(Status(StatusCode.OK))
+            otel_span.end()
         trace["status"] = "COMPLETED"
 
         self.trace_history.append(trace)

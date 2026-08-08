@@ -8,10 +8,15 @@ x-logging: &default-logging
     max-file: "3"
 
 # NOT DONE HERE, deliberately (H4 in the hardening plan): migrating neo4j,
-# cube, prometheus, grafana, and mcp_sidecar off `network_mode: "host"` onto
-# a user-defined bridge network with explicit 127.0.0.1:<port>:<port>
-# publishing, the way openmetadata_server/openmetadata_db/openmetadata_search
-# already work. This pass instead did the parts of H4 that were genuinely
+# cube, prometheus, grafana, mcp_sidecar, tempo, and otel_collector off
+# `network_mode: "host"` onto a user-defined bridge network with explicit
+# 127.0.0.1:<port>:<port> publishing, the way
+# openmetadata_server/openmetadata_db/openmetadata_search already work.
+# (tempo/otel_collector, added after this note was first written, followed
+# the same host-networking convention as the other five for consistency --
+# introducing a new, different networking model for just two services would
+# have made the eventual bridge migration harder to reason about, not
+# easier.) This pass instead did the parts of H4 that were genuinely
 # config-only and low-risk: openmetadata_server's 0.0.0.0 publish
 # inconsistency (fixed, see OPENMETADATA_HOST below), plus :ro config mounts,
 # persistent volumes, depends_on, logging limits, and security_opt across
@@ -25,16 +30,20 @@ x-logging: &default-logging
 #      `extra_hosts: ["host.docker.internal:host-gateway"]` instead, and
 #      every default in this file, .env.example, and the scripts that read
 #      POSTGRES_HOST would need to change consistently, not just one.
-#   2. Inter-service calls between these five (mcp_sidecar -> neo4j/cube,
-#      grafana -> prometheus) currently all resolve via 127.0.0.1 too.
-#      Bridge networking gives real service-name DNS instead (`neo4j:7687`,
-#      `cube:4000`, `prometheus:9090`) -- correct, but it means updating
+#   2. Inter-service calls between these services (mcp_sidecar -> neo4j/cube/
+#      otel_collector, grafana -> prometheus/tempo, otel_collector -> tempo)
+#      currently all resolve via 127.0.0.1 too. Bridge networking gives real
+#      service-name DNS instead (`neo4j:7687`, `cube:4000`, `prometheus:9090`,
+#      `tempo:4319`) -- correct, but it means updating
 #      catalog/prometheus.yml's scrape targets, every
 #      catalog/grafana/provisioning/datasources/*.yml URL, and this file's
-#      own NEO4J_URI/CUBEJS_URL defaults together, then re-verifying each
-#      cross-service call live. Get any one of these wrong and a service
-#      looks "up" (healthcheck passes against itself) while silently unable
-#      to reach its dependency.
+#      own NEO4J_URI/CUBEJS_URL/OTEL_EXPORTER_OTLP_ENDPOINT defaults together,
+#      then re-verifying each cross-service call live. Get any one of these
+#      wrong and a service looks "up" while silently unable to reach its
+#      dependency -- worse for tempo/otel_collector specifically, since
+#      neither image has a healthcheck to even reveal onto (see the comment
+#      above those two services), so a wrong DNS name there would fail
+#      silently rather than show up as an unhealthy container.
 # Both are mechanically doable, but not something to rush through inside an
 # already-large hardening pass on a stack that's been carefully verified
 # working end-to-end -- this belongs in its own dedicated pass with room to
@@ -327,6 +336,14 @@ services:
     depends_on:
       prometheus:
         condition: service_healthy
+      # tempo has no healthcheck to wait on (see the comment above the
+      # tempo/otel_collector services) -- service_started just waits for the
+      # container to launch. Grafana tolerates a datasource that isn't ready
+      # yet at its own startup regardless (marks it unhealthy in the UI,
+      # doesn't crash), so this is a minor startup-ordering nicety, not a
+      # correctness requirement the way the prometheus dependency is.
+      tempo:
+        condition: service_started
     security_opt:
       - no-new-privileges:true
     logging: *default-logging
@@ -344,6 +361,66 @@ services:
   # `random.uniform()` fake data because there was no way to feed it anything
   # real. mcp_sidecar below now serves genuine metrics on :8000 itself, from
   # the same process that executes tool calls.
+
+  # ===========================================================================
+  # 4b. Real Distributed Tracing (OTel Collector + Tempo) -- Part 5 item 2 in
+  # the hardening plan. scripts/_otel_tracing.py exports real spans (per MCP
+  # tool call, per hybrid-RAG tier) via OTLP to otel_collector, which
+  # forwards to tempo for storage; tempo is then queryable as a Grafana
+  # datasource (trace waterfalls, TraceQL) alongside the existing Prometheus
+  # metrics datasource. Both fail open by design -- a tool call must never
+  # break because tracing infrastructure is down (see
+  # scripts/_otel_tracing.py's own docstring); neither service is a hard
+  # `depends_on` for mcp_sidecar for exactly that reason, unlike neo4j/cube
+  # above, which mcp_sidecar's actual data queries need to be useful at all.
+  # ===========================================================================
+  # Neither service below has a `healthcheck:` -- both images are deliberately
+  # minimal/distroless (verified: neither ships a shell, wget, curl, or nc;
+  # `docker run --entrypoint sh ... ` fails with "executable file not found"
+  # on both), a legitimate size/attack-surface tradeoff that comes at the
+  # cost of not being able to express a Docker-native healthcheck without
+  # adding tooling neither upstream image intends to carry. `restart: always`
+  # is the resilience mechanism instead; `depends_on` below uses
+  # `service_started` (container process launched) rather than
+  # `service_healthy` (no such signal exists to wait on).
+  tempo:
+    image: grafana/tempo:3.0.2
+    container_name: tempo_tracing_backend
+    restart: always
+    network_mode: "host"
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./catalog/tempo.yaml:/etc/tempo.yaml:ro
+      # Named volume, not a bind mount -- same host-UID-mismatch reasoning as
+      # prometheus_data/grafana_data above (the image runs as a fixed
+      # non-root UID).
+      - tempo_data:/var/tempo
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+
+  otel_collector:
+    image: otel/opentelemetry-collector:0.158.0
+    container_name: otel_collector
+    restart: always
+    network_mode: "host"
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./catalog/otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    depends_on:
+      tempo:
+        condition: service_started
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
 
   # ===========================================================================
   # 5. FastMCP Agentic Protocol Sidecar Container Service
@@ -406,6 +483,13 @@ services:
       # (clearly-tagged) retrieval instead.
       - ALLOW_DEGRADED_EMBEDDINGS=${ALLOW_DEGRADED_EMBEDDINGS:-0}
       - EMBEDDING_MODEL_NAME=${EMBEDDING_MODEL_NAME:-sentence-transformers/all-MiniLM-L6-v2}
+      # Real distributed-tracing spans -- see scripts/_otel_tracing.py.
+      # otel_collector shares this container's host network namespace, so
+      # it's reachable at 127.0.0.1 like every other compose-internal
+      # service this file's services talk to over host networking.
+      - OTEL_TRACES_ENABLED=${OTEL_TRACES_ENABLED:-1}
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://127.0.0.1:4317}
+      - OTEL_SERVICE_NAME=${OTEL_SERVICE_NAME:-ai-dataplatform-mcp-server}
 
 volumes:
   # Named (not bind-mounted): both images run as a fixed non-root UID that
@@ -413,4 +497,5 @@ volumes:
   # avoids a permission mismatch a bind mount would risk.
   prometheus_data:
   grafana_data:
+  tempo_data:
 

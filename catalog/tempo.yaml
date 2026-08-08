@@ -1,0 +1,45 @@
+# ==============================================================================
+# Grafana Tempo Configuration (monolithic/single-binary mode)
+# ==============================================================================
+# Trace storage + TraceQL query backend for the otel_collector service above.
+# Part 5 item 2 in the hardening plan. Monolithic mode (everything in one
+# process, local filesystem storage, no Kafka) is the right shape for this
+# platform's single-node local/PoC deployment -- Tempo's microservices mode
+# (separate distributor/ingester/compactor/querier processes with a
+# Kafka-backed write path) targets production multi-node scale this platform
+# doesn't have.
+#
+# Tempo 3.0 removed the `ingester` block entirely (a breaking change from
+# 2.x) -- this file is written directly in the 3.0-native monolithic format,
+# not migrated from an older config, so there's no leftover ingester/
+# ingester_client/metrics_generator_client cruft to worry about.
+#
+# OTLP receiver ports (4319/4320) are deliberately non-default -- see
+# catalog/otel-collector-config.yaml's port note for why: this receiver only
+# ever hears from the otel_collector service on this same host-networked
+# stack, never directly from application code, so the well-known 4317/4318
+# ports are left free for the collector itself.
+# ==============================================================================
+
+server:
+  http_listen_port: 3200
+  grpc_listen_port: 9095
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4319
+        http:
+          endpoint: 0.0.0.0:4320
+
+storage:
+  trace:
+    backend: local
+    local:
+      path: /var/tempo/traces
+
+query_frontend:
+  search:
+    max_result_limit: 100

@@ -1,0 +1,62 @@
+# ==============================================================================
+# OpenTelemetry Collector Configuration
+# ==============================================================================
+# Receives real trace spans (OTLP/gRPC + OTLP/HTTP) from mcp_sidecar --
+# scripts/_otel_tracing.py -- batches them, and forwards to the tempo service
+# for storage and TraceQL querying via Grafana. Part 5 item 2 in the
+# hardening plan.
+#
+# Uses the core `otel/opentelemetry-collector` distribution (not -contrib):
+# the otlp receiver, otlp exporter, batch processor, and health_check
+# extension used below are all part of the core distribution -- no need for
+# the larger contrib image's hundreds of additional (unused) components.
+#
+# Port note: this collector's OTLP receiver stays on the conventional
+# 4317/4318 ports (the well-known ports application code targets by
+# default). tempo's own OTLP receiver is deliberately moved to 4319/4320
+# (see catalog/tempo.yaml) purely to avoid a host-network port collision --
+# every service in this docker-compose.yml still runs with
+# `network_mode: "host"` (see its top-of-file comment on why the full
+# bridge-networking migration is deferred), so two services cannot both bind
+# 0.0.0.0:4317 on the same host.
+# ==============================================================================
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 5s
+    send_batch_size: 512
+
+exporters:
+  # otlp_grpc, not the deprecated `otlp` alias (still accepted, but this
+  # collector version already warns on it) -- exports to tempo's OTLP/gRPC
+  # receiver.
+  otlp_grpc:
+    endpoint: 127.0.0.1:4319
+    tls:
+      insecure: true
+
+extensions:
+  # Not wired into docker-compose.yml as a container-native `healthcheck:` --
+  # the image ships no shell/wget/curl to run one from inside the container
+  # (see docker-compose.yml's comment above the tempo/otel_collector
+  # services). Still useful for manual/host-side inspection, since
+  # `network_mode: host` exposes this at 127.0.0.1:13133 on the host itself:
+  # `curl http://127.0.0.1:13133/` returns 200 when the collector is healthy.
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp_grpc]

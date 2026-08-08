@@ -23,3 +23,11 @@ neo4j>=5.18.0
 # declared but never imported anywhere (Q12).
 streamlit>=1.30.0
 pytest>=7.0.0
+
+# Real distributed-tracing spans, exported via OTLP to the otel_collector
+# service -> tempo (Part 5 item 2 in the hardening plan: llmops_telemetry.py's
+# trace_history was only ever an in-process JSON approximation "OpenTelemetry-
+# compatible" in shape, never a real OTel SDK). See scripts/_otel_tracing.py.
+opentelemetry-api>=1.24.0
+opentelemetry-sdk>=1.24.0
+opentelemetry-exporter-otlp-proto-grpc>=1.24.0

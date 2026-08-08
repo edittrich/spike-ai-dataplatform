@@ -39,13 +39,27 @@ against a refused connection until it's up.
 | `prometheus_metrics` | `prom/prometheus:v2.51.0` | `9090` | [catalog/prometheus.yml](../catalog/prometheus.yml) | Operational time-series metrics engine |
 | `grafana_observability_dashboard` | `grafana/grafana:10.4.0` | `3000` | `GF_SECURITY_ADMIN_PASSWORD` | Visual monitoring dashboard portal |
 | `mcp_agentic_sidecar` | [`mcp_server/Dockerfile.mcp`](../mcp_server/Dockerfile.mcp) | `8001` (SSE, bound to `127.0.0.1` unless `MCP_HOST` overrides it) and `8000` (`/metrics`) | `MCP_TRANSPORT=sse`, `MCP_PORT=8001`, `MCP_METRICS_PORT=8000`, `MCP_HOST`, `MCP_API_KEY` — required; the SSE endpoint now **refuses to start** without it, rather than falling back to unauthenticated. Connects to Postgres as `MCP_PG_READONLY_USER`/`MCP_PG_READONLY_PASSWORD` (the `mcp_readonly` role), not the superuser. | FastMCP Server SSE HTTP agent daemon **and** the platform's real Prometheus metrics source (`prometheus_client.start_http_server()`); runs as non-root `appuser` |
+| `otel_collector` | `otel/opentelemetry-collector:0.158.0` | `4317` (OTLP/gRPC), `4318` (OTLP/HTTP), `13133` (health, host-side only — see below) | [catalog/otel-collector-config.yaml](../catalog/otel-collector-config.yaml) | Receives real trace spans from `mcp_sidecar`, batches, forwards to `tempo` |
+| `tempo_tracing_backend` | `grafana/tempo:3.0.2` | `3200` (query API, used by Grafana's datasource), `4319`/`4320` (OTLP receiver, collector-only — see config comment for why these aren't 4317/4318) | [catalog/tempo.yaml](../catalog/tempo.yaml) | Trace storage + TraceQL query backend (monolithic mode, local filesystem storage) |
 
-There is no separate telemetry-exporter service — `mcp_sidecar` serves real per-call metrics itself
-(the process that actually executes tool calls is the only one that can; Prometheus client objects
-don't share state across processes, which is exactly why the previous separate exporter container had
-to fabricate its data — see [Known Issues](#5-known-issues)).
+There is no separate telemetry-exporter service for *metrics* — `mcp_sidecar` serves real per-call
+metrics itself (the process that actually executes tool calls is the only one that can; Prometheus
+client objects don't share state across processes, which is exactly why the previous separate
+exporter container had to fabricate its data — see [Known Issues](#5-known-issues)). *Traces* do have
+a two-service backend (`otel_collector` + `tempo`) because that's genuinely how OTel's reference
+architecture separates ingestion/batching from storage/query — see `scripts/_otel_tracing.py`.
 
-All services declare a `healthcheck:` in `docker-compose.yml`; `openmetadata_server` gates on `openmetadata_db`/`openmetadata_search`, `mcp_sidecar` gates on `neo4j`/`cube`, and `grafana` gates on `prometheus` — all via `depends_on: condition: service_healthy` (fixes real startup races — see Troubleshooting). Every service also sets `security_opt: no-new-privileges:true` and a bounded `logging:` driver; Prometheus and Grafana persist to named volumes (`prometheus_data`/`grafana_data`) instead of losing all history on every recreate; config bind mounts (Cube.js's model/`cube.js`, Prometheus's config, Grafana's provisioning) are `:ro`.
+Every service except `otel_collector`/`tempo` declares a `healthcheck:` in `docker-compose.yml` --
+both of those images are deliberately minimal/distroless (no shell, wget, curl, or nc) with no way to
+express one; `restart: always` is their resilience mechanism instead, and anything depending on them
+uses `condition: service_started` rather than `service_healthy`. `openmetadata_server` gates on
+`openmetadata_db`/`openmetadata_search`, `mcp_sidecar` gates on `neo4j`/`cube`, `grafana` gates on
+`prometheus` (healthy) and `tempo` (started), and `otel_collector` gates on `tempo` (started) — all
+via `depends_on` (fixes real startup races — see Troubleshooting). Every service also sets
+`security_opt: no-new-privileges:true` and a bounded `logging:` driver; Prometheus, Grafana, and Tempo
+persist to named volumes (`prometheus_data`/`grafana_data`/`tempo_data`) instead of losing all history
+on every recreate; config bind mounts (Cube.js's model/`cube.js`, Prometheus's config, Grafana's
+provisioning, `tempo.yaml`, `otel-collector-config.yaml`) are `:ro`.
 
 ---
 
@@ -72,7 +86,7 @@ All services declare a `healthcheck:` in `docker-compose.yml`; `openmetadata_ser
    unable to authenticate.
 1. **[`scripts/generate_synthetic_data.py`](../scripts/generate_synthetic_data.py):** Generates synthetic BIAN/FIBO aligned records and writes them to `supabase/seed.sql`. Does not connect to PostgreSQL itself — see the prerequisite above for how the file actually gets loaded.
 2. **[`scripts/populate_openmetadata_tables.py`](../scripts/populate_openmetadata_tables.py):** Registers database services and table metadata into OpenMetadata via REST API. **Required before steps 4–8** — those all fetch table entities from the catalog and no-op silently if this hasn't run.
-3. **[`scripts/build_knowledge_graph.py`](../scripts/build_knowledge_graph.py):** Extracts PostgreSQL relational tables and loads them into Neo4j via Cypher transactions; prints the resulting node/relationship counts at the end of each run (deterministic given the seeded synthetic dataset from `generate_synthetic_data.py`, but re-run it for the current number rather than trusting a number written here).
+3. **[`scripts/build_knowledge_graph.py`](../scripts/build_knowledge_graph.py):** Extracts PostgreSQL relational tables and loads them into Neo4j via Cypher transactions; prints the resulting node/relationship counts at the end of each run (deterministic given the seeded synthetic dataset from `generate_synthetic_data.py`, but re-run it for the current number rather than trusting a number written here). Its schema step (constraints + two full-text indexes) reads from committed DDL at [`neo4j/schema/constraints_and_indexes.cypher`](../neo4j/schema/constraints_and_indexes.cypher) rather than hardcoding Cypher inline — the Neo4j analogue of `supabase/migrations/*.sql`. `party_name_fulltext` (over `Individual`/`Organization` name properties) and `reference_name_fulltext` (over `RefCountry`/`RefCurrency`/`RefIndustry`) let an agent resolve a party or reference entity by free-text name instead of requiring an exact code/ID match, e.g. `CALL db.index.fulltext.queryNodes('party_name_fulltext', 'Schmidt') YIELD node, score ...`.
 
 ### B. Governance, Lineage & Quality
 
@@ -94,7 +108,7 @@ or on step 3 — and can run in any order or in parallel.
 
 ### D. Guardrails, Telemetry & Agentic Execution
 13. **[`scripts/ai_safety_guardrails.py`](../scripts/ai_safety_guardrails.py):** Implements PII redaction, prompt injection defense, and read-only query enforcement (regex/keyword-based, with separate SQL and Cypher keyword lists and string-literal-aware tokenization). This is the first of two enforcement layers, not the only one: the MCP server's database connections carry their own privilege- and access-mode-level restrictions regardless of what this scan misses — see `mcp_readonly` in [`mcp_server/financial_data_mcp_server.py`](../mcp_server/financial_data_mcp_server.py) and `docs/ARCHITECTURE.md`'s Security Model. The prompt-injection check is still a fixed regex list (paraphrase, other languages, or encoding easily evade it) and only warns rather than blocking on a match found in *retrieved* content — treat it as a coarse filter, not a guarantee.
-14. **[`scripts/llmops_telemetry.py`](../scripts/llmops_telemetry.py):** Tracks per-call latencies, token accounting, and model cost estimates as structured JSON trace spans, and as real `prometheus_client` Counters/Histograms served by `mcp_sidecar` itself (no separate exporter process — see [Known Issues](#5-known-issues) for why one used to exist and was removed).
+14. **[`scripts/llmops_telemetry.py`](../scripts/llmops_telemetry.py):** Tracks per-call latencies, token accounting, and model cost estimates as structured JSON trace spans, as real `prometheus_client` Counters/Histograms served by `mcp_sidecar` itself (no separate metrics-exporter process — see [Known Issues](#5-known-issues) for why one used to exist and was removed), and as real OTel spans (one per RAG tier, nested under the calling tool's span) exported via [`scripts/_otel_tracing.py`](../scripts/_otel_tracing.py) to `otel_collector` -> `tempo`.
 15. **[`scripts/ollama_agentic_tool_runner.py`](../scripts/ollama_agentic_tool_runner.py):** Native tool-calling runner allowing a local Ollama model (default `gemma4:latest`) to execute FastMCP tools autonomously.
 16. **[`mcp_server/financial_data_mcp_server.py`](../mcp_server/financial_data_mcp_server.py):** FastMCP server exposing 6 tools (`search_data_catalog`, `query_semantic_metrics`, `query_knowledge_graph`, `query_financial_database`, `check_data_quality`, `hybrid_rag_search`).
 

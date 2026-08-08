@@ -2,6 +2,11 @@ apiVersion: 1
 
 datasources:
   - name: Prometheus
+    # Explicit, stable uid (Grafana would otherwise auto-generate one) so
+    # tempo.yml's datasource can reference this one by a known ID for its
+    # trace-to-metrics/service-map linking, rather than an ID that could
+    # change across a fresh provisioning run.
+    uid: prometheus
     type: prometheus
     access: proxy
     url: http://127.0.0.1:9090

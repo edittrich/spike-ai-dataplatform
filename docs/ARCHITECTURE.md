@@ -68,7 +68,7 @@ cutting across every layer.
 | 4. Retrieval | Turns tiers 2–3 into LLM-ready context | `scripts/hybrid_rag_retriever.py` (vector + graph + metrics + SQL), `scripts/neural_reranker.py`, `scripts/text_to_cypher_builder.py` |
 | 5. Agentic protocol | Standardized tool interface for AI agents | `mcp_server/financial_data_mcp_server.py` (FastMCP, stdio or SSE) |
 | 6. Consumption | Human and agent-facing surfaces | Streamlit dashboard, Grafana |
-| Cross-cutting | Security and operational visibility | `scripts/ai_safety_guardrails.py`, `scripts/llmops_telemetry.py`, Prometheus |
+| Cross-cutting | Security and operational visibility | `scripts/ai_safety_guardrails.py`, `scripts/llmops_telemetry.py`, Prometheus, real OTel distributed tracing (`scripts/_otel_tracing.py` -> `otel_collector` -> `tempo`) |
 
 See [`../CLAUDE.md`](../CLAUDE.md) for the exact commands that start and operate this stack, and the
 runbook for a script-by-script breakdown of every component named above.
@@ -285,6 +285,7 @@ directions, not currently-working features — nothing below has any implementat
   telemetry only; there is no data freshness, volume, or drift monitoring against the SLAs declared in
   `contracts/*.yaml`.
 
-Capabilities that exist only partially today (per-tool audit logging, alerting rules, a real test
-suite, agent-facing PII redaction consistently applied to every MCP tool) are tracked as fixes to the
-existing implementation rather than roadmap items, since the components they extend already exist.
+Capabilities that exist only partially today (per-tool audit logging, alerting rules, agent-facing
+PII redaction consistently applied to every MCP tool) are tracked as fixes to the existing
+implementation rather than roadmap items, since the components they extend already exist. (A real
+pytest suite, previously listed here, was completed — see `tests/`.)

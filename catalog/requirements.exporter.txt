@@ -9,3 +9,8 @@ neo4j>=5.18.0
 pyyaml>=6.0.1
 python-dotenv>=1.0.0
 prometheus-client>=0.20.0
+# Real distributed-tracing spans -- see scripts/_otel_tracing.py and
+# requirements.txt's matching comment.
+opentelemetry-api>=1.24.0
+opentelemetry-sdk>=1.24.0
+opentelemetry-exporter-otlp-proto-grpc>=1.24.0

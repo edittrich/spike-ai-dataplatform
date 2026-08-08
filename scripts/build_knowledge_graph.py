@@ -65,6 +65,36 @@ def execute_cypher_batch(driver, statements_and_params):
     except Exception as e:
         print(f"Cypher Error: {e}")
 
+SCHEMA_DDL_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "neo4j", "schema", "constraints_and_indexes.cypher"
+)
+
+def load_schema_ddl_statements(path=SCHEMA_DDL_PATH):
+    """Reads the committed .cypher DDL file (constraints + full-text indexes
+    -- see item 10 in Part 5 of the hardening plan) and splits it into
+    individual statements. These are static schema DDL with no data-derived
+    values, so no $parameters are needed -- unlike every other
+    execute_cypher_batch() call in this file, which binds real row data.
+
+    Strips `//` line comments *before* splitting on `;` -- splitting first
+    would break the moment a comment's own prose happens to contain a
+    semicolon (it did, during development of this function). Still not a
+    general-purpose Cypher parser: it assumes no statement contains a string
+    literal with an embedded `;`, true of every statement in this file
+    (identifiers and label names only), the same assumption
+    scripts/_schema_drift.py makes about the SQL migration file it parses."""
+    with open(path, "r", encoding="utf-8") as f:
+        raw = f.read()
+    without_comments = "\n".join(
+        line for line in raw.split("\n") if not line.strip().startswith("//")
+    )
+    statements = []
+    for chunk in without_comments.split(";"):
+        cleaned = chunk.strip()
+        if cleaned:
+            statements.append((cleaned, {}))
+    return statements
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -99,18 +129,15 @@ def main():
             sys.exit(1)
     execute_cypher_batch(driver, [("MATCH (n) DETACH DELETE n", {})])
 
-    # 2. Setup Uniqueness Constraints & Indexes
+    # 2. Setup Constraints & Indexes -- read from the committed DDL file
+    # (neo4j/schema/constraints_and_indexes.cypher) rather than hardcoding
+    # Cypher strings here, so the graph's schema is reviewable/diffable on
+    # its own, the same way supabase/migrations/*.sql is for Postgres. Also
+    # picks up the full-text indexes that file adds (item 10 in Part 5 of the
+    # hardening plan) -- there previously was no full-text index anywhere
+    # despite the platform advertising "hybrid retrieval".
     print("⚡ Setting up Constraints & Indexes...")
-    constraints = [
-        ("CREATE CONSTRAINT IF NOT EXISTS FOR (p:Party) REQUIRE p.party_id IS UNIQUE", {}),
-        ("CREATE CONSTRAINT IF NOT EXISTS FOR (c:Customer) REQUIRE c.party_role_customer_id IS UNIQUE", {}),
-        ("CREATE CONSTRAINT IF NOT EXISTS FOR (a:DepositAccount) REQUIRE a.deposit_account_id IS UNIQUE", {}),
-        ("CREATE CONSTRAINT IF NOT EXISTS FOR (l:LoanAgreement) REQUIRE l.loan_agreement_id IS UNIQUE", {}),
-        ("CREATE CONSTRAINT IF NOT EXISTS FOR (rc:RefCountry) REQUIRE rc.code IS UNIQUE", {}),
-        ("CREATE CONSTRAINT IF NOT EXISTS FOR (rcur:RefCurrency) REQUIRE rcur.code IS UNIQUE", {}),
-        ("CREATE CONSTRAINT IF NOT EXISTS FOR (rind:RefIndustry) REQUIRE rind.code IS UNIQUE", {}),
-    ]
-    execute_cypher_batch(driver, constraints)
+    execute_cypher_batch(driver, load_schema_ddl_statements())
 
     # 3. Load Reference Data (Currencies, Countries, Industries)
     # Every value below now travels as a Cypher $parameter -- bound server-side

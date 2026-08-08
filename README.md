@@ -3,11 +3,10 @@
 [![CI](https://github.com/edittrich/spike-ai-dataplatform/actions/workflows/ci.yml/badge.svg)](https://github.com/edittrich/spike-ai-dataplatform/actions)
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-pgvector_0.8.0-336791.svg)](https://github.com/pgvector/pgvector)
-[![Neo4j](https://img.shields.io/badge/Neo4j-5.0-008CC1.svg)](https://neo4j.com/)
+[![Neo4j](https://img.shields.io/badge/Neo4j-5.18_Community-008CC1.svg)](https://neo4j.com/)
 [![OpenMetadata](https://img.shields.io/badge/OpenMetadata-1.3.1-4B5563.svg)](https://open-metadata.org/)
 [![Cube.js](https://img.shields.io/badge/Cube.js-Semantic_Layer-6366F1.svg)](https://cube.dev/)
 [![MCP](https://img.shields.io/badge/Model_Context_Protocol-FastMCP-10B981.svg)](https://modelcontextprotocol.io/)
-[![License](https://img.shields.io/badge/License-Apache_2.0-green.svg)](LICENSE)
 
 An enterprise-grade, multi-modal **AI-Enabled Data Platform** combining relational 3NF databases, semantic metric layers, W3C FIBO ontologies, Neo4j knowledge graphs, `pgvector` dense vector embeddings, and an **Anthropic FastMCP Server** for autonomous AI Agents.
 
@@ -55,7 +54,8 @@ An enterprise-grade, multi-modal **AI-Enabled Data Platform** combining relation
 +---------------------------------------------------------------------------------------------------+
 
 =====================================================================================================
-=== CROSS-CUTTING: AUTH & ACCESS CONTROL   PII REDACTION   PROMPT GUARDRAILS   TELEMETRY & OBSERVABILITY ===
+=== CROSS-CUTTING: AUTH & ACCESS CONTROL   PII REDACTION   PROMPT GUARDRAILS                       ===
+=== REAL PROMETHEUS METRICS + OTEL DISTRIBUTED TRACING (Tempo)                                     ===
 =====================================================================================================
 ```
 
@@ -70,7 +70,7 @@ implemented (CDC ingestion, a lakehouse/warehouse tier, hybrid lexical+vector se
 ### Cluster 1: Metadata, Semantics & Knowledge
 - **Enterprise Data Product Catalog (OpenMetadata 1.3.1)**: Governed catalog managing Business Domains (`Party_Customer_Domain`, `Deposit_Liquidity_Domain`, `Loan_Credit_Risk_Domain`), Data Products, and Open Data Contract Standard (ODCS) YAML specs.
 - **Automated PII Tagging & Data Quality Profiling**: Automatic classification of sensitive PII fields and continuous execution of 59 automated test assertions (100% Pass).
-- **W3C FIBO Ontology Grounding**: Formal URI linkage mapping financial entities directly to W3C FIBO concepts (e.g. `financial.party` $\rightarrow$ `https://spec.edmcouncil.org/fibo/ontology/FND/AgentsAndPeople/Agents/Party`).
+- **W3C FIBO Ontology Grounding**: Formal URI linkage mapping financial entities directly to W3C FIBO concepts (e.g. `financial.party` $\rightarrow$ `https://spec.edmcouncil.org/fibo/ontology/FND/Parties/Parties/Party`).
 - **End-to-End Lineage Sync**: Automated 3-tier DAG lineage tracking (`PostgreSQL` $\rightarrow$ `Cube.js` $\rightarrow$ `Neo4j`).
 
 ### Cluster 2: Search, Retrieval, Guardrails & Agentic Tools
@@ -82,11 +82,12 @@ implemented (CDC ingestion, a lakehouse/warehouse tier, hybrid lexical+vector se
 - **RAG Triad Smoke-Test Suite**: Heuristic (token-overlap) evaluator in [scripts/rag_triad_evaluator.py](scripts/rag_triad_evaluator.py) scoring Context Relevance, Faithfulness, and Answer Relevance as a fast sanity check — no model is in the loop, so treat scores as pass/fail smoke tests rather than accuracy or hallucination measurements.
 
 ### Cluster 3: Master Orchestration & Observability Suite
-- **Master Docker Compose Orchestrator**: Unified orchestration in [docker-compose.yml](docker-compose.yml) linking OpenMetadata, Neo4j, Cube.js, Prometheus, Grafana, and the FastMCP Sidecar.
+- **Master Docker Compose Orchestrator**: Unified orchestration in [docker-compose.yml](docker-compose.yml) linking OpenMetadata, Neo4j, Cube.js, Prometheus, Grafana, the OTel Collector + Tempo tracing backend, and the FastMCP Sidecar.
 - **Prometheus Metrics Engine (`:9090`)**: Real-time operational metrics scraping engine configured in [catalog/prometheus.yml](catalog/prometheus.yml).
 - **Real LLMOps Metrics (`mcp_sidecar:8000/metrics`)**: The MCP sidecar serves genuine `prometheus_client` metrics (tool call counts/outcomes/latency, per-tier retrieval latency, token/cost accounting) directly from the process that executes tool calls — see [scripts/llmops_telemetry.py](scripts/llmops_telemetry.py) and `main()` in [mcp_server/financial_data_mcp_server.py](mcp_server/financial_data_mcp_server.py). There is no separate simulator process.
-- **Automated Grafana Dashboard & Datasource Provisioning (`:3000`)**: Zero-touch pre-configured visual dashboard (`http://localhost:3000`, credentials configured via `.env`) provisioned via [catalog/grafana/provisioning](catalog/grafana/provisioning) and [catalog/grafana/dashboards](catalog/grafana/dashboards).
-- **Automated GitHub Actions CI/CD**: Workflow in [.github/workflows/ci.yml](.github/workflows/ci.yml) validating syntax, guardrails, telemetry, and MCP tool handlers on `push`/`pull_request` to `main`.
+- **Real OpenTelemetry Distributed Tracing**: Every MCP tool call gets a real exported span; `hybrid_rag_search` additionally gets one child span per RAG tier (Vector/Graph/Semantic/SQL), correctly nested under the tool-call span — see [scripts/_otel_tracing.py](scripts/_otel_tracing.py). Spans export via OTLP to the `otel_collector` service, which forwards to `tempo` for storage and TraceQL querying through a provisioned Grafana datasource. Fails open by design (`OTEL_TRACES_ENABLED=0` opts out) — a missing collector never breaks a tool call.
+- **Automated Grafana Dashboard & Datasource Provisioning (`:3000`)**: Zero-touch pre-configured visual dashboard (`http://localhost:3000`, credentials configured via `.env`) provisioned via [catalog/grafana/provisioning](catalog/grafana/provisioning) and [catalog/grafana/dashboards](catalog/grafana/dashboards), with both Prometheus and Tempo datasources wired in.
+- **Automated GitHub Actions CI/CD**: Workflow in [.github/workflows/ci.yml](.github/workflows/ci.yml) validating syntax, guardrails, telemetry, the `tests/` pytest suite (negative security tests, auth middleware, contract/schema drift), and MCP tool handlers on `push`/`pull_request` to `main`.
 
 ---
 
@@ -95,16 +96,21 @@ implemented (CDC ingestion, a lakehouse/warehouse tier, hybrid lexical+vector se
 ### 1. Prerequisites
 - **Docker & Docker Compose**
 - **Python 3.11+**
-- **Node.js 18+** (for Cube.js semantic layer)
+- **Node.js 18+** (Cube.js itself runs in Docker, not on the host — this is for `npm`/`npx` to run the Supabase CLI, an `npm` devDependency; see [package.json](package.json))
 
 ### 2. Live Platform Services
 
 | Component Service | Local Endpoint / URL | Access Configuration |
 | :--- | :--- | :--- |
 | **Supabase PostgreSQL (`pgvector`)** | `127.0.0.1:54322` | Configured via `POSTGRES_HOST` / `.env` |
-| **Neo4j Knowledge Graph** | `bolt://127.0.0.1:7687` | Configured via `NEO4J_URI` / `.env` |
-| **OpenMetadata Catalog UI** | `http://127.0.0.1:8585` | Configured via `OPENMETADATA_URL` / `.env` |
-| **Cube.js Semantic Layer REST API** | `http://127.0.0.1:4000` | Configured via `CUBEJS_URL` / `.env` |
+| **Neo4j Knowledge Graph** | `bolt://127.0.0.1:7687` (browser UI: `http://127.0.0.1:7474`) | Configured via `NEO4J_URI` / `.env` |
+| **OpenMetadata Catalog UI** | `http://127.0.0.1:8585` | Configured via `OPENMETADATA_URL` / `.env` (loopback-only by default; `OPENMETADATA_HOST` to change) |
+| **Cube.js Semantic Layer REST API** | `http://127.0.0.1:4000` | Configured via `CUBEJS_URL` / `.env`; requires `CUBEJS_API_SECRET` bearer token |
+| **FastMCP Agentic Sidecar (SSE)** | `http://127.0.0.1:8001/sse` | Requires `MCP_API_KEY` bearer token; loopback-only by default (`MCP_HOST` to change) |
+| **Prometheus Metrics** | `http://127.0.0.1:9090` | Scrapes `mcp_sidecar:8000/metrics` — see [catalog/prometheus.yml](catalog/prometheus.yml) |
+| **Grafana Dashboards** | `http://127.0.0.1:3000` | Credentials via `GRAFANA_ADMIN_USER`/`GRAFANA_ADMIN_PASSWORD` in `.env` |
+| **Tempo Trace Query API** | `http://127.0.0.1:3200` | Queried through Grafana's Tempo datasource, or directly (`/api/search`, `/api/traces/<id>`) |
+| **OTel Collector (OTLP ingest)** | `http://127.0.0.1:4317` (gRPC) | Configured via `OTEL_EXPORTER_OTLP_ENDPOINT` / `.env` |
 | **Local Ollama LLM Engine** | `http://127.0.0.1:11434` | Local model `gemma4:latest` |
 
 ---
@@ -119,38 +125,41 @@ cp .env.example .env
 ### 2. Start PostgreSQL (Supabase CLI) and the Docker Compose Stack
 PostgreSQL is managed separately by the Supabase CLI, not by `docker-compose.yml` — start it first,
 then the rest of the platform (OpenMetadata Catalog, MySQL, OpenSearch, Neo4j Graph DB, Cube.js
-Semantic Engine, Prometheus, Grafana, MCP sidecar):
+Semantic Engine, Prometheus, Grafana, the OTel Collector + Tempo tracing backend, MCP sidecar):
 ```bash
 npm run supabase:start   # applies migrations to a fresh local Postgres instance
 docker compose up -d
 ```
 
+> **Shortcut:** [`scripts/bootstrap_platform.sh`](scripts/bootstrap_platform.sh) runs every step below,
+> in the correct order, from an empty checkout. The steps are shown individually here for clarity;
+> run the script directly if you just want the platform up.
+
 ### 3. Execute Cluster 1: Metadata, Semantics & Governance
 ```bash
-# Generate BIAN/FIBO Synthetic Data as supabase/seed.sql (1,159 Parties, 1,226 Loan Agreements, 1,159 Deposit Balances)
+# Generate BIAN/FIBO Synthetic Data as supabase/seed.sql (1,159 Parties, 1,226 Loan Agreements, 1,826 Deposit Balances)
 python3 scripts/generate_synthetic_data.py
 
 # Load the generated seed data into PostgreSQL
 npm run supabase:db:reset
 
-# Ingest and Seed Neo4j Knowledge Graph
-python3 scripts/build_knowledge_graph.py
+# Set the least-privilege mcp_readonly role's login password (needs MCP_PG_READONLY_PASSWORD in
+# .env) -- the MCP server and hybrid RAG retriever connect as this role, not the superuser
+python3 scripts/configure_readonly_role.py
+
+# Ingest and Seed Neo4j Knowledge Graph (--yes confirms the graph wipe non-interactively)
+python3 scripts/build_knowledge_graph.py --yes
 
 # Register table metadata into OpenMetadata -- required before the 4 steps below, which all
 # fetch table entities from the catalog and no-op silently if this hasn't run yet
 python3 scripts/populate_openmetadata_tables.py
 
-# Publish OpenMetadata Domains & ODCS-Inspired Data Product Contracts
-python3 scripts/register_openmetadata_data_contracts.py
-
-# Ground Catalog Entities to Official W3C FIBO Ontology Class URIs
-python3 scripts/ground_fibo_ontology_uris.py
-
-# Run Automated PII Tagging & Statistical Profiling
-python3 scripts/automate_openmetadata_pii_and_profiling.py
-
-# Register and Execute 59 Real-Time Data Quality Assertions
-python3 scripts/execute_openmetadata_data_quality_tests.py
+# These 4 are mutually independent (each depends only on the step above, not on each other) and
+# can run in any order or in parallel:
+python3 scripts/register_openmetadata_data_contracts.py    # Publish OpenMetadata Domains & ODCS-Inspired Data Product Contracts
+python3 scripts/ground_fibo_ontology_uris.py                # Ground Catalog Entities to Official W3C FIBO Ontology Class URIs
+python3 scripts/automate_openmetadata_pii_and_profiling.py  # Run Automated PII Tagging & Statistical Profiling
+python3 scripts/execute_openmetadata_data_quality_tests.py  # Register and Execute 59 Real-Time Data Quality Assertions
 
 # Synchronize 3-Tier Lineage DAGs (PostgreSQL -> Cube.js -> Neo4j)
 python3 scripts/sync_end_to_end_lineage.py
@@ -158,11 +167,16 @@ python3 scripts/sync_end_to_end_lineage.py
 
 ### 4. Execute Cluster 2: Search, Retrieval, Guardrails & Agentic Tools
 ```bash
-# Generate and Index 60 Dense Vector Embeddings in pgvector (HuggingFace Transformer)
+# Generate and Index Dense Vector Embeddings (catalog tables, data products, FIBO tags) in pgvector --
+# genuinely last: reads catalog tables, data products, and FIBO tags registered by Cluster 1 above.
 python3 scripts/generate_vector_embeddings.py
 
 # Run Multi-Modal Hybrid RAG Retriever with AI Guardrails & LLMOps Telemetry
 python3 scripts/hybrid_rag_retriever.py
+
+# Run the pytest suite (negative security tests, auth middleware, contract/schema drift) --
+# self-contained; the handful of tests needing a live database skip cleanly without one
+python3 -m pytest tests/ -v
 
 # Test Enterprise FastMCP Agentic Tools
 python3 -m mcp_server.test_mcp_server
@@ -184,7 +198,7 @@ streamlit run scripts/rag_explorer_dashboard.py
 
 ## 🔌 Integrating the MCP Server with AI Assistant Clients
 
-To connect our Enterprise FastMCP Server (`mcp_server/financial_data_mcp_server.py`) to AI clients (like Claude Desktop, Antigravity, or Cursor), add the following configuration to your client's `mcpServers` configuration file:
+To connect our Enterprise FastMCP Server (`mcp_server/financial_data_mcp_server.py`) to AI clients (like Claude Desktop, Antigravity, or Cursor) over **stdio** (the alternative to the `mcp_sidecar` SSE container), add the following configuration to your client's `mcpServers` configuration file, substituting `/path/to/ai-dataplatform` for this repo's actual absolute path on your machine:
 
 ```json
 {
@@ -192,7 +206,7 @@ To connect our Enterprise FastMCP Server (`mcp_server/financial_data_mcp_server.
     "financial-data-platform": {
       "command": "python3",
       "args": [
-        "/home/edittrich/Documents/workspaces/git/ai-dataplatform/mcp_server/financial_data_mcp_server.py"
+        "/path/to/ai-dataplatform/mcp_server/financial_data_mcp_server.py"
       ],
       "env": {
         "OPENMETADATA_URL": "http://127.0.0.1:8585/api/v1",
@@ -205,6 +219,14 @@ To connect our Enterprise FastMCP Server (`mcp_server/financial_data_mcp_server.
 }
 ```
 
+The stdio path doesn't require `MCP_API_KEY` (that's SSE-only — see `main()` in
+[mcp_server/financial_data_mcp_server.py](mcp_server/financial_data_mcp_server.py)), but it does need
+real credentials to actually do anything: `MCP_PG_READONLY_USER`/`MCP_PG_READONLY_PASSWORD`,
+`NEO4J_PASSWORD`, `CUBEJS_API_SECRET`, and `OPENMETADATA_JWT_TOKEN`, none of which belong hardcoded in
+a client config file. `financial_data_mcp_server.py` loads `.env` itself on import
+(`scripts/_dotenv_boot.py`), so the simplest approach is to leave those out of the `env` block above
+entirely and let it read your existing `.env` instead of duplicating secrets into a second config file.
+
 ---
 
 ## 📑 Documentation Index
@@ -212,4 +234,5 @@ To connect our Enterprise FastMCP Server (`mcp_server/financial_data_mcp_server.
 - [Architecture & Design](docs/ARCHITECTURE.md): system architecture, data model, BIAN/FIBO domain alignment, and roadmap.
 - [Application Runbook](docs/APPLICATION_RUNBOOK.md): service inventory, script-by-script deep dive, troubleshooting, known issues.
 - [Data Contracts](contracts/): data product contract specs.
+- [Test Suite](tests/): pytest negative security tests, auth middleware tests, and the contract/schema drift check.
 - [CLAUDE.md](CLAUDE.md): commands and conventions for agentic coding tools working in this repo.

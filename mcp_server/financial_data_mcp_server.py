@@ -32,6 +32,7 @@ import psycopg2
 import psycopg2.pool
 import uvicorn
 from neo4j import READ_ACCESS, GraphDatabase
+from opentelemetry.trace import Status, StatusCode
 from prometheus_client import Counter, Histogram, start_http_server
 from starlette.responses import JSONResponse
 
@@ -53,6 +54,12 @@ from scripts.ai_safety_guardrails import AISafetyGuardrails
 # `environment:` block already injects real values and `override=False` means
 # they're never replaced by anything (or lack of anything) in a mounted `.env`.
 load_env()
+
+# _otel_tracing reads OTEL_* env config at import time, so it must be
+# imported after load_env() -- see its module docstring.
+from scripts._otel_tracing import get_tracer  # noqa: E402
+
+_tracer = get_tracer(__name__)
 
 # Configure Logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -81,7 +88,17 @@ TOOL_DURATION_MS = Histogram(
 
 
 def track_tool_call(func):
-    """Records a Prometheus call count (by outcome) and duration for a tool function.
+    """Records a Prometheus call count (by outcome) and duration for a tool
+    function, and now also wraps the call in a real OTel span exported via
+    OTLP to the otel_collector service (Part 5 item 2 in the hardening
+    plan) -- one instrumentation point, two real observability outputs,
+    covering all 6 tools uniformly (not just hybrid_rag_search, which is
+    the only one that separately produces its own child spans -- see
+    scripts/llmops_telemetry.py -- nested under this one automatically:
+    start_as_current_span() below puts this span into OTel's ambient
+    context, and llmops_telemetry.start_trace() picks that up as its
+    parent the same way any OTel-instrumented call in this process would,
+    with no explicit wiring between the two modules needed).
 
     Applied as the innermost decorator (below @mcp.tool()) so FastMCP still
     introspects the original function's signature for its JSON schema --
@@ -91,13 +108,20 @@ def track_tool_call(func):
     def wrapper(*args, **kwargs):
         start = time.perf_counter()
         outcome = "error"
-        try:
-            result = func(*args, **kwargs)
-            outcome = "success"
-            return result
-        finally:
-            TOOL_CALLS_TOTAL.labels(tool=func.__name__, outcome=outcome).inc()
-            TOOL_DURATION_MS.labels(tool=func.__name__).observe((time.perf_counter() - start) * 1000)
+        with _tracer.start_as_current_span(f"mcp.tool.{func.__name__}") as span:
+            try:
+                result = func(*args, **kwargs)
+                outcome = "success"
+                span.set_status(Status(StatusCode.OK))
+                return result
+            except Exception as e:
+                span.record_exception(e)
+                span.set_status(Status(StatusCode.ERROR, str(e)))
+                raise
+            finally:
+                span.set_attribute("outcome", outcome)
+                TOOL_CALLS_TOTAL.labels(tool=func.__name__, outcome=outcome).inc()
+                TOOL_DURATION_MS.labels(tool=func.__name__).observe((time.perf_counter() - start) * 1000)
     return wrapper
 
 # Environment Configuration

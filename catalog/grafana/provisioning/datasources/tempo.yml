@@ -1,0 +1,17 @@
+apiVersion: 1
+
+datasources:
+  - name: Tempo
+    type: tempo
+    access: proxy
+    url: http://127.0.0.1:3200
+    isDefault: false
+    editable: false
+    # No tracesToMetrics/serviceMap cross-linking to the Prometheus
+    # datasource -- both require Tempo's metrics_generator to derive
+    # span-metrics/service-graph data and remote_write them to Prometheus,
+    # which catalog/tempo.yaml doesn't configure (out of scope for "spans" --
+    # see Part 5 item 2 in the hardening plan). Provisioning that link
+    # without the metrics actually flowing would advertise a feature that
+    # silently doesn't work, exactly the class of problem C4 fixed
+    # elsewhere in this platform.
