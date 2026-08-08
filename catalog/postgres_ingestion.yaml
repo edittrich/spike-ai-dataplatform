@@ -30,4 +30,4 @@ sink:
       hostPort: http://127.0.0.1:8585/api
       authProvider: openmetadata
       securityConfig:
-        jwtToken: ""
+        jwtToken: "${OPENMETADATA_JWT_TOKEN}"
