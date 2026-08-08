@@ -48,6 +48,7 @@ from dagster import (
     MaterializeResult,
     MetadataValue,
     RetryPolicy,
+    ScheduleDefinition,
     asset,
     define_asset_job,
 )
@@ -137,8 +138,14 @@ def knowledge_graph(context: AssetExecutionContext) -> MaterializeResult:
 # C. Catalog & Governance
 # ----------------------------------------------------------------------------
 
-@asset(group_name="catalog", deps=[postgres_seeded], retry_policy=_SERVICE_RETRY_POLICY,
-       description="Registers PostgreSQL tables into OpenMetadata. Required before every asset in this group below -- they all fetch table entities from the catalog and silently no-op if this hasn't run yet (see D1 in the hardening plan; this dependency used to be undocumented).")
+@asset(group_name="catalog", retry_policy=_SERVICE_RETRY_POLICY,
+       description="H10 (hardening plan) residual gap, closed 2026-08-08: rotates OPENMETADATA_JWT_TOKEN in .env before it expires. Idempotent -- a no-op if the current token still has >14 days left, so materializing this on every pipeline run (or via bot_token_rotation_schedule below, independent of the pipeline) is cheap and safe. No deps of its own -- only needs openmetadata_server reachable, which docker compose's own depends_on/healthcheck already guarantee once the container is up; not gated on any other asset here.")
+def bot_token_rotated(context: AssetExecutionContext) -> MaterializeResult:
+    return _run_script(context, "rotate_openmetadata_bot_token.py")
+
+
+@asset(group_name="catalog", deps=[postgres_seeded, bot_token_rotated], retry_policy=_SERVICE_RETRY_POLICY,
+       description="Registers PostgreSQL tables into OpenMetadata. Required before every asset in this group below -- they all fetch table entities from the catalog and silently no-op if this hasn't run yet (see D1 in the hardening plan; this dependency used to be undocumented). Also depends on bot_token_rotated: every OpenMetadata write in this group authenticates as the ingestion-bot, so a stale/expired token here would fail every asset below, not just this one.")
 def catalog_tables(context: AssetExecutionContext) -> MaterializeResult:
     return _run_script(context, "populate_openmetadata_tables.py")
 
@@ -192,6 +199,32 @@ full_pipeline_job = define_asset_job(
     "the same steps used to be listed in.",
 )
 
+# H10 residual-gap fix (hardening plan), closed 2026-08-08: a job scoped to
+# just the one asset, so the schedule below doesn't have to re-run (or wait
+# on) the entire pipeline just to check whether a 90-day-bounded credential
+# needs renewing. This -- not bootstrap_platform.sh's own call to the same
+# script -- is the actual "nothing automates re-minting it" gap-closer: it
+# fires on its own schedule regardless of when anyone next runs a bootstrap
+# or materializes the full pipeline.
+bot_token_rotation_job = define_asset_job(
+    name="bot_token_rotation",
+    selection=[bot_token_rotated],
+    description="Checks/rotates the OpenMetadata ingestion-bot JWT (H10). Idempotent -- a no-op "
+    "most days; only actually mints and writes a new token when the current one is missing or "
+    "within 14 days of its 90-day expiry.",
+)
+
+bot_token_rotation_schedule = ScheduleDefinition(
+    name="bot_token_rotation_daily",
+    job=bot_token_rotation_job,
+    # Once a day comfortably clears the token's own 90-day expiry and this
+    # asset's own 14-day renewal threshold with wide margin -- even if a run
+    # is missed for a few days (the daemon isn't running, the host is off),
+    # there's no realistic way to miss the whole 14-day window unnoticed.
+    cron_schedule="0 6 * * *",
+    execution_timezone="UTC",
+)
+
 defs = Definitions(
     assets=[
         synthetic_seed_data,
@@ -199,6 +232,7 @@ defs = Definitions(
         postgres_superuser_synced,
         readonly_role_configured,
         knowledge_graph,
+        bot_token_rotated,
         catalog_tables,
         pii_tags_and_profiles,
         fibo_groundings,
@@ -207,5 +241,6 @@ defs = Definitions(
         lineage_dag,
         vector_embeddings,
     ],
-    jobs=[full_pipeline_job],
+    jobs=[full_pipeline_job, bot_token_rotation_job],
+    schedules=[bot_token_rotation_schedule],
 )

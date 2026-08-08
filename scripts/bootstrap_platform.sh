@@ -54,7 +54,7 @@ python3 scripts/sync_postgres_superuser_password.py
 step "5/10  Starting the Docker Compose stack (OpenMetadata, Neo4j, Cube.js, Prometheus, Grafana, OTel Collector + Tempo, MCP sidecar)"
 docker compose up -d
 
-step "6/10  Waiting for openmetadata_server to report healthy (this is the slowest starter)"
+step "6/11  Waiting for openmetadata_server to report healthy (this is the slowest starter)"
 tries=0
 until [ "$(docker inspect -f '{{.State.Health.Status}}' openmetadata_server 2>/dev/null || echo starting)" = "healthy" ]; do
     tries=$((tries + 1))
@@ -64,20 +64,28 @@ until [ "$(docker inspect -f '{{.State.Health.Status}}' openmetadata_server 2>/d
     sleep 5
 done
 
-step "7/10  Configuring the least-privilege mcp_readonly Postgres role"
+step "7/11  Rotating the OpenMetadata ingestion-bot token if it's missing/expiring soon"
+# H10 (hardening plan) residual gap, closed 2026-08-08: idempotent -- a
+# no-op if OPENMETADATA_JWT_TOKEN in .env is still valid for >14 days, so
+# this is safe to run on every bootstrap, not just the first one. Needs
+# openmetadata_server up (just confirmed above) and OPENMETADATA_ADMIN_EMAIL/
+# PASSWORD set in .env -- see .env.example's comment on those two vars.
+python3 scripts/rotate_openmetadata_bot_token.py
+
+step "8/11  Configuring the least-privilege mcp_readonly Postgres role"
 python3 scripts/configure_readonly_role.py
 
-step "8/10  Building the Neo4j knowledge graph from PostgreSQL"
+step "9/11  Building the Neo4j knowledge graph from PostgreSQL"
 # --yes: this script now confirms before its unconditional `MATCH (n) DETACH
 # DELETE n` graph wipe (C6 in the hardening plan) -- safe and expected to
 # skip non-interactively here, since bootstrap_platform.sh is meant to run
 # unattended from an empty checkout, where there's no existing graph to lose.
 python3 scripts/build_knowledge_graph.py --yes
 
-step "9/10  Registering table metadata into OpenMetadata (required by the next 4 steps)"
+step "10/11  Registering table metadata into OpenMetadata (required by the next 4 steps)"
 python3 scripts/populate_openmetadata_tables.py
 
-# These four are mutually independent -- each depends only on step 9 above,
+# These four are mutually independent -- each depends only on step 10 above,
 # not on each other -- run sequentially here for simplicity and clearer
 # failure output; feel free to background/parallelize them if pipeline
 # runtime matters more than that (or use orchestration/definitions.py's
@@ -88,7 +96,7 @@ python3 scripts/register_openmetadata_data_contracts.py
 python3 scripts/execute_openmetadata_data_quality_tests.py
 python3 scripts/sync_end_to_end_lineage.py
 
-step "10/10  Generating and indexing vector embeddings (genuinely the last step -- reads catalog + FIBO tags + data products from the steps above)"
+step "11/11  Generating and indexing vector embeddings (genuinely the last step -- reads catalog + FIBO tags + data products from the steps above)"
 python3 scripts/generate_vector_embeddings.py
 
 step "Done"

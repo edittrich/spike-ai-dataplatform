@@ -112,7 +112,16 @@ config + rules, Grafana's provisioning, `tempo.yaml`, `otel-collector-config.yam
    (checked-in files can't hold real secrets), so also run
    `python3 scripts/configure_readonly_role.py` once `MCP_PG_READONLY_PASSWORD` is set in `.env`.
    Skipping any of this leaves later steps running against an empty database, running against the
-   wrong postgres password, or leaves the MCP server unable to authenticate.
+   wrong postgres password, or leaves the MCP server unable to authenticate. Also run
+   [`scripts/rotate_openmetadata_bot_token.py`](../scripts/rotate_openmetadata_bot_token.py) once
+   `openmetadata_server` is up and `OPENMETADATA_ADMIN_EMAIL`/`OPENMETADATA_ADMIN_PASSWORD` are set in
+   `.env` — step 2 below and its dependents (steps 4–8) authenticate to OpenMetadata as the
+   `ingestion-bot`, whose JWT is a genuinely time-bounded 90-day credential (H10, hardening plan), not
+   a permanent one. This script is idempotent (no-ops unless the current token is missing or within 14
+   days of expiring), is already wired into `scripts/bootstrap_platform.sh`, and also runs on its own
+   daily Dagster schedule (`orchestration/definitions.py`'s `bot_token_rotation_daily`) independent of
+   when anyone next runs the pipeline — so this is normally self-maintaining, not something to remember
+   to run by hand every 90 days.
 1. **[`scripts/generate_synthetic_data.py`](../scripts/generate_synthetic_data.py):** Generates synthetic BIAN/FIBO aligned records and writes them to `supabase/seed.sql`. Does not connect to PostgreSQL itself — see the prerequisite above for how the file actually gets loaded.
 2. **[`scripts/populate_openmetadata_tables.py`](../scripts/populate_openmetadata_tables.py):** Registers database services and table metadata into OpenMetadata via REST API. **Required before steps 4–8** — those all fetch table entities from the catalog and no-op silently if this hasn't run.
 3. **[`scripts/build_knowledge_graph.py`](../scripts/build_knowledge_graph.py):** Extracts PostgreSQL relational tables and loads them into Neo4j via Cypher transactions; prints the resulting node/relationship counts at the end of each run (deterministic given the seeded synthetic dataset from `generate_synthetic_data.py`, but re-run it for the current number rather than trusting a number written here). Its schema step (constraints + two full-text indexes) reads from committed DDL at [`neo4j/schema/constraints_and_indexes.cypher`](../neo4j/schema/constraints_and_indexes.cypher) rather than hardcoding Cypher inline — the Neo4j analogue of `supabase/migrations/*.sql`. `party_name_fulltext` (over `Individual`/`Organization` name properties) and `reference_name_fulltext` (over `RefCountry`/`RefCurrency`/`RefIndustry`) let an agent resolve a party or reference entity by free-text name instead of requiring an exact code/ID match, e.g. `CALL db.index.fulltext.queryNodes('party_name_fulltext', 'Schmidt') YIELD node, score ...`.
