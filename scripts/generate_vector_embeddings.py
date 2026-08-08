@@ -15,10 +15,9 @@ Populates `financial.entity_embeddings` table in PostgreSQL with HNSW index.
 
 import json
 import os
-import subprocess
 import sys
-import urllib.error
-import urllib.request
+
+import psycopg2
 
 # scripts/ has no __init__.py (namespace package); make it importable regardless
 # of the working directory this script is launched from.
@@ -27,15 +26,22 @@ from scripts._dotenv_boot import load_env  # noqa: E402
 
 load_env()
 
-OPENMETADATA_URL = os.getenv("OPENMETADATA_URL", "http://127.0.0.1:8585/api/v1")
-JWT_TOKEN = os.getenv("OPENMETADATA_JWT_TOKEN", "")
-if not JWT_TOKEN:
-    print("⚠️ OPENMETADATA_JWT_TOKEN is not set; OpenMetadata API calls will be unauthenticated.")
+# This script *writes* to financial.entity_embeddings, so it connects with the
+# native psycopg2 driver as POSTGRES_USER rather than via `docker exec psql`
+# (see CLAUDE.md's C6 note: docker exec requires a mounted docker.sock, which
+# is root-equivalent host access, and the old code built its INSERT by
+# f-string interpolation with hand-rolled `str.replace("'", "''")` escaping,
+# which breaks on a trailing backslash and is exactly the injection shape
+# every other write path in this repo was hardened against).
+POSTGRES_HOST = os.getenv("POSTGRES_HOST", "127.0.0.1")
+POSTGRES_PORT = int(os.getenv("POSTGRES_PORT", "54322"))
+POSTGRES_USER = os.getenv("POSTGRES_USER", "postgres")
+POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "")
+POSTGRES_DB = os.getenv("POSTGRES_DB", "postgres")
 
-headers = {
-    "Content-Type": "application/json",
-    "Authorization": f"Bearer {JWT_TOKEN}"
-}
+# _openmetadata_client / _embedding_backend read credentials/config at import
+# time, so both must be imported after load_env() -- see their docstrings.
+from scripts._openmetadata_client import api_get  # noqa: E402
 
 # Fails closed by default (raises) if the real sentence-transformers model
 # can't load -- set ALLOW_DEGRADED_EMBEDDINGS=1 to accept a non-semantic
@@ -52,42 +58,44 @@ if EMBEDDING_MODE == "degraded":
 else:
     print(f"🧠 Using real embedding model '{os.getenv('EMBEDDING_MODEL_NAME', 'sentence-transformers/all-MiniLM-L6-v2')}' (384 dims).")
 
-def api_get(endpoint):
-    url = f"{OPENMETADATA_URL}/{endpoint}"
-    req = urllib.request.Request(url, headers=headers, method="GET")
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except Exception as e:
-        return None
+_pg_conn = None
 
-def query_pg(sql):
-    cmd = [
-        "docker", "exec", "supabase_db_ai-dataplatform", "psql",
-        "-U", "postgres", "-d", "postgres", "-t", "-A", "-c", sql
-    ]
-    res = subprocess.run(cmd, capture_output=True, text=True, check=True)
-    return res.stdout.strip()
+def get_pg_connection():
+    """Lazily opens a single native psycopg2 connection for the life of the
+    process, instead of shelling out to `docker exec psql` per query."""
+    global _pg_conn
+    if _pg_conn is None or _pg_conn.closed:
+        _pg_conn = psycopg2.connect(
+            host=POSTGRES_HOST, port=POSTGRES_PORT, user=POSTGRES_USER,
+            password=POSTGRES_PASSWORD, dbname=POSTGRES_DB, connect_timeout=10,
+        )
+        _pg_conn.autocommit = True
+    return _pg_conn
+
+def query_pg_rows(sql, params=None):
+    """Runs a parameterized SELECT and returns the raw rows (list of tuples)."""
+    with get_pg_connection().cursor() as cur:
+        cur.execute(sql, params or ())
+        return cur.fetchall()
 
 def insert_vector_embedding(entity_type, fqn, display_name, content_text, metadata, embedding_vec):
     embedding_str = "[" + ",".join(str(x) for x in embedding_vec) + "]"
-    meta_str = json.dumps(metadata).replace("'", "''")
-    text_clean = content_text.replace("'", "''")
-    display_clean = display_name.replace("'", "''")
-    fqn_clean = fqn.replace("'", "''")
-
-    sql = f"""
-    INSERT INTO financial.entity_embeddings 
+    sql = """
+    INSERT INTO financial.entity_embeddings
         (entity_type, fqn, display_name, content_text, metadata, embedding)
-    VALUES 
-        ('{entity_type}', '{fqn_clean}', '{display_clean}', '{text_clean}', '{meta_str}'::jsonb, '{embedding_str}'::vector)
+    VALUES
+        (%s, %s, %s, %s, %s::jsonb, %s::vector)
     ON CONFLICT (fqn) DO UPDATE SET
         content_text = EXCLUDED.content_text,
         metadata = EXCLUDED.metadata,
         embedding = EXCLUDED.embedding,
         created_at_utc = NOW();
     """
-    query_pg(sql)
+    with get_pg_connection().cursor() as cur:
+        cur.execute(
+            sql,
+            (entity_type, fqn, display_name, content_text, json.dumps(metadata), embedding_str),
+        )
 
 def generate_embeddings():
     print("\n🚀 Starting Vector Embeddings Generation Pipeline...")
@@ -124,20 +132,18 @@ def generate_embeddings():
             print(f"  🧠 Vectorized Table: {tbl_name}")
     else:
         # Fallback to local PostgreSQL schemas
-        raw_tables = query_pg("SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema IN ('financial', 'ref') AND table_name != 'entity_embeddings';")
-        for line in raw_tables.split("\n"):
-            if not line.strip():
-                continue
-            parts = line.split("|")
-            if len(parts) == 2:
-                schema_name, tbl_name = parts[0], parts[1]
-                fqn = f"PostgreSQL_Financial_Platform.postgres.{schema_name}.{tbl_name}"
-                content_text = f"Table: {tbl_name}. Schema: {schema_name}. BIAN/FIBO entity {tbl_name} for enterprise banking risk and exposure analytics."
-                vec = compute_embedding(content_text)
-                metadata = {"schema": schema_name, "table": tbl_name, "column_count": 5, "tags": []}
-                insert_vector_embedding("table", fqn, tbl_name, content_text, metadata, vec)
-                count += 1
-                print(f"  🧠 Vectorized PostgreSQL Table: {schema_name}.{tbl_name}")
+        rows = query_pg_rows(
+            "SELECT table_schema, table_name FROM information_schema.tables "
+            "WHERE table_schema IN ('financial', 'ref') AND table_name != 'entity_embeddings';"
+        )
+        for schema_name, tbl_name in rows:
+            fqn = f"PostgreSQL_Financial_Platform.postgres.{schema_name}.{tbl_name}"
+            content_text = f"Table: {tbl_name}. Schema: {schema_name}. BIAN/FIBO entity {tbl_name} for enterprise banking risk and exposure analytics."
+            vec = compute_embedding(content_text)
+            metadata = {"schema": schema_name, "table": tbl_name, "column_count": 5, "tags": []}
+            insert_vector_embedding("table", fqn, tbl_name, content_text, metadata, vec)
+            count += 1
+            print(f"  🧠 Vectorized PostgreSQL Table: {schema_name}.{tbl_name}")
 
     # 2. Embed Data Products & Data Contracts
     print("📜 Vectorizing Data Products & Data Contracts...")
@@ -189,30 +195,29 @@ def test_similarity_search():
     query_vec = compute_embedding(sample_query)
     vec_str = "[" + ",".join(str(x) for x in query_vec) + "]"
 
-    sql = f"""
-    SELECT 
+    sql = """
+    SELECT
         entity_type,
         display_name,
-        ROUND((1 - (embedding <=> '{vec_str}'::vector))::numeric, 4) AS cosine_similarity,
+        ROUND((1 - (embedding <=> %(vec)s::vector))::numeric, 4) AS cosine_similarity,
         content_text
     FROM financial.entity_embeddings
-    ORDER BY embedding <=> '{vec_str}'::vector ASC
+    ORDER BY embedding <=> %(vec)s::vector ASC
     LIMIT 5;
     """
 
-    res = query_pg(sql)
+    rows = query_pg_rows(sql, {"vec": vec_str})
     print(f"Query Prompt: '{sample_query}'\n")
     print("Top 5 Vector Similarity Search Matches:")
     print("---------------------------------------")
-    for line in res.split("\n"):
-        if line:
-            parts = line.split("|")
-            if len(parts) >= 3:
-                print(f"  🎯 [{parts[0]}] {parts[1]} — Cosine Similarity: {parts[2]}")
+    for entity_type, display_name, cosine_similarity, _content_text in rows:
+        print(f"  🎯 [{entity_type}] {display_name} — Cosine Similarity: {cosine_similarity}")
 
 def main():
     generate_embeddings()
     test_similarity_search()
+    if _pg_conn is not None:
+        _pg_conn.close()
 
 if __name__ == "__main__":
     main()

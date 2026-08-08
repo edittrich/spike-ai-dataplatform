@@ -2,368 +2,457 @@
 // DBML Specification: AI-Enabled Financial Data Platform PoC
 // Domain Standards: BIAN / FIBO Aligned Architecture
 // Temporal Pattern: Inmon 3NF with SCD Type 2 Metadata Headers
-// Data Product Naming Rule: All tables start with their Data Product prefix
+//
+// GENERATED FILE -- do not hand-edit. Regenerate with:
+//   python3 scripts/generate_schema_dbml.py
+// after every migration, so this file can never drift from the live schema
+// the way the hand-maintained version did (missing entity_embeddings, 71
+// timestamp/TIMESTAMPTZ mismatches, no schema qualification -- see D7 in
+// the hardening plan).
 // ============================================================================
 
 Project AI_Financial_Data_Platform {
   database_type: 'PostgreSQL'
-  Note: 'Production-grade BIAN/FIBO aligned financial data platform schema featuring Party, Deposit, and Loan domains with SCD Type 2 temporal metadata. Table names strictly prefixed by Data Product name.'
+  Note: 'Production-grade BIAN/FIBO aligned financial data platform schema featuring Party, Deposit, and Loan domains with SCD Type 2 temporal metadata. Table names strictly prefixed by Data Product name. Schema-qualified (ref.*/financial.*).'
 }
 
 // ----------------------------------------------------------------------------
-// REFERENCE DATA PRODUCT (ref)
+// FINANCIAL SCHEMA
 // ----------------------------------------------------------------------------
 
-Table ref_currency {
-  currency_code varchar(3) [pk, note: 'ISO 4217 3-letter currency code (e.g. USD, EUR)']
-  currency_name varchar(100) [not null, note: 'Official currency title']
-  symbol varchar(10) [note: 'Currency symbol (e.g. $, €)']
-  decimal_places integer [not null, default: 2, note: 'Number of decimal places']
-  is_active boolean [not null, default: true, note: 'Reference active indicator']
-  created_at timestamp [not null, default: `now()`, note: 'Record creation timestamp UTC']
-
-  Note: 'Reference table for ISO 4217 currencies'
-}
-
-Table ref_country {
-  country_code varchar(2) [pk, note: 'ISO 3166-1 alpha-2 country code (e.g. US, DE)']
-  country_name varchar(100) [not null, note: 'Official country name']
-  iso_alpha3 varchar(3) [not null, note: 'ISO 3166-1 alpha-3 code']
-  iso_numeric varchar(3) [not null, note: 'ISO numeric country code']
-  is_high_risk_aml boolean [not null, default: false, note: 'AML high-risk country flag']
-  created_at timestamp [not null, default: `now()`, note: 'Record creation timestamp UTC']
-
-  Note: 'Reference table for ISO 3166-1 country codes'
-}
-
-Table ref_nace_industry {
-  nace_code varchar(10) [pk, note: 'NACE Rev. 2 industry code (e.g. K64.1.9)']
-  nace_section varchar(1) [not null, note: 'NACE main section code (e.g. K)']
-  nace_title varchar(255) [not null, note: 'Industry sector title description']
-  risk_level varchar(20) [not null, default: 'MEDIUM', note: 'Industry AML credit risk level (LOW, MEDIUM, HIGH)']
-  created_at timestamp [not null, default: `now()`, note: 'Record creation timestamp UTC']
-
-  Note: 'Reference table for NACE Rev. 2 industry classifications'
-}
-
-// ----------------------------------------------------------------------------
-// PARTY DATA PRODUCT (party)
-// ----------------------------------------------------------------------------
-
-Table party {
-  md_created_at_utc timestamp [not null, default: `now()`, note: 'Record creation timestamp UTC']
-  md_updated_at_utc timestamp [not null, default: `now()`, note: 'Record modification timestamp UTC']
-  md_valid_from_utc timestamp [not null, default: `now()`, note: 'SCD Type 2 effective start timestamp UTC']
-  md_valid_to_utc timestamp [not null, default: '9999-12-31 23:59:59', note: 'SCD Type 2 effective end timestamp UTC']
-  md_is_active boolean [not null, default: true, note: 'SCD Type 2 active status flag']
-  
-  party_id uuid [pk, default: `gen_random_uuid()`, note: 'Surrogate primary key']
-  party_bk varchar(50) [not null, note: 'Natural business key for party master']
-  party_type varchar(20) [not null, note: 'Party type discriminator: INDIVIDUAL or ORGANIZATION']
-  status_code varchar(20) [not null, default: 'ACTIVE', note: 'Master party status (ACTIVE, INACTIVE, SUSPENDED)']
-
-  Note: 'Master Party entity supertype (BIAN Party Master)'
-}
-
-Table party_individual {
-  md_created_at_utc timestamp [not null, default: `now()`, note: 'Record creation timestamp UTC']
-  md_updated_at_utc timestamp [not null, default: `now()`, note: 'Record modification timestamp UTC']
-  md_valid_from_utc timestamp [not null, default: `now()`, note: 'SCD Type 2 effective start timestamp UTC']
-  md_valid_to_utc timestamp [not null, default: '9999-12-31 23:59:59', note: 'SCD Type 2 effective end timestamp UTC']
-  md_is_active boolean [not null, default: true, note: 'SCD Type 2 active status flag']
-
-  party_individual_id uuid [pk, default: `gen_random_uuid()`, note: 'Surrogate primary key']
-  party_id uuid [not null, ref: > party.party_id, note: 'Foreign key to party supertype']
-  first_name varchar(100) [not null, note: 'First name']
-  last_name varchar(100) [not null, note: 'Last name']
-  date_of_birth date [not null, note: 'Date of birth']
-  gender varchar(20) [note: 'Gender identity']
-  citizenship_country_code varchar(2) [not null, ref: > ref_country.country_code, note: 'Citizenship country code']
-  tax_residence_country_code varchar(2) [not null, ref: > ref_country.country_code, note: 'Primary tax residence country code']
-
-  Note: 'Individual natural person party subtype'
-}
-
-Table party_organization {
-  md_created_at_utc timestamp [not null, default: `now()`, note: 'Record creation timestamp UTC']
-  md_updated_at_utc timestamp [not null, default: `now()`, note: 'Record modification timestamp UTC']
-  md_valid_from_utc timestamp [not null, default: `now()`, note: 'SCD Type 2 effective start timestamp UTC']
-  md_valid_to_utc timestamp [not null, default: '9999-12-31 23:59:59', note: 'SCD Type 2 effective end timestamp UTC']
-  md_is_active boolean [not null, default: true, note: 'SCD Type 2 active status flag']
-
-  party_organization_id uuid [pk, default: `gen_random_uuid()`, note: 'Surrogate primary key']
-  party_id uuid [not null, ref: > party.party_id, note: 'Foreign key to party supertype']
-  legal_name varchar(255) [not null, note: 'Registered legal organization name']
-  trade_name varchar(255) [note: 'Commercial or DBA trade name']
-  registration_number varchar(50) [not null, note: 'Corporate registration / tax number']
-  incorporation_date date [not null, note: 'Date of legal incorporation']
-  incorporation_country_code varchar(2) [not null, ref: > ref_country.country_code, note: 'Country of incorporation']
-  nace_code varchar(10) [not null, ref: > ref_nace_industry.nace_code, note: 'Industry classification code']
-  legal_form varchar(50) [not null, note: 'Legal corporate structure (LLC, AG, Corp)']
-
-  Note: 'Organization legal entity party subtype'
-}
-
-Table party_role_customer {
-  md_created_at_utc timestamp [not null, default: `now()`, note: 'Record creation timestamp UTC']
-  md_updated_at_utc timestamp [not null, default: `now()`, note: 'Record modification timestamp UTC']
-  md_valid_from_utc timestamp [not null, default: `now()`, note: 'SCD Type 2 effective start timestamp UTC']
-  md_valid_to_utc timestamp [not null, default: '9999-12-31 23:59:59', note: 'SCD Type 2 effective end timestamp UTC']
-  md_is_active boolean [not null, default: true, note: 'SCD Type 2 active status flag']
-
-  party_role_customer_id uuid [pk, default: `gen_random_uuid()`, note: 'Surrogate primary key']
-  customer_number varchar(50) [not null, note: 'Business key: Customer Account Number']
-  party_id uuid [not null, ref: > party.party_id, note: 'Foreign key to party entity']
-  customer_segment varchar(30) [not null, note: 'Segment (RETAIL, SME, CORPORATE, WEALTH)']
-  onboarding_date date [not null, note: 'Customer onboarding date']
-  kyc_status varchar(20) [not null, default: 'PENDING', note: 'KYC status (VERIFIED, PENDING, EXPIRED)']
-  kyc_last_review_date date [note: 'Date of last KYC review']
-  aml_risk_rating varchar(20) [not null, default: 'LOW', note: 'AML risk classification (LOW, MEDIUM, HIGH)']
-
-  Note: 'Customer role context assigned to a party'
-}
-
-Table party_address {
-  md_created_at_utc timestamp [not null, default: `now()`, note: 'Record creation timestamp UTC']
-  md_updated_at_utc timestamp [not null, default: `now()`, note: 'Record modification timestamp UTC']
-  md_valid_from_utc timestamp [not null, default: `now()`, note: 'SCD Type 2 effective start timestamp UTC']
-  md_valid_to_utc timestamp [not null, default: '9999-12-31 23:59:59', note: 'SCD Type 2 effective end timestamp UTC']
-  md_is_active boolean [not null, default: true, note: 'SCD Type 2 active status flag']
-
-  party_address_id uuid [pk, default: `gen_random_uuid()`, note: 'Surrogate primary key']
-  party_id uuid [not null, ref: > party.party_id, note: 'Foreign key to party entity']
-  address_type varchar(30) [not null, note: 'Address classification (RESIDENTIAL, REGISTERED, MAILING)']
-  street_address varchar(255) [not null, note: 'Street name and line details']
-  building_number varchar(20) [note: 'Building / house number']
-  city varchar(100) [not null, note: 'City / Municipality']
-  postal_code varchar(20) [not null, note: 'Postal / ZIP code']
-  country_code varchar(2) [not null, ref: > ref_country.country_code, note: 'Country reference code']
-  is_primary boolean [not null, default: true, note: 'Primary address indicator']
-
-  Note: 'Physical and registered address records for parties'
-}
-
-Table party_identification {
-  md_created_at_utc timestamp [not null, default: `now()`, note: 'Record creation timestamp UTC']
-  md_updated_at_utc timestamp [not null, default: `now()`, note: 'Record modification timestamp UTC']
-  md_valid_from_utc timestamp [not null, default: `now()`, note: 'SCD Type 2 effective start timestamp UTC']
-  md_valid_to_utc timestamp [not null, default: '9999-12-31 23:59:59', note: 'SCD Type 2 effective end timestamp UTC']
-  md_is_active boolean [not null, default: true, note: 'SCD Type 2 active status flag']
-
-  party_identification_id uuid [pk, default: `gen_random_uuid()`, note: 'Surrogate primary key']
-  party_id uuid [not null, ref: > party.party_id, note: 'Foreign key to party entity']
-  id_type varchar(30) [not null, note: 'Identification document type (PASSPORT, NATIONAL_ID, TAX_ID, LEI)']
-  id_number varchar(100) [not null, note: 'Official identification document number']
-  issuing_country_code varchar(2) [not null, ref: > ref_country.country_code, note: 'Issuing country code']
-  issue_date date [not null, note: 'Document issuance date']
-  expiry_date date [note: 'Document expiration date']
-  verification_status varchar(20) [not null, default: 'VERIFIED', note: 'Status (VERIFIED, UNVERIFIED)']
-
-  Note: 'Official identification and tax documents for parties'
-}
-
-// ----------------------------------------------------------------------------
-// DEPOSIT DATA PRODUCT (deposit)
-// ----------------------------------------------------------------------------
-
-Table deposit_account {
-  md_created_at_utc timestamp [not null, default: `now()`, note: 'Record creation timestamp UTC']
-  md_updated_at_utc timestamp [not null, default: `now()`, note: 'Record modification timestamp UTC']
-  md_valid_from_utc timestamp [not null, default: `now()`, note: 'SCD Type 2 effective start timestamp UTC']
-  md_valid_to_utc timestamp [not null, default: '9999-12-31 23:59:59', note: 'SCD Type 2 effective end timestamp UTC']
-  md_is_active boolean [not null, default: true, note: 'SCD Type 2 active status flag']
-
-  deposit_account_id uuid [pk, default: `gen_random_uuid()`, note: 'Surrogate primary key']
-  account_number varchar(50) [not null, note: 'Business key: IBAN / Account Number']
-  customer_id uuid [not null, ref: > party_role_customer.party_role_customer_id, note: 'Customer relationship owner']
-  currency_code varchar(3) [not null, ref: > ref_currency.currency_code, note: 'Base account currency']
-  account_type varchar(30) [not null, note: 'Product type (SAVINGS, CHECKING, TERM_DEPOSIT)']
+Table financial.deposit_account {
+  md_created_at_utc timestamptz [not null, default: `now()`, note: 'Operational metadata: Record creation timestamp UTC']
+  md_updated_at_utc timestamptz [not null, default: `now()`, note: 'Operational metadata: System update timestamp UTC']
+  md_valid_from_utc timestamptz [not null, default: `now()`, note: 'SCD Type 2: Effective start timestamp UTC']
+  md_valid_to_utc timestamptz [not null, default: '9999-12-31 23:59:59+00', note: 'SCD Type 2: Effective end timestamp UTC (9999-12-31 for active records)']
+  md_is_active boolean [not null, default: true, note: 'SCD Type 2: Active version flag (TRUE=active, FALSE=historical)']
+  deposit_account_id uuid [pk, default: `gen_random_uuid()`, note: 'Surrogate primary key UUID']
+  account_number varchar(50) [not null, note: 'Business key: IBAN / Deposit account number']
+  customer_id uuid [not null, ref: > financial.party_role_customer.party_role_customer_id, note: 'Customer relationship owner ID']
+  currency_code varchar(3) [not null, ref: > ref.ref_currency.currency_code, note: 'Base account currency']
+  account_type varchar(30) [not null, note: 'Account type (SAVINGS, CHECKING, TERM_DEPOSIT)']
   account_status varchar(20) [not null, default: 'ACTIVE', note: 'Account status (ACTIVE, DORMANT, FROZEN, CLOSED)']
   opened_date date [not null, note: 'Account opening date']
   closed_date date [note: 'Account closing date']
 
-  Note: 'Deposit account core entity (BIAN Deposit Account)'
+  Indexes {
+    currency_code [name: 'idx_deposit_account_currency_code']
+    (md_is_active, customer_id) [name: 'idx_deposit_account_customer']
+    account_number [name: 'idx_deposit_account_number']
+    md_is_active [name: 'idx_deposit_account_scd_active', note: 'WHERE (md_is_active = true)']
+  }
+
+  Note: 'Deposit account core contract entity (BIAN Deposit Account) -- Constraints: CHECK ((md_valid_from_utc < md_valid_to_utc)); CHECK (((account_status)::text = ANY ((ARRAY[\'ACTIVE\'::character varying, \'DORMANT\'::character varying, \'FROZEN\'::character varying, \'CLOSED\'::character varying])::text[]))); CHECK (((account_type)::text = ANY ((ARRAY[\'SAVINGS\'::character varying, \'CHECKING\'::character varying, \'TERM_DEPOSIT\'::character varying])::text[]))); EXCLUDE USING gist (account_number WITH =, tstzrange(md_valid_from_utc, md_valid_to_utc) WITH &&)'
 }
 
-Table deposit_balance {
-  md_created_at_utc timestamp [not null, default: `now()`, note: 'Record creation timestamp UTC']
-  md_updated_at_utc timestamp [not null, default: `now()`, note: 'Record modification timestamp UTC']
-  md_valid_from_utc timestamp [not null, default: `now()`, note: 'SCD Type 2 effective start timestamp UTC']
-  md_valid_to_utc timestamp [not null, default: '9999-12-31 23:59:59', note: 'SCD Type 2 effective end timestamp UTC']
-  md_is_active boolean [not null, default: true, note: 'SCD Type 2 active status flag']
-
-  deposit_balance_id uuid [pk, default: `gen_random_uuid()`, note: 'Surrogate primary key']
-  deposit_account_id uuid [not null, ref: > deposit_account.deposit_account_id, note: 'Parent deposit account']
-  currency_code varchar(3) [not null, ref: > ref_currency.currency_code, note: 'Balance currency code']
-  current_balance numeric(18,4) [not null, default: 0.0000, note: 'Real-time book balance']
+Table financial.deposit_balance {
+  md_created_at_utc timestamptz [not null, default: `now()`, note: 'Operational metadata: Record creation timestamp UTC']
+  md_updated_at_utc timestamptz [not null, default: `now()`, note: 'Operational metadata: System update timestamp UTC']
+  md_valid_from_utc timestamptz [not null, default: `now()`, note: 'SCD Type 2: Effective start timestamp UTC']
+  md_valid_to_utc timestamptz [not null, default: '9999-12-31 23:59:59+00', note: 'SCD Type 2: Effective end timestamp UTC (9999-12-31 for active records)']
+  md_is_active boolean [not null, default: true, note: 'SCD Type 2: Active version flag (TRUE=active, FALSE=historical)']
+  deposit_balance_id uuid [pk, default: `gen_random_uuid()`, note: 'Surrogate primary key UUID']
+  deposit_account_id uuid [not null, ref: > financial.deposit_account.deposit_account_id, note: 'Parent deposit account ID']
+  currency_code varchar(3) [not null, ref: > ref.ref_currency.currency_code, note: 'Balance currency code']
+  current_balance numeric(18,4) [not null, default: 0.0000, note: 'Book balance']
   available_balance numeric(18,4) [not null, default: 0.0000, note: 'Funds available for withdrawal']
-  ledger_balance numeric(18,4) [not null, default: 0.0000, note: 'End of day settled ledger balance']
+  ledger_balance numeric(18,4) [not null, default: 0.0000, note: 'Settled ledger balance']
   accrued_interest numeric(18,4) [not null, default: 0.0000, note: 'Unposted accrued interest balance']
-  as_of_timestamp timestamp [not null, default: `now()`, note: 'Snapshot timestamp']
+  as_of_timestamp timestamptz [not null, default: `now()`, note: 'Balance snapshot timestamp UTC']
 
-  Note: 'Deposit account balance snapshot'
+  Indexes {
+    (md_is_active, deposit_account_id) [name: 'idx_deposit_balance_account']
+    currency_code [name: 'idx_deposit_balance_currency_code']
+  }
+
+  Note: 'Deposit account real-time balance snapshot -- Constraints: CHECK ((md_valid_from_utc < md_valid_to_utc))'
 }
 
-Table deposit_transaction {
-  md_created_at_utc timestamp [not null, default: `now()`, note: 'Record creation timestamp UTC']
-  md_updated_at_utc timestamp [not null, default: `now()`, note: 'Record modification timestamp UTC']
-  md_valid_from_utc timestamp [not null, default: `now()`, note: 'SCD Type 2 effective start timestamp UTC']
-  md_valid_to_utc timestamp [not null, default: '9999-12-31 23:59:59', note: 'SCD Type 2 effective end timestamp UTC']
-  md_is_active boolean [not null, default: true, note: 'SCD Type 2 active status flag']
-
-  deposit_transaction_id uuid [pk, default: `gen_random_uuid()`, note: 'Surrogate primary key']
-  transaction_reference varchar(100) [not null, note: 'Business key: Unique transaction reference']
-  deposit_account_id uuid [not null, ref: > deposit_account.deposit_account_id, note: 'Target deposit account']
-  currency_code varchar(3) [not null, ref: > ref_currency.currency_code, note: 'Transaction currency']
-  transaction_type varchar(30) [not null, note: 'Type (DEPOSIT, WITHDRAWAL, TRANSFER_IN, TRANSFER_OUT, INTEREST_CREDIT, FEE)']
-  amount numeric(18,4) [not null, note: 'Transaction amount (positive value)']
-  booking_date timestamp [not null, note: 'Accounting ledger posting timestamp']
-  value_date date [not null, note: 'Interest calculation value date']
-  counterparty_account varchar(100) [note: 'External or internal counterparty IBAN']
-  transaction_status varchar(20) [not null, default: 'BOOKED', note: 'Status (BOOKED, PENDING, REVERSED)']
-
-  Note: 'Deposit transaction journal records'
-}
-
-Table deposit_interest_term {
-  md_created_at_utc timestamp [not null, default: `now()`, note: 'Record creation timestamp UTC']
-  md_updated_at_utc timestamp [not null, default: `now()`, note: 'Record modification timestamp UTC']
-  md_valid_from_utc timestamp [not null, default: `now()`, note: 'SCD Type 2 effective start timestamp UTC']
-  md_valid_to_utc timestamp [not null, default: '9999-12-31 23:59:59', note: 'SCD Type 2 effective end timestamp UTC']
-  md_is_active boolean [not null, default: true, note: 'SCD Type 2 active status flag']
-
-  deposit_interest_term_id uuid [pk, default: `gen_random_uuid()`, note: 'Surrogate primary key']
-  deposit_account_id uuid [not null, ref: > deposit_account.deposit_account_id, note: 'Parent deposit account']
+Table financial.deposit_interest_term {
+  md_created_at_utc timestamptz [not null, default: `now()`, note: 'Operational metadata: Record creation timestamp UTC']
+  md_updated_at_utc timestamptz [not null, default: `now()`, note: 'Operational metadata: System update timestamp UTC']
+  md_valid_from_utc timestamptz [not null, default: `now()`, note: 'SCD Type 2: Effective start timestamp UTC']
+  md_valid_to_utc timestamptz [not null, default: '9999-12-31 23:59:59+00', note: 'SCD Type 2: Effective end timestamp UTC (9999-12-31 for active records)']
+  md_is_active boolean [not null, default: true, note: 'SCD Type 2: Active version flag (TRUE=active, FALSE=historical)']
+  deposit_interest_term_id uuid [pk, default: `gen_random_uuid()`, note: 'Surrogate primary key UUID']
+  deposit_account_id uuid [not null, ref: > financial.deposit_account.deposit_account_id, note: 'Parent deposit account ID']
   interest_rate numeric(8,5) [not null, note: 'Annual interest rate percentage (e.g., 0.02500 for 2.5%)']
-  rate_type varchar(20) [not null, default: 'VARIABLE', note: 'Interest rate behavior (FIXED, VARIABLE)']
-  accrual_frequency varchar(20) [not null, default: 'DAILY', note: 'Frequency (DAILY, MONTHLY, ANNUALLY)']
+  rate_type varchar(20) [not null, default: 'VARIABLE', note: 'Interest rate type (FIXED, VARIABLE)']
+  accrual_frequency varchar(20) [not null, default: 'DAILY', note: 'Accrual frequency (DAILY, MONTHLY, ANNUALLY)']
   calculation_basis varchar(20) [not null, default: 'ACT/360', note: 'Day count convention (ACT/360, ACT/365, 30/360)']
-  effective_date date [not null, note: 'Rate term effective start date']
-  expiry_date date [note: 'Rate term expiration date']
+  effective_date date [not null, note: 'Term effective start date']
+  expiry_date date [note: 'Term expiration date']
 
-  Note: 'Deposit interest terms and rate agreements'
+  Indexes {
+    (md_is_active, deposit_account_id) [name: 'idx_deposit_interest_term_account']
+  }
+
+  Note: 'Deposit account interest terms and accrual rates -- Constraints: CHECK ((md_valid_from_utc < md_valid_to_utc)); CHECK (((accrual_frequency)::text = ANY ((ARRAY[\'DAILY\'::character varying, \'MONTHLY\'::character varying, \'ANNUALLY\'::character varying])::text[]))); CHECK (((calculation_basis)::text = ANY ((ARRAY[\'ACT/360\'::character varying, \'ACT/365\'::character varying, \'30/360\'::character varying])::text[]))); CHECK (((rate_type)::text = ANY ((ARRAY[\'FIXED\'::character varying, \'VARIABLE\'::character varying])::text[])))'
 }
 
-Table deposit_overdraft_facility {
-  md_created_at_utc timestamp [not null, default: `now()`, note: 'Record creation timestamp UTC']
-  md_updated_at_utc timestamp [not null, default: `now()`, note: 'Record modification timestamp UTC']
-  md_valid_from_utc timestamp [not null, default: `now()`, note: 'SCD Type 2 effective start timestamp UTC']
-  md_valid_to_utc timestamp [not null, default: '9999-12-31 23:59:59', note: 'SCD Type 2 effective end timestamp UTC']
-  md_is_active boolean [not null, default: true, note: 'SCD Type 2 active status flag']
-
-  deposit_overdraft_facility_id uuid [pk, default: `gen_random_uuid()`, note: 'Surrogate primary key']
-  deposit_account_id uuid [not null, ref: > deposit_account.deposit_account_id, note: 'Associated deposit account']
-  approved_limit numeric(18,4) [not null, default: 0.0000, note: 'Approved credit overdraft limit']
-  interest_rate_penalty numeric(8,5) [not null, note: 'Penalty interest rate on overdrawn amounts']
+Table financial.deposit_overdraft_facility {
+  md_created_at_utc timestamptz [not null, default: `now()`, note: 'Operational metadata: Record creation timestamp UTC']
+  md_updated_at_utc timestamptz [not null, default: `now()`, note: 'Operational metadata: System update timestamp UTC']
+  md_valid_from_utc timestamptz [not null, default: `now()`, note: 'SCD Type 2: Effective start timestamp UTC']
+  md_valid_to_utc timestamptz [not null, default: '9999-12-31 23:59:59+00', note: 'SCD Type 2: Effective end timestamp UTC (9999-12-31 for active records)']
+  md_is_active boolean [not null, default: true, note: 'SCD Type 2: Active version flag (TRUE=active, FALSE=historical)']
+  deposit_overdraft_facility_id uuid [pk, default: `gen_random_uuid()`, note: 'Surrogate primary key UUID']
+  deposit_account_id uuid [not null, ref: > financial.deposit_account.deposit_account_id, note: 'Associated deposit account ID']
+  approved_limit numeric(18,4) [not null, default: 0.0000, note: 'Approved overdraft limit amount']
+  interest_rate_penalty numeric(8,5) [not null, note: 'Penalty interest rate on overdrawn balances']
   facility_status varchar(20) [not null, default: 'ACTIVE', note: 'Facility status (ACTIVE, SUSPENDED, CANCELLED)']
   granted_date date [not null, note: 'Facility approval date']
   expiry_date date [note: 'Facility expiration date']
 
-  Note: 'Approved overdraft facility bounds for deposit accounts'
+  Indexes {
+    (md_is_active, deposit_account_id) [name: 'idx_deposit_overdraft_facility_account']
+  }
+
+  Note: 'Approved overdraft facility bounds for deposit accounts -- Constraints: CHECK ((md_valid_from_utc < md_valid_to_utc)); CHECK (((facility_status)::text = ANY ((ARRAY[\'ACTIVE\'::character varying, \'SUSPENDED\'::character varying, \'CANCELLED\'::character varying])::text[])))'
 }
 
-// ----------------------------------------------------------------------------
-// LOAN DATA PRODUCT (loan)
-// ----------------------------------------------------------------------------
+Table financial.deposit_transaction {
+  md_created_at_utc timestamptz [not null, default: `now()`, note: 'Operational metadata: Record creation timestamp UTC']
+  md_updated_at_utc timestamptz [not null, default: `now()`, note: 'Operational metadata: System update timestamp UTC']
+  md_valid_from_utc timestamptz [not null, default: `now()`, note: 'SCD Type 2: Effective start timestamp UTC']
+  md_valid_to_utc timestamptz [not null, default: '9999-12-31 23:59:59+00', note: 'SCD Type 2: Effective end timestamp UTC (9999-12-31 for active records)']
+  md_is_active boolean [not null, default: true, note: 'SCD Type 2: Active version flag (TRUE=active, FALSE=historical)']
+  deposit_transaction_id uuid [pk, default: `gen_random_uuid()`, note: 'Surrogate primary key UUID']
+  transaction_reference varchar(100) [not null, note: 'Business key: Transaction reference number']
+  deposit_account_id uuid [not null, ref: > financial.deposit_account.deposit_account_id, note: 'Target deposit account ID']
+  currency_code varchar(3) [not null, ref: > ref.ref_currency.currency_code, note: 'Transaction currency code']
+  transaction_type varchar(30) [not null, note: 'Type (DEPOSIT, WITHDRAWAL, TRANSFER_IN, TRANSFER_OUT, INTEREST_CREDIT, FEE)']
+  amount numeric(18,4) [not null, note: 'Transaction amount (positive value)']
+  booking_date timestamptz [not null, note: 'Ledger posting timestamp UTC']
+  value_date date [not null, note: 'Interest value date']
+  counterparty_account varchar(100) [note: 'Counterparty IBAN / account']
+  transaction_status varchar(20) [not null, default: 'BOOKED', note: 'Status (BOOKED, PENDING, REVERSED)']
 
-Table loan_application {
-  md_created_at_utc timestamp [not null, default: `now()`, note: 'Record creation timestamp UTC']
-  md_updated_at_utc timestamp [not null, default: `now()`, note: 'Record modification timestamp UTC']
-  md_valid_from_utc timestamp [not null, default: `now()`, note: 'SCD Type 2 effective start timestamp UTC']
-  md_valid_to_utc timestamp [not null, default: '9999-12-31 23:59:59', note: 'SCD Type 2 effective end timestamp UTC']
-  md_is_active boolean [not null, default: true, note: 'SCD Type 2 active status flag']
+  Indexes {
+    (deposit_account_id, booking_date) [name: 'idx_deposit_transaction_account']
+    currency_code [name: 'idx_deposit_transaction_currency_code']
+  }
 
-  loan_application_id uuid [pk, default: `gen_random_uuid()`, note: 'Surrogate primary key']
-  application_number varchar(50) [not null, note: 'Business key: Loan application reference']
-  customer_id uuid [not null, ref: > party_role_customer.party_role_customer_id, note: 'Applicant customer']
-  currency_code varchar(3) [not null, ref: > ref_currency.currency_code, note: 'Requested currency']
-  requested_amount numeric(18,4) [not null, note: 'Requested principal loan amount']
-  application_status varchar(30) [not null, default: 'SUBMITTED', note: 'Status (SUBMITTED, UNDERWRITING, APPROVED, REJECTED)']
+  Note: 'Deposit transaction accounting journal records -- Constraints: CHECK ((md_valid_from_utc < md_valid_to_utc)); CHECK (((transaction_status)::text = ANY ((ARRAY[\'BOOKED\'::character varying, \'PENDING\'::character varying, \'REVERSED\'::character varying])::text[]))); CHECK (((transaction_type)::text = ANY ((ARRAY[\'DEPOSIT\'::character varying, \'WITHDRAWAL\'::character varying, \'TRANSFER_IN\'::character varying, \'TRANSFER_OUT\'::character varying, \'INTEREST_CREDIT\'::character varying, \'FEE\'::character varying])::text[]))); EXCLUDE USING gist (transaction_reference WITH =, tstzrange(md_valid_from_utc, md_valid_to_utc) WITH &&)'
+}
+
+Table financial.entity_embeddings {
+  embedding_id uuid [pk, default: `gen_random_uuid()`]
+  entity_type varchar(50) [not null]
+  fqn varchar(500) [unique, not null]
+  display_name varchar(255) [not null]
+  content_text text [not null]
+  metadata jsonb [not null, default: '{}']
+  embedding vector(384) [not null]
+  created_at_utc timestamptz [default: `now()`]
+
+  Indexes {
+    entity_type [name: 'idx_entity_embeddings_entity_type']
+    embedding [name: 'idx_entity_embeddings_hnsw']
+    metadata [name: 'idx_entity_embeddings_metadata_gin']
+  }
+
+  Note: 'Vector embeddings store for catalog entities, FIBO ontology classes, and semantic cubes using pgvector 0.8.0 HNSW index.'
+}
+
+Table financial.loan_agreement {
+  md_created_at_utc timestamptz [not null, default: `now()`, note: 'Operational metadata: Record creation timestamp UTC']
+  md_updated_at_utc timestamptz [not null, default: `now()`, note: 'Operational metadata: System update timestamp UTC']
+  md_valid_from_utc timestamptz [not null, default: `now()`, note: 'SCD Type 2: Effective start timestamp UTC']
+  md_valid_to_utc timestamptz [not null, default: '9999-12-31 23:59:59+00', note: 'SCD Type 2: Effective end timestamp UTC (9999-12-31 for active records)']
+  md_is_active boolean [not null, default: true, note: 'SCD Type 2: Active version flag (TRUE=active, FALSE=historical)']
+  loan_agreement_id uuid [pk, default: `gen_random_uuid()`, note: 'Surrogate primary key UUID']
+  agreement_number varchar(50) [not null, note: 'Business key: Contractual agreement number']
+  loan_application_id uuid [not null, ref: > financial.loan_application.loan_application_id, note: 'Originating loan application ID']
+  customer_id uuid [not null, ref: > financial.party_role_customer.party_role_customer_id, note: 'Borrower customer ID']
+  currency_code varchar(3) [not null, ref: > ref.ref_currency.currency_code, note: 'Loan currency code']
+  principal_amount numeric(18,4) [not null, note: 'Approved loan principal amount']
+  interest_rate numeric(8,5) [not null, note: 'Contractual annual interest rate']
+  term_months integer [not null, note: 'Loan tenor in months']
+  agreement_status varchar(20) [not null, default: 'ACTIVE', note: 'Loan status (ACTIVE, DEFAULTED, PAID_OFF)']
+  is_npl boolean [not null, default: false, note: 'Non-Performing Loan (NPL) default indicator']
+  disbursement_date date [not null, note: 'Initial disbursement date']
+  maturity_date date [not null, note: 'Contractual maturity date']
+
+  Indexes {
+    loan_application_id [name: 'idx_loan_agreement_application_id']
+    currency_code [name: 'idx_loan_agreement_currency_code']
+    (md_is_active, customer_id) [name: 'idx_loan_agreement_customer']
+    is_npl [name: 'idx_loan_agreement_npl', note: 'WHERE (is_npl = true)']
+    agreement_number [name: 'idx_loan_agreement_number']
+    md_is_active [name: 'idx_loan_agreement_scd_active', note: 'WHERE (md_is_active = true)']
+  }
+
+  Note: 'Core contractual loan agreement (FIBO Loan Agreement) -- Constraints: CHECK ((md_valid_from_utc < md_valid_to_utc)); EXCLUDE USING gist (agreement_number WITH =, tstzrange(md_valid_from_utc, md_valid_to_utc) WITH &&); CHECK (((agreement_status)::text = ANY ((ARRAY[\'ACTIVE\'::character varying, \'DEFAULTED\'::character varying, \'PAID_OFF\'::character varying])::text[])))'
+}
+
+Table financial.loan_application {
+  md_created_at_utc timestamptz [not null, default: `now()`, note: 'Operational metadata: Record creation timestamp UTC']
+  md_updated_at_utc timestamptz [not null, default: `now()`, note: 'Operational metadata: System update timestamp UTC']
+  md_valid_from_utc timestamptz [not null, default: `now()`, note: 'SCD Type 2: Effective start timestamp UTC']
+  md_valid_to_utc timestamptz [not null, default: '9999-12-31 23:59:59+00', note: 'SCD Type 2: Effective end timestamp UTC (9999-12-31 for active records)']
+  md_is_active boolean [not null, default: true, note: 'SCD Type 2: Active version flag (TRUE=active, FALSE=historical)']
+  loan_application_id uuid [pk, default: `gen_random_uuid()`, note: 'Surrogate primary key UUID']
+  application_number varchar(50) [not null, note: 'Business key: Application reference number']
+  customer_id uuid [not null, ref: > financial.party_role_customer.party_role_customer_id, note: 'Applicant customer ID']
+  currency_code varchar(3) [not null, ref: > ref.ref_currency.currency_code, note: 'Requested currency code']
+  requested_amount numeric(18,4) [not null, note: 'Requested loan principal amount']
+  application_status varchar(30) [not null, default: 'SUBMITTED', note: 'Application status (SUBMITTED, UNDERWRITING, APPROVED, REJECTED)']
   credit_score integer [note: 'Underwriting credit score snapshot']
   submission_date date [not null, note: 'Application submission date']
-  decision_date date [note: 'Final credit decision date']
+  decision_date date [note: 'Underwriting decision date']
 
-  Note: 'Loan origination application lifecycle'
+  Indexes {
+    (md_is_active, customer_id) [name: 'idx_loan_app_customer']
+    application_number [name: 'idx_loan_app_number']
+    currency_code [name: 'idx_loan_application_currency_code']
+  }
+
+  Note: 'Loan origination and credit application lifecycle -- Constraints: CHECK ((md_valid_from_utc < md_valid_to_utc)); EXCLUDE USING gist (application_number WITH =, tstzrange(md_valid_from_utc, md_valid_to_utc) WITH &&); CHECK (((application_status)::text = ANY ((ARRAY[\'SUBMITTED\'::character varying, \'UNDERWRITING\'::character varying, \'APPROVED\'::character varying, \'REJECTED\'::character varying])::text[])))'
 }
 
-Table loan_agreement {
-  md_created_at_utc timestamp [not null, default: `now()`, note: 'Record creation timestamp UTC']
-  md_updated_at_utc timestamp [not null, default: `now()`, note: 'Record modification timestamp UTC']
-  md_valid_from_utc timestamp [not null, default: `now()`, note: 'SCD Type 2 effective start timestamp UTC']
-  md_valid_to_utc timestamp [not null, default: '9999-12-31 23:59:59', note: 'SCD Type 2 effective end timestamp UTC']
-  md_is_active boolean [not null, default: true, note: 'SCD Type 2 active status flag']
-
-  loan_agreement_id uuid [pk, default: `gen_random_uuid()`, note: 'Surrogate primary key']
-  agreement_number varchar(50) [not null, note: 'Business key: Loan contract agreement number']
-  loan_application_id uuid [not null, ref: > loan_application.loan_application_id, note: 'Originating loan application']
-  customer_id uuid [not null, ref: > party_role_customer.party_role_customer_id, note: 'Borrower customer']
-  currency_code varchar(3) [not null, ref: > ref_currency.currency_code, note: 'Loan currency code']
-  principal_amount numeric(18,4) [not null, note: 'Approved principal amount']
-  interest_rate numeric(8,5) [not null, note: 'Annual contractual interest rate']
-  term_months integer [not null, note: 'Loan tenor in months']
-  agreement_status varchar(20) [not null, default: 'ACTIVE', note: 'Status (ACTIVE, DEFAULTED, PAID_OFF)']
-  is_npl boolean [not null, default: false, note: 'Non-Performing Loan (NPL) default indicator']
-  disbursement_date date [not null, note: 'Initial loan disbursement date']
-  maturity_date date [not null, note: 'Scheduled loan maturity date']
-
-  Note: 'Core contractual loan agreement (FIBO Loan Agreement)'
-}
-
-Table loan_repayment_schedule {
-  md_created_at_utc timestamp [not null, default: `now()`, note: 'Record creation timestamp UTC']
-  md_updated_at_utc timestamp [not null, default: `now()`, note: 'Record modification timestamp UTC']
-  md_valid_from_utc timestamp [not null, default: `now()`, note: 'SCD Type 2 effective start timestamp UTC']
-  md_valid_to_utc timestamp [not null, default: '9999-12-31 23:59:59', note: 'SCD Type 2 effective end timestamp UTC']
-  md_is_active boolean [not null, default: true, note: 'SCD Type 2 active status flag']
-
-  loan_repayment_schedule_id uuid [pk, default: `gen_random_uuid()`, note: 'Surrogate primary key']
-  loan_agreement_id uuid [not null, ref: > loan_agreement.loan_agreement_id, note: 'Parent loan agreement']
-  installment_number integer [not null, note: 'Sequential installment schedule number']
-  due_date date [not null, note: 'Payment due date']
-  principal_due numeric(18,4) [not null, note: 'Scheduled principal payment component']
-  interest_due numeric(18,4) [not null, note: 'Scheduled interest payment component']
-  total_due numeric(18,4) [not null, note: 'Total installment payment due']
-  installment_status varchar(20) [not null, default: 'PENDING', note: 'Status (PENDING, PAID, OVERDUE, PARTIALLY_PAID)']
-  paid_amount numeric(18,4) [not null, default: 0.0000, note: 'Cumulative amount paid towards installment']
-  paid_date date [note: 'Actual date payment was settled']
-
-  Note: 'Amortization repayment schedule installments'
-}
-
-Table loan_disbursement {
-  md_created_at_utc timestamp [not null, default: `now()`, note: 'Record creation timestamp UTC']
-  md_updated_at_utc timestamp [not null, default: `now()`, note: 'Record modification timestamp UTC']
-  md_valid_from_utc timestamp [not null, default: `now()`, note: 'SCD Type 2 effective start timestamp UTC']
-  md_valid_to_utc timestamp [not null, default: '9999-12-31 23:59:59', note: 'SCD Type 2 effective end timestamp UTC']
-  md_is_active boolean [not null, default: true, note: 'SCD Type 2 active status flag']
-
-  loan_disbursement_id uuid [pk, default: `gen_random_uuid()`, note: 'Surrogate primary key']
-  disbursement_reference varchar(100) [not null, note: 'Business key: Unique disbursement reference']
-  loan_agreement_id uuid [not null, ref: > loan_agreement.loan_agreement_id, note: 'Associated loan agreement']
-  currency_code varchar(3) [not null, ref: > ref_currency.currency_code, note: 'Disbursement currency']
-  disbursed_amount numeric(18,4) [not null, note: 'Disbursed principal amount']
-  disbursement_date timestamp [not null, note: 'Execution release timestamp UTC']
-  target_account_number varchar(100) [not null, note: 'Beneficiary destination account IBAN']
-  disbursement_status varchar(20) [not null, default: 'COMPLETED', note: 'Status (COMPLETED, PENDING, FAILED)']
-
-  Note: 'Loan principal disbursement events'
-}
-
-Table loan_collateral {
-  md_created_at_utc timestamp [not null, default: `now()`, note: 'Record creation timestamp UTC']
-  md_updated_at_utc timestamp [not null, default: `now()`, note: 'Record modification timestamp UTC']
-  md_valid_from_utc timestamp [not null, default: `now()`, note: 'SCD Type 2 effective start timestamp UTC']
-  md_valid_to_utc timestamp [not null, default: '9999-12-31 23:59:59', note: 'SCD Type 2 effective end timestamp UTC']
-  md_is_active boolean [not null, default: true, note: 'SCD Type 2 active status flag']
-
-  loan_collateral_id uuid [pk, default: `gen_random_uuid()`, note: 'Surrogate primary key']
-  loan_agreement_id uuid [not null, ref: > loan_agreement.loan_agreement_id, note: 'Secured loan agreement']
-  collateral_type varchar(30) [not null, note: 'Type (REAL_ESTATE, VEHICLE, SECURITIES, CASH_DEPOSIT)']
-  currency_code varchar(3) [not null, ref: > ref_currency.currency_code, note: 'Valuation currency']
-  estimated_value numeric(18,4) [not null, note: 'Appraised collateral market value']
+Table financial.loan_collateral {
+  md_created_at_utc timestamptz [not null, default: `now()`, note: 'Operational metadata: Record creation timestamp UTC']
+  md_updated_at_utc timestamptz [not null, default: `now()`, note: 'Operational metadata: System update timestamp UTC']
+  md_valid_from_utc timestamptz [not null, default: `now()`, note: 'SCD Type 2: Effective start timestamp UTC']
+  md_valid_to_utc timestamptz [not null, default: '9999-12-31 23:59:59+00', note: 'SCD Type 2: Effective end timestamp UTC (9999-12-31 for active records)']
+  md_is_active boolean [not null, default: true, note: 'SCD Type 2: Active version flag (TRUE=active, FALSE=historical)']
+  loan_collateral_id uuid [pk, default: `gen_random_uuid()`, note: 'Surrogate primary key UUID']
+  loan_agreement_id uuid [not null, ref: > financial.loan_agreement.loan_agreement_id, note: 'Secured loan agreement ID']
+  collateral_type varchar(30) [not null, note: 'Collateral type (REAL_ESTATE, VEHICLE, SECURITIES, CASH_DEPOSIT)']
+  currency_code varchar(3) [not null, ref: > ref.ref_currency.currency_code, note: 'Valuation currency code']
+  estimated_value numeric(18,4) [not null, note: 'Appraised market value']
   ltv_ratio numeric(8,5) [not null, note: 'Loan-to-Value ratio (e.g., 0.75000 for 75%)']
-  valuation_date date [not null, note: 'Date of last appraisal valuation']
+  valuation_date date [not null, note: 'Appraisal valuation date']
   collateral_status varchar(20) [not null, default: 'PLEDGED', note: 'Status (PLEDGED, RELEASED, LIQUIDATED)']
 
-  Note: 'Pledged assets securing loan contracts'
+  Indexes {
+    loan_agreement_id [name: 'idx_loan_collateral_agreement']
+    currency_code [name: 'idx_loan_collateral_currency_code']
+  }
+
+  Note: 'Pledged security assets securing loan contracts -- Constraints: CHECK ((md_valid_from_utc < md_valid_to_utc)); CHECK (((collateral_status)::text = ANY ((ARRAY[\'PLEDGED\'::character varying, \'RELEASED\'::character varying, \'LIQUIDATED\'::character varying])::text[]))); CHECK (((collateral_type)::text = ANY ((ARRAY[\'REAL_ESTATE\'::character varying, \'VEHICLE\'::character varying, \'SECURITIES\'::character varying, \'CASH_DEPOSIT\'::character varying])::text[])))'
+}
+
+Table financial.loan_disbursement {
+  md_created_at_utc timestamptz [not null, default: `now()`, note: 'Operational metadata: Record creation timestamp UTC']
+  md_updated_at_utc timestamptz [not null, default: `now()`, note: 'Operational metadata: System update timestamp UTC']
+  md_valid_from_utc timestamptz [not null, default: `now()`, note: 'SCD Type 2: Effective start timestamp UTC']
+  md_valid_to_utc timestamptz [not null, default: '9999-12-31 23:59:59+00', note: 'SCD Type 2: Effective end timestamp UTC (9999-12-31 for active records)']
+  md_is_active boolean [not null, default: true, note: 'SCD Type 2: Active version flag (TRUE=active, FALSE=historical)']
+  loan_disbursement_id uuid [pk, default: `gen_random_uuid()`, note: 'Surrogate primary key UUID']
+  disbursement_reference varchar(100) [not null, note: 'Business key: Disbursement reference number']
+  loan_agreement_id uuid [not null, ref: > financial.loan_agreement.loan_agreement_id, note: 'Associated loan agreement ID']
+  currency_code varchar(3) [not null, ref: > ref.ref_currency.currency_code, note: 'Disbursement currency code']
+  disbursed_amount numeric(18,4) [not null, note: 'Disbursed principal amount']
+  disbursement_date timestamptz [not null, note: 'Execution timestamp UTC']
+  target_account_number varchar(100) [not null, note: 'Beneficiary destination IBAN']
+  disbursement_status varchar(20) [not null, default: 'COMPLETED', note: 'Status (COMPLETED, PENDING, FAILED)']
+
+  Indexes {
+    loan_agreement_id [name: 'idx_loan_disbursement_agreement']
+    currency_code [name: 'idx_loan_disbursement_currency_code']
+  }
+
+  Note: 'Loan principal disbursement execution events -- Constraints: CHECK ((md_valid_from_utc < md_valid_to_utc)); EXCLUDE USING gist (disbursement_reference WITH =, tstzrange(md_valid_from_utc, md_valid_to_utc) WITH &&); CHECK (((disbursement_status)::text = ANY ((ARRAY[\'COMPLETED\'::character varying, \'PENDING\'::character varying, \'FAILED\'::character varying])::text[])))'
+}
+
+Table financial.loan_repayment_schedule {
+  md_created_at_utc timestamptz [not null, default: `now()`, note: 'Operational metadata: Record creation timestamp UTC']
+  md_updated_at_utc timestamptz [not null, default: `now()`, note: 'Operational metadata: System update timestamp UTC']
+  md_valid_from_utc timestamptz [not null, default: `now()`, note: 'SCD Type 2: Effective start timestamp UTC']
+  md_valid_to_utc timestamptz [not null, default: '9999-12-31 23:59:59+00', note: 'SCD Type 2: Effective end timestamp UTC (9999-12-31 for active records)']
+  md_is_active boolean [not null, default: true, note: 'SCD Type 2: Active version flag (TRUE=active, FALSE=historical)']
+  loan_repayment_schedule_id uuid [pk, default: `gen_random_uuid()`, note: 'Surrogate primary key UUID']
+  loan_agreement_id uuid [not null, ref: > financial.loan_agreement.loan_agreement_id, note: 'Parent loan agreement ID']
+  installment_number integer [not null, note: 'Sequential installment number']
+  due_date date [not null, note: 'Payment due date']
+  principal_due numeric(18,4) [not null, note: 'Scheduled principal component']
+  interest_due numeric(18,4) [not null, note: 'Scheduled interest component']
+  total_due numeric(18,4) [not null, note: 'Total installment due']
+  installment_status varchar(20) [not null, default: 'PENDING', note: 'Status (PENDING, PAID, OVERDUE, PARTIALLY_PAID)']
+  paid_amount numeric(18,4) [not null, default: 0.0000, note: 'Cumulative amount paid']
+  paid_date date [note: 'Actual payment date']
+
+  Indexes {
+    (loan_agreement_id, installment_number) [name: 'idx_loan_repayment_schedule_agreement']
+  }
+
+  Note: 'Amortization repayment schedule installments -- Constraints: CHECK ((md_valid_from_utc < md_valid_to_utc)); CHECK (((installment_status)::text = ANY ((ARRAY[\'PENDING\'::character varying, \'PAID\'::character varying, \'OVERDUE\'::character varying, \'PARTIALLY_PAID\'::character varying])::text[])))'
+}
+
+Table financial.party {
+  md_created_at_utc timestamptz [not null, default: `now()`, note: 'Operational metadata: Record creation timestamp UTC']
+  md_updated_at_utc timestamptz [not null, default: `now()`, note: 'Operational metadata: System update timestamp UTC']
+  md_valid_from_utc timestamptz [not null, default: `now()`, note: 'SCD Type 2: Effective start timestamp UTC']
+  md_valid_to_utc timestamptz [not null, default: '9999-12-31 23:59:59+00', note: 'SCD Type 2: Effective end timestamp UTC (9999-12-31 for active records)']
+  md_is_active boolean [not null, default: true, note: 'SCD Type 2: Active version flag (TRUE=active, FALSE=historical)']
+  party_id uuid [pk, default: `gen_random_uuid()`, note: 'Surrogate primary key UUID']
+  party_bk varchar(50) [not null, note: 'Business key: Enterprise party master reference']
+  party_type varchar(20) [not null, note: 'Party type discriminator: INDIVIDUAL or ORGANIZATION']
+  status_code varchar(20) [not null, default: 'ACTIVE', note: 'Party status (ACTIVE, INACTIVE, SUSPENDED)']
+
+  Indexes {
+    party_bk [name: 'idx_party_bk']
+    md_is_active [name: 'idx_party_scd_active', note: 'WHERE (md_is_active = true)']
+    (md_valid_from_utc, md_valid_to_utc) [name: 'idx_party_scd_temporal']
+  }
+
+  Note: 'Master Party entity supertype (BIAN Party Domain) -- Constraints: CHECK ((md_valid_from_utc < md_valid_to_utc)); EXCLUDE USING gist (party_bk WITH =, tstzrange(md_valid_from_utc, md_valid_to_utc) WITH &&); CHECK (((party_type)::text = ANY ((ARRAY[\'INDIVIDUAL\'::character varying, \'ORGANIZATION\'::character varying])::text[]))); CHECK (((status_code)::text = ANY ((ARRAY[\'ACTIVE\'::character varying, \'INACTIVE\'::character varying, \'SUSPENDED\'::character varying])::text[])))'
+}
+
+Table financial.party_address {
+  md_created_at_utc timestamptz [not null, default: `now()`, note: 'Operational metadata: Record creation timestamp UTC']
+  md_updated_at_utc timestamptz [not null, default: `now()`, note: 'Operational metadata: System update timestamp UTC']
+  md_valid_from_utc timestamptz [not null, default: `now()`, note: 'SCD Type 2: Effective start timestamp UTC']
+  md_valid_to_utc timestamptz [not null, default: '9999-12-31 23:59:59+00', note: 'SCD Type 2: Effective end timestamp UTC (9999-12-31 for active records)']
+  md_is_active boolean [not null, default: true, note: 'SCD Type 2: Active version flag (TRUE=active, FALSE=historical)']
+  party_address_id uuid [pk, default: `gen_random_uuid()`, note: 'Surrogate primary key UUID']
+  party_id uuid [not null, ref: > financial.party.party_id, note: 'Foreign key to master party entity']
+  address_type varchar(30) [not null, note: 'Address classification (RESIDENTIAL, REGISTERED, MAILING)']
+  street_address varchar(255) [not null, note: 'Street name and address details']
+  building_number varchar(20) [note: 'House / building number']
+  city varchar(100) [not null, note: 'City name']
+  postal_code varchar(20) [not null, note: 'Postal / ZIP code']
+  country_code varchar(2) [not null, ref: > ref.ref_country.country_code, note: 'Country reference code']
+  is_primary boolean [not null, default: true, note: 'Primary address indicator']
+
+  Indexes {
+    (md_is_active, party_id) [name: 'idx_address_party_id']
+    country_code [name: 'idx_party_address_country_code']
+  }
+
+  Note: 'Physical and registered address details for parties -- Constraints: CHECK ((md_valid_from_utc < md_valid_to_utc)); CHECK (((address_type)::text = ANY ((ARRAY[\'RESIDENTIAL\'::character varying, \'REGISTERED\'::character varying, \'MAILING\'::character varying])::text[])))'
+}
+
+Table financial.party_identification {
+  md_created_at_utc timestamptz [not null, default: `now()`, note: 'Operational metadata: Record creation timestamp UTC']
+  md_updated_at_utc timestamptz [not null, default: `now()`, note: 'Operational metadata: System update timestamp UTC']
+  md_valid_from_utc timestamptz [not null, default: `now()`, note: 'SCD Type 2: Effective start timestamp UTC']
+  md_valid_to_utc timestamptz [not null, default: '9999-12-31 23:59:59+00', note: 'SCD Type 2: Effective end timestamp UTC (9999-12-31 for active records)']
+  md_is_active boolean [not null, default: true, note: 'SCD Type 2: Active version flag (TRUE=active, FALSE=historical)']
+  party_identification_id uuid [pk, default: `gen_random_uuid()`, note: 'Surrogate primary key UUID']
+  party_id uuid [not null, ref: > financial.party.party_id, note: 'Foreign key to master party entity']
+  id_type varchar(30) [not null, note: 'Identification document type (PASSPORT, NATIONAL_ID, TAX_ID, LEI)']
+  id_number varchar(100) [not null, note: 'Official document identification number']
+  issuing_country_code varchar(2) [not null, ref: > ref.ref_country.country_code, note: 'Issuing country code']
+  issue_date date [not null, note: 'Document issue date']
+  expiry_date date [note: 'Document expiration date']
+  verification_status varchar(20) [not null, default: 'VERIFIED', note: 'Verification status (VERIFIED, UNVERIFIED)']
+
+  Indexes {
+    (md_is_active, party_id) [name: 'idx_identification_party_id']
+    issuing_country_code [name: 'idx_party_identification_issuing_country']
+  }
+
+  Note: 'Official identification and tax documents for parties -- Constraints: CHECK ((md_valid_from_utc < md_valid_to_utc)); CHECK (((id_type)::text = ANY ((ARRAY[\'PASSPORT\'::character varying, \'NATIONAL_ID\'::character varying, \'TAX_ID\'::character varying, \'LEI\'::character varying])::text[]))); CHECK (((verification_status)::text = ANY ((ARRAY[\'VERIFIED\'::character varying, \'UNVERIFIED\'::character varying])::text[])))'
+}
+
+Table financial.party_individual {
+  md_created_at_utc timestamptz [not null, default: `now()`, note: 'Operational metadata: Record creation timestamp UTC']
+  md_updated_at_utc timestamptz [not null, default: `now()`, note: 'Operational metadata: System update timestamp UTC']
+  md_valid_from_utc timestamptz [not null, default: `now()`, note: 'SCD Type 2: Effective start timestamp UTC']
+  md_valid_to_utc timestamptz [not null, default: '9999-12-31 23:59:59+00', note: 'SCD Type 2: Effective end timestamp UTC (9999-12-31 for active records)']
+  md_is_active boolean [not null, default: true, note: 'SCD Type 2: Active version flag (TRUE=active, FALSE=historical)']
+  party_individual_id uuid [pk, default: `gen_random_uuid()`, note: 'Surrogate primary key UUID']
+  party_id uuid [not null, ref: > financial.party.party_id, note: 'Foreign key to master party entity']
+  first_name varchar(100) [not null, note: 'First name of individual']
+  last_name varchar(100) [not null, note: 'Last name of individual']
+  date_of_birth date [not null, note: 'Date of birth']
+  gender varchar(20) [note: 'Gender identity']
+  citizenship_country_code varchar(2) [not null, ref: > ref.ref_country.country_code, note: 'Primary citizenship country code']
+  tax_residence_country_code varchar(2) [not null, ref: > ref.ref_country.country_code, note: 'Primary tax residence country code']
+
+  Indexes {
+    citizenship_country_code [name: 'idx_party_individual_citizenship_country']
+    (md_is_active, party_id) [name: 'idx_party_individual_party_id']
+    tax_residence_country_code [name: 'idx_party_individual_tax_residence_country']
+  }
+
+  Note: 'Individual natural person party subtype -- Constraints: CHECK ((md_valid_from_utc < md_valid_to_utc))'
+}
+
+Table financial.party_organization {
+  md_created_at_utc timestamptz [not null, default: `now()`, note: 'Operational metadata: Record creation timestamp UTC']
+  md_updated_at_utc timestamptz [not null, default: `now()`, note: 'Operational metadata: System update timestamp UTC']
+  md_valid_from_utc timestamptz [not null, default: `now()`, note: 'SCD Type 2: Effective start timestamp UTC']
+  md_valid_to_utc timestamptz [not null, default: '9999-12-31 23:59:59+00', note: 'SCD Type 2: Effective end timestamp UTC (9999-12-31 for active records)']
+  md_is_active boolean [not null, default: true, note: 'SCD Type 2: Active version flag (TRUE=active, FALSE=historical)']
+  party_organization_id uuid [pk, default: `gen_random_uuid()`, note: 'Surrogate primary key UUID']
+  party_id uuid [not null, ref: > financial.party.party_id, note: 'Foreign key to master party entity']
+  legal_name varchar(255) [not null, note: 'Registered corporate legal name']
+  trade_name varchar(255) [note: 'Commercial DBA trade name']
+  registration_number varchar(50) [not null, note: 'Corporate commercial register tax ID']
+  incorporation_date date [not null, note: 'Date of corporate incorporation']
+  incorporation_country_code varchar(2) [not null, ref: > ref.ref_country.country_code, note: 'Country of incorporation']
+  nace_code varchar(10) [not null, ref: > ref.ref_nace_industry.nace_code, note: 'NACE Rev. 2 industry code']
+  legal_form varchar(50) [not null, note: 'Legal corporate form (LLC, AG, Corp)']
+
+  Indexes {
+    incorporation_country_code [name: 'idx_party_organization_incorporation_country']
+    nace_code [name: 'idx_party_organization_nace_code']
+    (md_is_active, party_id) [name: 'idx_party_organization_party_id']
+  }
+
+  Note: 'Organization legal entity party subtype -- Constraints: CHECK ((md_valid_from_utc < md_valid_to_utc))'
+}
+
+Table financial.party_role_customer {
+  md_created_at_utc timestamptz [not null, default: `now()`, note: 'Operational metadata: Record creation timestamp UTC']
+  md_updated_at_utc timestamptz [not null, default: `now()`, note: 'Operational metadata: System update timestamp UTC']
+  md_valid_from_utc timestamptz [not null, default: `now()`, note: 'SCD Type 2: Effective start timestamp UTC']
+  md_valid_to_utc timestamptz [not null, default: '9999-12-31 23:59:59+00', note: 'SCD Type 2: Effective end timestamp UTC (9999-12-31 for active records)']
+  md_is_active boolean [not null, default: true, note: 'SCD Type 2: Active version flag (TRUE=active, FALSE=historical)']
+  party_role_customer_id uuid [pk, default: `gen_random_uuid()`, note: 'Surrogate primary key UUID']
+  customer_number varchar(50) [not null, note: 'Business key: Customer account reference number']
+  party_id uuid [not null, ref: > financial.party.party_id, note: 'Foreign key to master party entity']
+  customer_segment varchar(30) [not null, note: 'Customer segment (RETAIL, SME, CORPORATE, WEALTH)']
+  onboarding_date date [not null, note: 'Date customer was onboarded']
+  kyc_status varchar(20) [not null, default: 'PENDING', note: 'KYC verification status (VERIFIED, PENDING, EXPIRED)']
+  kyc_last_review_date date [note: 'Date of last KYC review']
+  aml_risk_rating varchar(20) [not null, default: 'LOW', note: 'AML risk rating (LOW, MEDIUM, HIGH)']
+
+  Indexes {
+    customer_number [name: 'idx_customer_number']
+    (md_is_active, party_id) [name: 'idx_customer_party_id']
+    md_is_active [name: 'idx_customer_scd_active', note: 'WHERE (md_is_active = true)']
+  }
+
+  Note: 'Customer role context assigned to a party -- Constraints: CHECK ((md_valid_from_utc < md_valid_to_utc)); EXCLUDE USING gist (customer_number WITH =, tstzrange(md_valid_from_utc, md_valid_to_utc) WITH &&); CHECK (((aml_risk_rating)::text = ANY ((ARRAY[\'LOW\'::character varying, \'MEDIUM\'::character varying, \'HIGH\'::character varying])::text[]))); CHECK (((customer_segment)::text = ANY ((ARRAY[\'RETAIL\'::character varying, \'SME\'::character varying, \'CORPORATE\'::character varying, \'WEALTH\'::character varying])::text[]))); CHECK (((kyc_status)::text = ANY ((ARRAY[\'VERIFIED\'::character varying, \'PENDING\'::character varying, \'EXPIRED\'::character varying])::text[])))'
+}
+
+// ----------------------------------------------------------------------------
+// REF SCHEMA
+// ----------------------------------------------------------------------------
+
+Table ref.ref_country {
+  country_code varchar(2) [pk, note: 'ISO 3166-1 alpha-2 country code (e.g., US, DE)']
+  country_name varchar(100) [not null, note: 'Official country name']
+  iso_alpha3 varchar(3) [not null, note: 'ISO 3166-1 alpha-3 country code']
+  iso_numeric varchar(3) [not null, note: 'ISO numeric country code']
+  is_high_risk_aml boolean [not null, default: false, note: 'AML high-risk country indicator']
+  created_at timestamptz [not null, default: `now()`, note: 'Record creation timestamp UTC']
+
+  Note: 'ISO 3166-1 country reference table'
+}
+
+Table ref.ref_currency {
+  currency_code varchar(3) [pk, note: 'ISO 4217 3-letter currency code (e.g., USD, EUR)']
+  currency_name varchar(100) [not null, note: 'Official currency name']
+  symbol varchar(10) [note: 'Currency symbol representation']
+  decimal_places integer [not null, default: 2, note: 'Standard decimal precision']
+  is_active boolean [not null, default: true, note: 'Active currency status indicator']
+  created_at timestamptz [not null, default: `now()`, note: 'Record creation timestamp UTC']
+
+  Note: 'ISO 4217 currency reference table'
+}
+
+Table ref.ref_nace_industry {
+  nace_code varchar(10) [pk, note: 'NACE Rev. 2 industry sector code']
+  nace_section varchar(1) [not null, note: 'Main section classification letter']
+  nace_title varchar(255) [not null, note: 'Industry sector description title']
+  risk_level varchar(20) [not null, default: 'MEDIUM', note: 'Industry risk rating (LOW, MEDIUM, HIGH)']
+  created_at timestamptz [not null, default: `now()`, note: 'Record creation timestamp UTC']
+
+  Note: 'NACE Rev. 2 industry classification reference table'
 }

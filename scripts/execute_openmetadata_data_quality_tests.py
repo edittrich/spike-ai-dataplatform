@@ -14,9 +14,6 @@ Automates real-time Data Quality assertions over PostgreSQL financial data produ
 ===============================================================================
 """
 
-import json
-import urllib.request
-import urllib.error
 import subprocess
 import time
 import sys
@@ -26,18 +23,13 @@ import os
 # of the working directory this script is launched from.
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from scripts._dotenv_boot import load_env  # noqa: E402
+from scripts._sql_identifier import is_known_column, load_known_columns  # noqa: E402
 
 load_env()
 
-OPENMETADATA_URL = "http://127.0.0.1:8585/api/v1"
-JWT_TOKEN = os.getenv("OPENMETADATA_JWT_TOKEN", "")
-if not JWT_TOKEN:
-    print("⚠️ OPENMETADATA_JWT_TOKEN is not set; OpenMetadata API calls will be unauthenticated.")
-
-headers = {
-    "Content-Type": "application/json",
-    "Authorization": f"Bearer {JWT_TOKEN}"
-}
+# _openmetadata_client reads OPENMETADATA_URL/JWT_TOKEN at import time, so it
+# must be imported after load_env() -- see its module docstring.
+from scripts._openmetadata_client import api_put, api_post  # noqa: E402
 
 # Test Suite Definitions for Financial Core Tables
 TEST_CONFIGS = [
@@ -110,45 +102,6 @@ TEST_CONFIGS = [
     }
 ]
 
-def api_get(endpoint):
-    url = f"{OPENMETADATA_URL}/{endpoint}"
-    req = urllib.request.Request(url, headers=headers, method="GET")
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        return None
-
-def api_post(endpoint, payload=None):
-    url = f"{OPENMETADATA_URL}/{endpoint}"
-    data = json.dumps(payload).encode("utf-8") if payload else None
-    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            raw = resp.read().decode("utf-8")
-            try:
-                return json.loads(raw)
-            except json.JSONDecodeError:
-                return raw
-    except urllib.error.HTTPError as e:
-        return None
-
-def api_put(endpoint, payload):
-    url = f"{OPENMETADATA_URL}/{endpoint}"
-    req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="PUT")
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            raw = resp.read().decode("utf-8")
-            if not raw:
-                return {"status": "success"}
-            try:
-                return json.loads(raw)
-            except json.JSONDecodeError:
-                return {"status": "success", "raw": raw}
-    except urllib.error.HTTPError as e:
-        print(f"❌ Error PUT {endpoint}: {e.code} - {e.read().decode('utf-8')}")
-        return None
-
 def query_pg(sql):
     cmd = [
         "docker", "exec", "supabase_db_ai-dataplatform", "psql",
@@ -171,10 +124,29 @@ def run_data_quality_tests():
     passed_tests = 0
     failed_tests = 0
 
+    # schema/table/column names below come from TEST_CONFIGS, a hardcoded
+    # list in this file rather than an external API -- lower risk than the
+    # OpenMetadata-sourced identifiers in automate_openmetadata_pii_and_profiling.py,
+    # but psycopg2/docker-exec-psql still can't bind identifiers as query
+    # parameters, so the same information_schema allowlist check is applied
+    # here too (defense-in-depth, matching the C6 finding's "same shape" note).
+    known_columns = load_known_columns(query_pg)
+
     for cfg in TEST_CONFIGS:
         schema = cfg["schema"]
         tbl_name = cfg["table"]
         tbl_fqn = f"PostgreSQL_Financial_Platform.postgres.{schema}.{tbl_name}"
+
+        if (schema, tbl_name) not in known_columns:
+            print(f"  ⚠️ Skipping unknown table `{schema}.{tbl_name}` (not in information_schema).")
+            continue
+        unknown_cols = [
+            c for c in set(cfg["unique_cols"]) | set(cfg["not_null_cols"])
+            if not is_known_column(known_columns, schema, tbl_name, c)
+        ]
+        if unknown_cols:
+            print(f"  ⚠️ Skipping `{schema}.{tbl_name}`: unknown column(s) {unknown_cols} (not in information_schema).")
+            continue
 
         # 1. Ensure Executable TestSuite exists
         suite_name = f"{tbl_fqn}.testSuite"

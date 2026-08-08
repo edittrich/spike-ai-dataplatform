@@ -56,7 +56,11 @@ step "6/9  Configuring the least-privilege mcp_readonly Postgres role"
 python3 scripts/configure_readonly_role.py
 
 step "7/9  Building the Neo4j knowledge graph from PostgreSQL"
-python3 scripts/build_knowledge_graph.py
+# --yes: this script now confirms before its unconditional `MATCH (n) DETACH
+# DELETE n` graph wipe (C6 in the hardening plan) -- safe and expected to
+# skip non-interactively here, since bootstrap_platform.sh is meant to run
+# unattended from an empty checkout, where there's no existing graph to lose.
+python3 scripts/build_knowledge_graph.py --yes
 
 step "8/9  Registering table metadata into OpenMetadata (required by the next 4 steps)"
 python3 scripts/populate_openmetadata_tables.py

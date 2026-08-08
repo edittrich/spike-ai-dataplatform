@@ -31,6 +31,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger("HybridRAGRetriever")
 
 from scripts._dotenv_boot import load_env
+from scripts._json_safe import json_safe_row
 from scripts.ai_safety_guardrails import AISafetyGuardrails
 
 # Loads .env when this module runs on the host (both directly, per CLAUDE.md's
@@ -81,56 +82,84 @@ class HybridRAGRetriever:
         self.telemetry = LLMOpsTelemetry()
         self.reranker = NeuralReranker()
         self.cypher_builder = TextToCypherBuilder()
+        # Connections are created lazily on first use and reused for the
+        # life of this instance, instead of opening a fresh psycopg2
+        # connection / constructing an entirely new neo4j.GraphDatabase.driver
+        # (which does its own internal connection pooling + routing-table
+        # discovery) on every single query_pg/query_neo4j call -- exactly the
+        # "connection churn per call" Q6 flagged. The neo4j driver in
+        # particular is documented upstream as meant to be built once and
+        # reused for an application's lifetime, not per query -- see
+        # get_neo4j_driver() below and mcp_server's module-level singleton.
+        self._pg_conn = None
+        self._neo4j_driver = None
 
-    def query_pg(self, sql):
+    def _get_pg_conn(self):
+        if self._pg_conn is None or self._pg_conn.closed:
+            self._pg_conn = psycopg2.connect(
+                host=POSTGRES_HOST, port=POSTGRES_PORT, user=POSTGRES_USER,
+                password=POSTGRES_PASSWORD, dbname=POSTGRES_DB, connect_timeout=10,
+                options="-c statement_timeout=10000 -c idle_in_transaction_session_timeout=30000",
+            )
+            # Defense in depth: even if a mutation slipped past the keyword
+            # check in query_pg, the database itself now refuses to execute
+            # it. autocommit=True so each cursor.execute() commits its own
+            # implicit transaction immediately -- necessary now that the
+            # connection is reused across calls, so one query never leaves
+            # an idle transaction open for the next.
+            self._pg_conn.set_session(readonly=True, autocommit=True)
+        return self._pg_conn
+
+    def _get_neo4j_driver(self):
+        if self._neo4j_driver is None:
+            self._neo4j_driver = GraphDatabase.driver(
+                NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD), connection_timeout=10
+            )
+        return self._neo4j_driver
+
+    def close(self):
+        """Releases this instance's pooled connections. Optional to call --
+        the OS reclaims the sockets at process exit regardless -- but worth
+        calling explicitly if constructing many short-lived retriever
+        instances in a loop rather than one long-lived instance."""
+        if self._pg_conn is not None and not self._pg_conn.closed:
+            self._pg_conn.close()
+        if self._neo4j_driver is not None:
+            self._neo4j_driver.close()
+            self._neo4j_driver = None
+
+    def query_pg(self, sql, params=None):
+        """Returns list[dict] (one dict per row, keyed by column name) --
+        not the pipe-delimited text the previous version reconstructed
+        purely to keep vector_semantic_search()/relational_sql_search()'s
+        brittle `.split("|")` parser working (see Q2: any content_text
+        containing a literal `|` shifted columns and raised ValueError)."""
         # Validate read-only SQL safety
         safe, reason = self.guardrails.validate_read_only_query(sql, "SQL")
         if not safe:
             raise ValueError(reason)
-        conn = psycopg2.connect(
-            host=POSTGRES_HOST, port=POSTGRES_PORT, user=POSTGRES_USER,
-            password=POSTGRES_PASSWORD, dbname=POSTGRES_DB, connect_timeout=10,
-            options="-c statement_timeout=10000 -c idle_in_transaction_session_timeout=30000",
-        )
-        try:
-            # Defense in depth: even if a mutation slipped past the keyword
-            # check above, the database itself now refuses to execute it.
-            conn.set_session(readonly=True)
-            with conn.cursor() as cur:
-                cur.execute(sql)
-                if cur.description is None:
-                    return ""
-                rows = cur.fetchall()
-                # No header, pipe-delimited -- matches the previous
-                # `psql -t -A` output that vector_semantic_search() and
-                # relational_sql_search() parse.
-                return "\n".join(
-                    "|".join("" if v is None else str(v) for v in row) for row in rows
-                )
-        finally:
-            conn.close()
+        conn = self._get_pg_conn()
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            if cur.description is None:
+                return []
+            columns = [desc[0] for desc in cur.description]
+            return [json_safe_row(dict(zip(columns, row))) for row in cur.fetchall()]
 
-    def query_neo4j(self, cypher):
+    def query_neo4j(self, cypher, params=None):
+        """Returns list[dict] -- one dict per record, keyed by the Cypher
+        query's own RETURN aliases (via neo4j's record.data())."""
         # Validate read-only Cypher safety
         safe, reason = self.guardrails.validate_read_only_query(cypher, "Cypher")
         if not safe:
             raise ValueError(reason)
-        driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD), connection_timeout=10)
-        try:
-            # See the matching comment in mcp_server/financial_data_mcp_server.py's
-            # query_neo4j: READ_ACCESS is the enforcement available on Neo4j
-            # Community Edition in place of a dedicated read-only role/RBAC.
-            with driver.session(default_access_mode=READ_ACCESS) as session:
-                result = session.run(cypher)
-                keys = list(result.keys())
-                # Header line + comma-joined records -- matches the previous
-                # `cypher-shell` output that graph_rag_search() slices [1:] on.
-                lines = [", ".join(keys)]
-                for record in result:
-                    lines.append(", ".join(str(record[k]) for k in keys))
-                return "\n".join(lines)
-        finally:
-            driver.close()
+        driver = self._get_neo4j_driver()
+        # See the matching comment in mcp_server/financial_data_mcp_server.py's
+        # query_neo4j: READ_ACCESS is the enforcement available on Neo4j
+        # Community Edition in place of a dedicated read-only role/RBAC.
+        with driver.session(default_access_mode=READ_ACCESS) as session:
+            result = session.run(cypher, params or {})
+            return [json_safe_row(record.data()) for record in result]
 
     def vector_semantic_search(self, prompt, top_k=3, fetch_candidates_k=10):
         """
@@ -141,29 +170,32 @@ class HybridRAGRetriever:
         query_vec = get_embedding(prompt)
         vec_str = "[" + ",".join(str(x) for x in query_vec) + "]"
 
-        sql = f"""
-        SELECT 
+        # %(vec)s::vector bound as a parameter rather than f-string
+        # interpolated -- query_vec is our own computed embedding, not raw
+        # user text, so this was never an injection risk the way the C6
+        # scripts were, but parameterizing is free here and keeps every
+        # query_pg call site in this codebase to the same convention.
+        sql = """
+        SELECT
             entity_type,
             display_name,
-            ROUND((1 - (embedding <=> '{vec_str}'::vector))::numeric, 4) AS similarity,
+            ROUND((1 - (embedding <=> %(vec)s::vector))::numeric, 4) AS similarity,
             content_text,
             metadata
         FROM financial.entity_embeddings
-        ORDER BY embedding <=> '{vec_str}'::vector ASC
-        LIMIT {fetch_candidates_k};
+        ORDER BY embedding <=> %(vec)s::vector ASC
+        LIMIT %(k)s;
         """
-        raw = self.query_pg(sql)
-        candidates = []
-        for line in raw.split("\n"):
-            if line:
-                parts = line.split("|")
-                if len(parts) >= 4:
-                    candidates.append({
-                        "entity_type": parts[0],
-                        "display_name": parts[1],
-                        "similarity": float(parts[2]),
-                        "content_text": parts[3]
-                    })
+        rows = self.query_pg(sql, {"vec": vec_str, "k": fetch_candidates_k})
+        candidates = [
+            {
+                "entity_type": row["entity_type"],
+                "display_name": row["display_name"],
+                "similarity": float(row["similarity"]),
+                "content_text": row["content_text"],
+            }
+            for row in rows
+        ]
 
         # Apply 2nd-stage Cross-Encoder neural re-ranking
         reranked_results = self.reranker.rerank_candidates(prompt, candidates, top_k=top_k)
@@ -172,11 +204,9 @@ class HybridRAGRetriever:
     def graph_rag_search(self, cypher_query):
         """Tier 2: Knowledge Graph Traversal via Neo4j Cypher Graph-RAG."""
         try:
-            raw = self.query_neo4j(cypher_query)
-            lines = [l.strip() for l in raw.split("\n") if l.strip()]
-            return lines[1:] if len(lines) > 1 else lines
+            return self.query_neo4j(cypher_query)
         except Exception as e:
-            return [f"Graph Query Exception: {e}"]
+            return [{"error": f"Graph Query Exception: {e}"}]
 
     def semantic_metric_search(self, cube_name, measures, dimensions=None):
         """Tier 3: Cube.js Open-Source Semantic Layer Metric Aggregation."""
@@ -205,10 +235,9 @@ class HybridRAGRetriever:
     def relational_sql_search(self, sql_query):
         """Tier 4: Relational SQL Query Execution on PostgreSQL."""
         try:
-            raw = self.query_pg(sql_query)
-            return raw.split("\n")[:10]
+            return self.query_pg(sql_query)[:10]
         except Exception as e:
-            return [f"SQL Execution Error: {e}"]
+            return [{"error": f"SQL Execution Error: {e}"}]
 
     def hybrid_retrieve(self, prompt, cypher_override=None, sql_override=None):
         """

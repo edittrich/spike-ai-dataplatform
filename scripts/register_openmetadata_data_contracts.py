@@ -13,10 +13,6 @@ OpenMetadata Data Product & Data Contract Registration Script
 ===============================================================================
 """
 
-import json
-import urllib.request
-import urllib.error
-import subprocess
 import sys
 import os
 
@@ -27,15 +23,9 @@ from scripts._dotenv_boot import load_env  # noqa: E402
 
 load_env()
 
-OPENMETADATA_URL = "http://127.0.0.1:8585/api/v1"
-JWT_TOKEN = os.getenv("OPENMETADATA_JWT_TOKEN", "")
-if not JWT_TOKEN:
-    print("⚠️ OPENMETADATA_JWT_TOKEN is not set; OpenMetadata API calls will be unauthenticated.")
-
-headers = {
-    "Content-Type": "application/json",
-    "Authorization": f"Bearer {JWT_TOKEN}"
-}
+# _openmetadata_client reads OPENMETADATA_URL/JWT_TOKEN at import time, so it
+# must be imported after load_env() -- see its module docstring.
+from scripts._openmetadata_client import api_put, api_post  # noqa: E402
 
 DOMAINS = [
     {
@@ -125,31 +115,6 @@ DATA_PRODUCTS = [
 """
     }
 ]
-
-def api_put(endpoint, payload):
-    url = f"{OPENMETADATA_URL}/{endpoint}"
-    req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="PUT")
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        print(f"❌ Error PUT {endpoint}: {e.code} - {e.read().decode('utf-8')}")
-        return None
-
-def api_post(endpoint, payload=None):
-    url = f"{OPENMETADATA_URL}/{endpoint}"
-    data = json.dumps(payload).encode("utf-8") if payload else None
-    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            raw = resp.read().decode("utf-8")
-            try:
-                return json.loads(raw)
-            except json.JSONDecodeError:
-                return raw
-    except urllib.error.HTTPError as e:
-        print(f"❌ Error POST {endpoint}: {e.code} - {e.read().decode('utf-8')}")
-        return None
 
 def main():
     print("🚀 Creating Domains & Registering Data Products / Contracts in OpenMetadata Catalog...")

@@ -29,6 +29,7 @@ import urllib.request
 from typing import Dict, List, Optional
 
 import psycopg2
+import psycopg2.pool
 import uvicorn
 from neo4j import READ_ACCESS, GraphDatabase
 from prometheus_client import Counter, Histogram, start_http_server
@@ -43,6 +44,7 @@ except ImportError:
 # of the working directory this module is launched from.
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from scripts._dotenv_boot import load_env
+from scripts._json_safe import json_safe_row
 from scripts.ai_safety_guardrails import AISafetyGuardrails
 
 # Loads .env for the stdio case (this file run directly on the host, e.g. as an
@@ -167,66 +169,94 @@ HEADERS = {
 # both fetched and returned an unbounded number of rows into the LLM context.
 MAX_SQL_RESULT_ROWS = 200
 
-def query_pg(sql: str) -> str:
-    """
-    Execute a SQL query against PostgreSQL over a native driver connection.
-    Output format matches the previous `psql -t -A` behavior (no header,
-    pipe-delimited fields) for compatibility with existing callers.
-    """
-    conn = psycopg2.connect(
-        host=POSTGRES_HOST, port=POSTGRES_PORT, user=POSTGRES_USER,
-        password=POSTGRES_PASSWORD, dbname=POSTGRES_DB, connect_timeout=10,
-        # Defense in depth independent of the mcp_readonly role's own
-        # session-level defaults (set by the role-creation migration) -- these
-        # apply even against a deployment that hasn't run that migration yet.
-        options="-c statement_timeout=10000 -c idle_in_transaction_session_timeout=30000",
-    )
+# Module-level singletons, built lazily on first use and reused for the life
+# of this process (Q6: query_pg used to open/close a new connection and
+# query_neo4j used to construct/destroy an entire GraphDatabase.driver on
+# every single call -- expensive and exactly the anti-pattern the neo4j
+# driver's own docs warn against; a driver is meant to be built once per
+# application and reused). A real connection pool (not a single shared
+# connection) is used for Postgres specifically because this is a
+# long-running server that may field concurrent tool calls -- one psycopg2
+# connection is not safe for concurrent use by multiple threads, but the
+# neo4j driver *is* thread-safe and pools internally, so a single shared
+# driver instance is the correct, documented usage there.
+_pg_pool: Optional["psycopg2.pool.ThreadedConnectionPool"] = None
+_neo4j_driver = None
+
+
+def _get_pg_pool():
+    global _pg_pool
+    if _pg_pool is None:
+        _pg_pool = psycopg2.pool.ThreadedConnectionPool(
+            1, 5,
+            host=POSTGRES_HOST, port=POSTGRES_PORT, user=POSTGRES_USER,
+            password=POSTGRES_PASSWORD, dbname=POSTGRES_DB, connect_timeout=10,
+            # Defense in depth independent of the mcp_readonly role's own
+            # session-level defaults (set by the role-creation migration) --
+            # these apply even against a deployment that hasn't run that
+            # migration yet.
+            options="-c statement_timeout=10000 -c idle_in_transaction_session_timeout=30000",
+        )
+    return _pg_pool
+
+
+def _get_neo4j_driver():
+    global _neo4j_driver
+    if _neo4j_driver is None:
+        _neo4j_driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD), connection_timeout=10)
+    return _neo4j_driver
+
+
+def query_pg(sql: str, params=None) -> List[Dict]:
+    """Execute a SQL query against PostgreSQL over a pooled native driver
+    connection. Returns list[dict] (one dict per row, keyed by column name)
+    instead of the pipe-delimited text the previous version reconstructed
+    purely to keep callers' `.split("|")` parsing working -- see Q2: any
+    column value containing a literal `|` shifted columns and raised
+    ValueError out of the tool."""
+    pool = _get_pg_pool()
+    conn = pool.getconn()
     try:
         # Defense in depth: even if a mutation slipped past the guardrails'
         # keyword check, the database itself now refuses to execute it. (The
         # mcp_readonly role's own privileges are the primary control -- see the
         # comment above POSTGRES_USER -- this transaction-level flag is a second
-        # layer on top of that.)
-        conn.set_session(readonly=True)
+        # layer on top of that.) Checked rather than unconditionally re-set on
+        # every call: a connection checked back into the pool by a previous
+        # caller already has autocommit=True, and set_session() requires no
+        # transaction be in progress, which autocommit already guarantees --
+        # but only setting it once per underlying connection avoids relying on
+        # that ordering being preserved by every psycopg2 version.
+        if not conn.autocommit:
+            conn.set_session(readonly=True, autocommit=True)
         with conn.cursor() as cur:
-            cur.execute(sql)
+            cur.execute(sql, params)
             if cur.description is None:
-                return ""
+                return []
+            columns = [desc[0] for desc in cur.description]
             rows = cur.fetchmany(MAX_SQL_RESULT_ROWS)
-            return "\n".join(
-                "|".join("" if v is None else str(v) for v in row) for row in rows
-            )
+            return [json_safe_row(dict(zip(columns, row))) for row in rows]
     finally:
-        conn.close()
+        pool.putconn(conn)
 
-def query_neo4j(cypher: str) -> str:
-    """
-    Execute a Cypher query against Neo4j over the native bolt driver. Output
-    format matches the previous `cypher-shell` behavior (a header line of
-    column names, followed by one comma-joined line per record) for
-    compatibility with existing callers.
-    """
-    driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD), connection_timeout=10)
-    try:
-        # Neo4j Community Edition (this platform's neo4j:5.18.0-community image)
-        # has no custom-role RBAC to restrict this connection to read-only the
-        # way mcp_readonly does for Postgres -- READ_ACCESS mode is the
-        # equivalent enforcement available here: the server rejects any write
-        # clause (CREATE/SET/DELETE/MERGE/REMOVE/...) inside a transaction opened
-        # this way, independent of scripts/ai_safety_guardrails.py's keyword
-        # scan. It does NOT block procedure calls that don't write to the graph
-        # (e.g. an APOC HTTP-fetch procedure used for SSRF) -- that's covered by
-        # the guardrail's Cypher keyword list and by restricting the APOC
-        # plugin's allowlist in docker-compose.yml instead.
-        with driver.session(default_access_mode=READ_ACCESS) as session:
-            result = session.run(cypher)
-            keys = list(result.keys())
-            lines = [", ".join(keys)]
-            for record in result:
-                lines.append(", ".join(str(record[k]) for k in keys))
-            return "\n".join(lines)
-    finally:
-        driver.close()
+def query_neo4j(cypher: str, params=None) -> List[Dict]:
+    """Execute a Cypher query against Neo4j over the shared bolt driver.
+    Returns list[dict] -- one dict per record, keyed by the Cypher query's
+    own RETURN aliases (via neo4j's record.data())."""
+    driver = _get_neo4j_driver()
+    # Neo4j Community Edition (this platform's neo4j:5.18.0-community image)
+    # has no custom-role RBAC to restrict this connection to read-only the
+    # way mcp_readonly does for Postgres -- READ_ACCESS mode is the
+    # equivalent enforcement available here: the server rejects any write
+    # clause (CREATE/SET/DELETE/MERGE/REMOVE/...) inside a transaction opened
+    # this way, independent of scripts/ai_safety_guardrails.py's keyword
+    # scan. It does NOT block procedure calls that don't write to the graph
+    # (e.g. an APOC HTTP-fetch procedure used for SSRF) -- that's covered by
+    # the guardrail's Cypher keyword list and by restricting the APOC
+    # plugin's allowlist in docker-compose.yml instead.
+    with driver.session(default_access_mode=READ_ACCESS) as session:
+        result = session.run(cypher, params or {})
+        return [json_safe_row(record.data()) for record in result]
 
 
 class BearerAuthMiddleware:
@@ -329,9 +359,14 @@ def query_knowledge_graph(cypher_query: str) -> str:
         logger.warning(f"Blocked unsafe Cypher query: {reason}")
         return reason
     try:
-        raw = query_neo4j(cypher_query)
-        lines = [l.strip() for l in raw.split("\n") if l.strip()]
-        return "\n".join(lines[:10])
+        # Capped at 10 records on the structured result itself, rather than
+        # the previous version's `lines[:10]` slice of already-formatted text
+        # (which only worked because each record happened to render as
+        # exactly one line -- a record containing an embedded newline, e.g.
+        # from a multi-line string property, would have silently truncated
+        # mid-record instead).
+        records = query_neo4j(cypher_query)[:10]
+        return json.dumps(records, indent=2) if records else "No records returned."
     except Exception as e:
         logger.error(f"Cypher execution error: {e}")
         return f"Cypher Execution Error: {e}"
@@ -348,8 +383,8 @@ def query_financial_database(sql_query: str) -> str:
         logger.warning(f"Blocked unsafe SQL query: {reason}")
         return reason
     try:
-        raw = query_pg(sql_query)
-        return raw if raw else "No records returned."
+        rows = query_pg(sql_query)
+        return json.dumps(rows, indent=2) if rows else "No records returned."
     except Exception as e:
         logger.error(f"SQL execution error: {e}")
         return f"SQL Query Error: {e}"
@@ -383,6 +418,24 @@ def check_data_quality(table_name: str) -> str:
         # — a broken data-quality subsystem must not look like it's passing.
         return f"Data Quality Check Error: {e}"
 
+_hybrid_retriever = None
+
+
+def _get_hybrid_retriever():
+    """Lazily builds a single HybridRAGRetriever, reused across every
+    hybrid_rag_search call for the life of this process, instead of
+    constructing a fresh one (with its own fresh Postgres connection and
+    Neo4j driver -- see HybridRAGRetriever's own connection-reuse comment)
+    per invocation (Q6). Deferred to first call rather than built at import
+    time so importing this module never triggers the embedding/reranker
+    model load a tool that isn't hybrid_rag_search wouldn't need."""
+    global _hybrid_retriever
+    if _hybrid_retriever is None:
+        from scripts.hybrid_rag_retriever import HybridRAGRetriever
+        _hybrid_retriever = HybridRAGRetriever()
+    return _hybrid_retriever
+
+
 @mcp.tool()
 @track_tool_call
 def hybrid_rag_search(prompt: str) -> str:
@@ -392,8 +445,7 @@ def hybrid_rag_search(prompt: str) -> str:
     """
     logger.info(f"Executing hybrid_rag_search tool for prompt: '{prompt}'")
     try:
-        from scripts.hybrid_rag_retriever import HybridRAGRetriever
-        retriever = HybridRAGRetriever()
+        retriever = _get_hybrid_retriever()
         payload = retriever.hybrid_retrieve(prompt)
         return json.dumps(payload, indent=2)
     except RuntimeError as e:

@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-dataplatform"
+version = "0.1.0"
+description = "BIAN/FIBO-aligned AI-Enabled Financial Data Platform PoC (3NF PostgreSQL + pgvector, Cube.js, Neo4j, OpenMetadata, FastMCP)"
+requires-python = ">=3.11"
+dynamic = ["dependencies"]
+
+[tool.setuptools.dynamic]
+# requirements.txt stays the single source of truth for versions -- this
+# just makes `pip install -e .` work instead of duplicating the list here.
+dependencies = { file = ["requirements.txt"] }
+
+[tool.setuptools]
+# scripts/ and mcp_server/ are PEP 420 implicit namespace packages (no
+# __init__.py -- every script's own comment explains why: it lets each be
+# run directly regardless of working directory). Listing them explicitly
+# here, rather than using setuptools' auto-discovery, keeps that intentional.
+packages = ["scripts", "mcp_server"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

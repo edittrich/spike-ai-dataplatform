@@ -14,10 +14,6 @@ Actions:
 ===============================================================================
 """
 
-import json
-import urllib.request
-import urllib.error
-import subprocess
 import sys
 import os
 
@@ -28,15 +24,11 @@ from scripts._dotenv_boot import load_env  # noqa: E402
 
 load_env()
 
-OPENMETADATA_URL = "http://127.0.0.1:8585/api/v1"
-JWT_TOKEN = os.getenv("OPENMETADATA_JWT_TOKEN", "")
-if not JWT_TOKEN:
-    print("⚠️ OPENMETADATA_JWT_TOKEN is not set; OpenMetadata API calls will be unauthenticated.")
-
-headers = {
-    "Content-Type": "application/json",
-    "Authorization": f"Bearer {JWT_TOKEN}"
-}
+# _neo4j_conn / _openmetadata_client read credentials at import time, so both
+# must be imported *after* load_env() has populated the environment from
+# .env -- importing them earlier silently captures empty credentials.
+from scripts._neo4j_conn import get_driver  # noqa: E402
+from scripts._openmetadata_client import api_get, api_put, api_post  # noqa: E402
 
 # Lineage Mapping Definition (Table -> Semantic Cube -> Knowledge Graph Node)
 LINEAGE_MAP = [
@@ -67,57 +59,6 @@ LINEAGE_MAP = [
     ("ref", "ref_currency", "Cube_RefCurrency", "RefCurrency", "ISO 4217 Currency Reference"),
     ("ref", "ref_nace_industry", "Cube_RefNaceIndustry", "RefIndustry", "NACE Rev. 2 Industry Reference")
 ]
-
-def api_get(endpoint):
-    url = f"{OPENMETADATA_URL}/{endpoint}"
-    req = urllib.request.Request(url, headers=headers, method="GET")
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        print(f"❌ Error GET {endpoint}: {e.code} - {e.read().decode('utf-8')}")
-        return None
-
-def api_put(endpoint, payload):
-    url = f"{OPENMETADATA_URL}/{endpoint}"
-    req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="PUT")
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            raw = resp.read().decode("utf-8")
-            if not raw:
-                return {"status": "success"}
-            try:
-                return json.loads(raw)
-            except json.JSONDecodeError:
-                return {"status": "success", "raw": raw}
-    except urllib.error.HTTPError as e:
-        print(f"❌ Error PUT {endpoint}: {e.code} - {e.read().decode('utf-8')}")
-        return None
-
-def api_post(endpoint, payload=None):
-    url = f"{OPENMETADATA_URL}/{endpoint}"
-    data = json.dumps(payload).encode("utf-8") if payload else None
-    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            raw = resp.read().decode("utf-8")
-            try:
-                return json.loads(raw)
-            except json.JSONDecodeError:
-                return raw
-    except urllib.error.HTTPError as e:
-        print(f"❌ Error POST {endpoint}: {e.code} - {e.read().decode('utf-8')}")
-        return None
-
-def run_cypher(statement):
-    neo4j_user = os.getenv("NEO4J_USER", "neo4j")
-    neo4j_pass = os.getenv("NEO4J_PASSWORD", "")
-    cmd = [
-        "docker", "exec", "neo4j_knowledge_graph", "cypher-shell",
-        "-u", neo4j_user, "-p", neo4j_pass, statement
-    ]
-    res = subprocess.run(cmd, capture_output=True, text=True, check=True)
-    return res.stdout.strip()
 
 def sync_openmetadata_lineage():
     print("\n🔗 Phase 1: OpenMetadata Catalog End-to-End Lineage Sync")
@@ -197,22 +138,30 @@ def sync_neo4j_lineage():
     print("\n🕸️ Phase 2: Neo4j Knowledge Graph Meta-Lineage Sync")
     print("----------------------------------------------------")
 
-    for schema, tbl_name, cube_name, kg_entity, desc in LINEAGE_MAP:
-        cypher = f"""
-        MERGE (t:PostgreSQLTable {{fqn: '{schema}.{tbl_name}'}})
-        ON CREATE SET t.schema = '{schema}', t.name = '{tbl_name}'
+    cypher = """
+    MERGE (t:PostgreSQLTable {fqn: $fqn})
+    ON CREATE SET t.schema = $schema, t.name = $tbl_name
 
-        MERGE (c:SemanticCube {{name: '{cube_name}'}})
-        ON CREATE SET c.engine = 'Cube.js', c.description = '{desc}'
+    MERGE (c:SemanticCube {name: $cube_name})
+    ON CREATE SET c.engine = 'Cube.js', c.description = $desc
 
-        MERGE (k:KnowledgeEntityType {{name: '{kg_entity}'}})
-        ON CREATE SET k.domain = 'BIAN/FIBO'
+    MERGE (k:KnowledgeEntityType {name: $kg_entity})
+    ON CREATE SET k.domain = 'BIAN/FIBO'
 
-        MERGE (t)-[r1:DERIVES_SEMANTICS_TO {{type: 'SQL_COMPUTE'}}]->(c)
-        MERGE (c)-[r2:INSTANTIATES_GRAPH {{type: 'ENTITY_MAPPING'}}]->(k);
-        """
-        run_cypher(cypher)
-        print(f"  🕸️ Graph Lineage: (:PostgreSQLTable `{schema}.{tbl_name}`) ➔ (:SemanticCube `{cube_name}`) ➔ (:KnowledgeEntity `{kg_entity}`)")
+    MERGE (t)-[r1:DERIVES_SEMANTICS_TO {type: 'SQL_COMPUTE'}]->(c)
+    MERGE (c)-[r2:INSTANTIATES_GRAPH {type: 'ENTITY_MAPPING'}]->(k);
+    """
+    driver = get_driver()
+    try:
+        with driver.session() as session:
+            for schema, tbl_name, cube_name, kg_entity, desc in LINEAGE_MAP:
+                session.run(cypher, {
+                    "fqn": f"{schema}.{tbl_name}", "schema": schema, "tbl_name": tbl_name,
+                    "cube_name": cube_name, "desc": desc, "kg_entity": kg_entity,
+                }).consume()
+                print(f"  🕸️ Graph Lineage: (:PostgreSQLTable `{schema}.{tbl_name}`) ➔ (:SemanticCube `{cube_name}`) ➔ (:KnowledgeEntity `{kg_entity}`)")
+    finally:
+        driver.close()
 
     print("✅ Neo4j Meta-Lineage Sync Complete!")
 

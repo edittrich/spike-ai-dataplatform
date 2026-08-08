@@ -6,10 +6,24 @@ on:
   pull_request:
     branches: [ main ]
 
+# Default token scope is read/write on this repo; CI here never needs to
+# write anything (no release publishing, no PR comments, no package
+# uploads), so pin it down to the minimum instead of inheriting the repo
+# default (Q14 in the hardening plan).
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same branch/PR instead of letting stale runs
+# finish and burn minutes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-and-test:
     name: Build, Lint & Automated Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - name: Check out Repository
@@ -25,7 +39,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install ruff pip-audit
+          pip install ruff pip-audit pytest
 
       - name: Verify Python Code Syntax
         run: |
@@ -68,3 +82,38 @@ jobs:
       - name: Run FastMCP Tool Server Handler Tests
         run: |
           python3 -m mcp_server.test_mcp_server
+
+      - name: Run pytest Suite (negative security tests, auth middleware, contract/schema drift)
+        # Blocking, unlike the checks above that only self-test: this is the
+        # suite Q9 in the hardening plan asked for -- led by tests that
+        # assert every previously-verified guardrail bypass (SQL/Cypher
+        # mutation, BearerAuthMiddleware fail-open) is now rejected, plus the
+        # contract<->schema drift check from D2. No live database is
+        # available in this job, so the handful of tests that need one
+        # (tests/test_postgres_readonly_role.py, tests/test_schema_dbml_drift.py)
+        # skip themselves cleanly instead of failing -- see their docstrings.
+        run: |
+          python3 -m pytest tests/ -v
+
+      - name: Lint Dockerfile (hadolint, informational)
+        # Hadolint is itself a local, open-source static analyzer (no
+        # network calls, no external service) -- only the GitHub Action
+        # wrapper that invokes it runs on GitHub's infrastructure, same as
+        # every other step in this workflow. Informational for now: several
+        # of its default rules (e.g. pinning base images by digest) are
+        # deliberate tradeoffs already discussed for this PoC, not bugs.
+        continue-on-error: true
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: mcp_server/Dockerfile.mcp
+
+      - name: Scan for Committed Secrets (gitleaks, informational)
+        # gitleaks itself is open-source and runs entirely locally against
+        # the checked-out repo (no data leaves the runner); informational
+        # here because it scans full history on every run and the repo's
+        # git history was already deliberately purged once (see C7) rather
+        # than something this gate should re-block on indefinitely.
+        continue-on-error: true
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

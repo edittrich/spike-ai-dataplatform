@@ -2,9 +2,14 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Copy requirements and install dependencies
+# Copy requirements and install dependencies. mcp/fastmcp/uvicorn/starlette
+# used to be installed here completely unversioned -- floored to the same
+# minimums as the root requirements.txt (Q12), so a build today can't
+# silently pull a version with a breaking API change that was never tested
+# against this code, and dev/Docker no longer disagree on what's installed.
 COPY catalog/requirements.exporter.txt ./requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt mcp fastmcp uvicorn starlette
+RUN pip install --no-cache-dir -r requirements.txt \
+    "mcp>=1.0.0" "fastmcp>=0.1.0" "uvicorn>=0.30.0" "starlette>=0.37.0"
 
 # Copy application source code
 COPY . .

@@ -2,7 +2,8 @@
 # list -- catalog/Dockerfile.exporter (the standalone fake-telemetry container this
 # file was originally shared with) was removed; the MCP sidecar now serves real
 # Prometheus metrics itself. Kept under this name to avoid an unrelated rename.
-requests>=2.31.0
+# NOT requests: mcp_server/financial_data_mcp_server.py and every script it
+# imports use the stdlib's urllib.request, not requests (Q12).
 psycopg2-binary>=2.9.9
 neo4j>=5.18.0
 pyyaml>=6.0.1

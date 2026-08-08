@@ -12,9 +12,6 @@ Performs active metadata intelligence over PostgreSQL schemas `ref` and `financi
 ===============================================================================
 """
 
-import json
-import urllib.request
-import urllib.error
 import subprocess
 import time
 import sys
@@ -24,18 +21,13 @@ import os
 # of the working directory this script is launched from.
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from scripts._dotenv_boot import load_env  # noqa: E402
+from scripts._sql_identifier import is_known_column, load_known_columns  # noqa: E402
 
 load_env()
 
-OPENMETADATA_URL = "http://127.0.0.1:8585/api/v1"
-JWT_TOKEN = os.getenv("OPENMETADATA_JWT_TOKEN", "")
-if not JWT_TOKEN:
-    print("⚠️ OPENMETADATA_JWT_TOKEN is not set; OpenMetadata API calls will be unauthenticated.")
-
-headers = {
-    "Content-Type": "application/json",
-    "Authorization": f"Bearer {JWT_TOKEN}"
-}
+# _openmetadata_client reads OPENMETADATA_URL/JWT_TOKEN at import time, so it
+# must be imported after load_env() -- see its module docstring.
+from scripts._openmetadata_client import api_get, api_put, api_post  # noqa: E402
 
 PII_PERSONAL_PATTERNS = [
     # street_address/building_number (not address_line1/address_line2, which
@@ -51,41 +43,6 @@ PII_SPECIAL_PATTERNS = [
     # identical mistake).
     "id_number", "date_of_birth", "registration_number"
 ]
-
-def api_get(endpoint):
-    url = f"{OPENMETADATA_URL}/{endpoint}"
-    req = urllib.request.Request(url, headers=headers, method="GET")
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        print(f"❌ Error GET {endpoint}: {e.code} - {e.read().decode('utf-8')}")
-        return None
-
-def api_put(endpoint, payload):
-    url = f"{OPENMETADATA_URL}/{endpoint}"
-    req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="PUT")
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        print(f"❌ Error PUT {endpoint}: {e.code} - {e.read().decode('utf-8')}")
-        return None
-
-def api_post(endpoint, payload=None):
-    url = f"{OPENMETADATA_URL}/{endpoint}"
-    data = json.dumps(payload).encode("utf-8") if payload else None
-    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            raw = resp.read().decode("utf-8")
-            try:
-                return json.loads(raw)
-            except json.JSONDecodeError:
-                return raw
-    except urllib.error.HTTPError as e:
-        print(f"❌ Error POST {endpoint}: {e.code} - {e.read().decode('utf-8')}")
-        return None
 
 def query_pg(sql):
     cmd = [
@@ -158,10 +115,24 @@ def run_data_profiling():
     if not tables_resp or "data" not in tables_resp:
         return
 
+    # schema_name/tbl_name/col_name below come from the live OpenMetadata API
+    # response -- externally influenceable if anyone can edit the catalog --
+    # and psycopg2/docker-exec-psql cannot bind identifiers as query
+    # parameters (only values). So before any of them is interpolated into a
+    # SQL string, it's checked against the real information_schema.columns
+    # snapshot fetched here: only identifiers that name an actual column in
+    # `financial`/`ref` survive, closing the injection surface described in
+    # the C6 finding regardless of what the catalog claims.
+    known_columns = load_known_columns(query_pg)
+
     for tbl in tables_resp["data"]:
         schema_name = tbl["databaseSchema"]["name"]
         tbl_name = tbl["name"]
         tbl_id = tbl["id"]
+
+        if (schema_name, tbl_name) not in known_columns:
+            print(f"  ⚠️ Skipping unknown table `{schema_name}.{tbl_name}` (not in information_schema).")
+            continue
 
         try:
             row_cnt_str = query_pg(f"SELECT COUNT(*) FROM {schema_name}.{tbl_name};")
@@ -175,9 +146,12 @@ def run_data_profiling():
 
         for col in columns[:5]:  # Profile key columns
             col_name = col["name"]
+            if not is_known_column(known_columns, schema_name, tbl_name, col_name):
+                print(f"  ⚠️ Skipping unknown column `{schema_name}.{tbl_name}.{col_name}` (not in information_schema).")
+                continue
             try:
                 col_stats_str = query_pg(f"""
-                    SELECT 
+                    SELECT
                         COUNT({col_name}) as non_null_count,
                         COUNT(DISTINCT {col_name}) as distinct_count
                     FROM {schema_name}.{tbl_name};

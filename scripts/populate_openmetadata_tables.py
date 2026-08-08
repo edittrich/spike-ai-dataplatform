@@ -8,9 +8,6 @@ and native COMMENT ON COLUMN descriptions) and registers them directly into Open
 ===============================================================================
 """
 
-import json
-import urllib.request
-import urllib.error
 import subprocess
 import sys
 import os
@@ -22,25 +19,9 @@ from scripts._dotenv_boot import load_env  # noqa: E402
 
 load_env()
 
-OPENMETADATA_URL = "http://127.0.0.1:8585/api/v1"
-JWT_TOKEN = os.getenv("OPENMETADATA_JWT_TOKEN", "")
-if not JWT_TOKEN:
-    print("⚠️ OPENMETADATA_JWT_TOKEN is not set; OpenMetadata API calls will be unauthenticated.")
-
-headers = {
-    "Content-Type": "application/json",
-    "Authorization": f"Bearer {JWT_TOKEN}"
-}
-
-def api_put(endpoint, payload):
-    url = f"{OPENMETADATA_URL}/{endpoint}"
-    req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="PUT")
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        print(f"❌ Error PUT {endpoint}: {e.code} - {e.read().decode('utf-8')}")
-        return None
+# _openmetadata_client reads OPENMETADATA_URL/JWT_TOKEN at import time, so it
+# must be imported after load_env() -- see its module docstring.
+from scripts._openmetadata_client import api_put  # noqa: E402
 
 def get_pg_tables():
     cmd = [

@@ -33,7 +33,7 @@ against a refused connection until it's up.
 | :--- | :--- | :--- | :--- | :--- |
 | `openmetadata_mysql` | `mysql:8.0.35` | `3306` (published loopback-only as `127.0.0.1:33060`) | `MYSQL_ROOT_PASSWORD`, `MYSQL_PASSWORD` (both `${OPENMETADATA_MYSQL_PASSWORD}`, no fallback — required) | OpenMetadata catalog backend database |
 | `openmetadata_search` | `opensearchproject/opensearch:2.11.0` | `9200` (published loopback-only as `127.0.0.1:9200`) | `DISABLE_SECURITY_PLUGIN=true` | Catalog search index (security plugin off; only reachable from the host or the internal Docker network, never externally) |
-| `openmetadata_server` | `openmetadata/server:1.3.1` | `8585` | `OPENMETADATA_URL`, `OPENMETADATA_JWT_TOKEN`, `DB_USER_PASSWORD` (⚠️ not `DB_PASSWORD` — see Troubleshooting) | Enterprise Data Catalog UI & REST API |
+| `openmetadata_server` | `openmetadata/server:1.3.1` | `8585` (published loopback-only as `127.0.0.1:8585` unless `OPENMETADATA_HOST` overrides it) | `OPENMETADATA_URL`, `OPENMETADATA_JWT_TOKEN`, `DB_USER_PASSWORD` (⚠️ not `DB_PASSWORD` — see Troubleshooting) | Enterprise Data Catalog UI & REST API |
 | `neo4j_knowledge_graph` | `neo4j:5.18.0-community` | `7474` / `7687` | `NEO4J_AUTH=neo4j/${NEO4J_PASSWORD}` (no fallback — required) | Knowledge Graph database & Bolt driver |
 | `cube_semantic_layer` | `cubejs/cube:v0.35` | `4000` | `CUBEJS_DB_TYPE=postgres`, `CUBEJS_API_SECRET` — **enforced**: [`cube/cube.js`](../cube/cube.js)'s `checkAuth` rejects any request whose `Authorization: Bearer` token doesn't match this secret, in both dev and production mode. No `CUBEJS_SQL_PORT` — the Postgres-wire SQL API it would open has no equivalent auth check and nothing uses it. | Open-Source Semantic Layer (REST API) |
 | `prometheus_metrics` | `prom/prometheus:v2.51.0` | `9090` | [catalog/prometheus.yml](../catalog/prometheus.yml) | Operational time-series metrics engine |
@@ -45,7 +45,7 @@ There is no separate telemetry-exporter service — `mcp_sidecar` serves real pe
 don't share state across processes, which is exactly why the previous separate exporter container had
 to fabricate its data — see [Known Issues](#5-known-issues)).
 
-All services declare a `healthcheck:` in `docker-compose.yml`; `openmetadata_server`'s `depends_on` gates on `openmetadata_db`/`openmetadata_search` reaching `condition: service_healthy` before it starts (fixes a real startup race — see Troubleshooting).
+All services declare a `healthcheck:` in `docker-compose.yml`; `openmetadata_server` gates on `openmetadata_db`/`openmetadata_search`, `mcp_sidecar` gates on `neo4j`/`cube`, and `grafana` gates on `prometheus` — all via `depends_on: condition: service_healthy` (fixes real startup races — see Troubleshooting). Every service also sets `security_opt: no-new-privileges:true` and a bounded `logging:` driver; Prometheus and Grafana persist to named volumes (`prometheus_data`/`grafana_data`) instead of losing all history on every recreate; config bind mounts (Cube.js's model/`cube.js`, Prometheus's config, Grafana's provisioning) are `:ro`.
 
 ---
 
@@ -94,15 +94,14 @@ or on step 3 — and can run in any order or in parallel.
 
 ### D. Guardrails, Telemetry & Agentic Execution
 13. **[`scripts/ai_safety_guardrails.py`](../scripts/ai_safety_guardrails.py):** Implements PII redaction, prompt injection defense, and read-only query enforcement (regex/keyword-based, with separate SQL and Cypher keyword lists and string-literal-aware tokenization). This is the first of two enforcement layers, not the only one: the MCP server's database connections carry their own privilege- and access-mode-level restrictions regardless of what this scan misses — see `mcp_readonly` in [`mcp_server/financial_data_mcp_server.py`](../mcp_server/financial_data_mcp_server.py) and `docs/ARCHITECTURE.md`'s Security Model. The prompt-injection check is still a fixed regex list (paraphrase, other languages, or encoding easily evade it) and only warns rather than blocking on a match found in *retrieved* content — treat it as a coarse filter, not a guarantee.
-14. **[`scripts/llmops_telemetry.py`](../scripts/llmops_telemetry.py):** Tracks per-call latencies, token accounting, and model cost estimates as structured JSON trace spans (in-process only; not currently wired to an OpenTelemetry exporter).
-15. **[`scripts/telemetry_metrics_exporter_server.py`](../scripts/telemetry_metrics_exporter_server.py):** Serves an OpenMetrics payload on port 8000. **Currently a traffic simulator, not a real collector** — see [Known Issues](#5-known-issues).
-16. **[`scripts/ollama_agentic_tool_runner.py`](../scripts/ollama_agentic_tool_runner.py):** Native tool-calling runner allowing a local Ollama model (default `gemma4:latest`) to execute FastMCP tools autonomously.
-17. **[`mcp_server/financial_data_mcp_server.py`](../mcp_server/financial_data_mcp_server.py):** FastMCP server exposing 6 tools (`search_data_catalog`, `query_semantic_metrics`, `query_knowledge_graph`, `query_financial_database`, `check_data_quality`, `hybrid_rag_search`).
+14. **[`scripts/llmops_telemetry.py`](../scripts/llmops_telemetry.py):** Tracks per-call latencies, token accounting, and model cost estimates as structured JSON trace spans, and as real `prometheus_client` Counters/Histograms served by `mcp_sidecar` itself (no separate exporter process — see [Known Issues](#5-known-issues) for why one used to exist and was removed).
+15. **[`scripts/ollama_agentic_tool_runner.py`](../scripts/ollama_agentic_tool_runner.py):** Native tool-calling runner allowing a local Ollama model (default `gemma4:latest`) to execute FastMCP tools autonomously.
+16. **[`mcp_server/financial_data_mcp_server.py`](../mcp_server/financial_data_mcp_server.py):** FastMCP server exposing 6 tools (`search_data_catalog`, `query_semantic_metrics`, `query_knowledge_graph`, `query_financial_database`, `check_data_quality`, `hybrid_rag_search`).
 
 ### E. Evaluation, Web UI & Benchmarks
-18. **[`scripts/rag_triad_evaluator.py`](../scripts/rag_triad_evaluator.py):** Heuristic (token-overlap) scorer for Context Relevance, Faithfulness, and Answer Relevance. Useful as a fast smoke test; treat its scores as pass/fail sanity checks, not as accuracy or hallucination measurements — it has no model in the loop.
-19. **[`scripts/evaluate_agentic_retrieval.py`](../scripts/evaluate_agentic_retrieval.py):** 5-scenario smoke-test suite that checks each subsystem responds without error, plus the RAG Triad scores above. Not an accuracy benchmark for the same reason as #18.
-20. **[`scripts/rag_explorer_dashboard.py`](../scripts/rag_explorer_dashboard.py):** Interactive 6-Tab Streamlit Web Dashboard (`http://localhost:8501`).
+17. **[`scripts/rag_triad_evaluator.py`](../scripts/rag_triad_evaluator.py):** Heuristic (token-overlap) scorer for Context Relevance, Faithfulness, and Answer Relevance. Useful as a fast smoke test; treat its scores as pass/fail sanity checks, not as accuracy or hallucination measurements — it has no model in the loop.
+18. **[`scripts/evaluate_agentic_retrieval.py`](../scripts/evaluate_agentic_retrieval.py):** 5-scenario smoke-test suite that checks each subsystem responds without error, plus the RAG Triad scores above. Not an accuracy benchmark for the same reason as #17.
+19. **[`scripts/rag_explorer_dashboard.py`](../scripts/rag_explorer_dashboard.py):** Interactive 6-Tab Streamlit Web Dashboard (`http://localhost:8501`).
 
 ---
 
@@ -147,6 +146,15 @@ or on step 3 — and can run in any order or in parallel.
    ```bash
    python3 -m mcp_server.test_mcp_server
    ```
+
+5. **Run the pytest Suite** (negative security tests, auth middleware, contract/schema drift check):
+   ```bash
+   python3 -m pytest tests/ -v
+   ```
+   Most tests are self-contained (no live stack needed — this is what CI runs). Two files
+   (`test_postgres_readonly_role.py`, `test_schema_dbml_drift.py`) additionally run live checks
+   against the `mcp_readonly` role / the DB-introspected schema when a database is reachable, and
+   skip cleanly (not fail) otherwise.
 
 5. **Test Autonomous Ollama Gemma 4 Function Calling:**
    ```bash
@@ -223,6 +231,16 @@ Operational quirks worth knowing before you conclude something in your own setup
   Cypher keyword guardrail, but note it does *not* block a non-write procedure call (e.g. an APOC
   HTTP-fetch procedure used for SSRF), which is why the guardrail's Cypher keyword list still blocks
   `CALL` and the plugin itself was removed rather than merely restricted.
+
+- **Five services still run on `network_mode: "host"`** (Neo4j, Cube.js, Prometheus, Grafana,
+  `mcp_sidecar`) rather than a bridge network with explicit port publishing — assessed and
+  deliberately deferred (see the comment block atop `docker-compose.yml` for the two concrete
+  reasons: reaching the host-run Postgres, and updating every cross-service URL together). MySQL,
+  OpenSearch, and now `openmetadata_server` (via `OPENMETADATA_HOST`, same secure-by-default pattern
+  as `MCP_HOST`) are the exceptions, loopback-only by default.
+- **`schema.dbml` is a generated file** (`python3 scripts/generate_schema_dbml.py`) — do not hand-edit
+  it; a migration that changes the schema without regenerating it will show up as drift under
+  `--check` (and in `tests/test_schema_dbml_drift.py`, when a live database is reachable).
 
 These are tracked for remediation; this section exists so they read as known behavior rather than
 new bugs when you hit them.

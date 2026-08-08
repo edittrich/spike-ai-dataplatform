@@ -1,9 +1,16 @@
 # Enterprise AI-Enabled Data Platform Dependencies
 python-dotenv>=1.0.0
 prometheus-client>=0.20.0
+# Parses contracts/*.yaml for scripts/_schema_drift.py's CI drift check (D2)
+# -- previously referenced by register_openmetadata_data_contracts.py's
+# `"contract_file"` dict value but never actually imported/installed anywhere.
+pyyaml>=6.0
 sentence-transformers>=2.2.2
+# NOT torchvision: it's a vision-model dependency that
+# sentence-transformers's text-only models (EMBEDDING_MODEL_NAME defaults to
+# all-MiniLM-L6-v2, a text model) never import -- it was a large,
+# multi-hundred-MB unused download (Q12).
 torch>=2.0.0
-torchvision>=0.15.0
 transformers>=4.38.0
 mcp>=1.0.0
 fastmcp>=0.1.0
@@ -11,6 +18,8 @@ uvicorn>=0.30.0
 starlette>=0.37.0
 psycopg2-binary>=2.9.9
 neo4j>=5.18.0
-requests>=2.28.0
+# NOT requests: every HTTP call in this codebase uses the stdlib's
+# urllib.request (see scripts/_openmetadata_client.py) -- requests was
+# declared but never imported anywhere (Q12).
 streamlit>=1.30.0
 pytest>=7.0.0

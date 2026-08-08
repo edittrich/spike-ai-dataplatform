@@ -1,3 +1,45 @@
+# Bounded, rotated container logs on every service -- previously unset
+# anywhere, so a misbehaving/chatty container (e.g. one stuck retry-looping
+# under `restart: always`) could grow its log file without limit (Q14).
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+# NOT DONE HERE, deliberately (H4 in the hardening plan): migrating neo4j,
+# cube, prometheus, grafana, and mcp_sidecar off `network_mode: "host"` onto
+# a user-defined bridge network with explicit 127.0.0.1:<port>:<port>
+# publishing, the way openmetadata_server/openmetadata_db/openmetadata_search
+# already work. This pass instead did the parts of H4 that were genuinely
+# config-only and low-risk: openmetadata_server's 0.0.0.0 publish
+# inconsistency (fixed, see OPENMETADATA_HOST below), plus :ro config mounts,
+# persistent volumes, depends_on, logging limits, and security_opt across
+# every service (Q14). The full bridge-network migration was assessed and
+# intentionally deferred -- it's a real networking restructure, not a
+# config toggle, for two concrete reasons:
+#   1. PostgreSQL/Supabase is not a compose service (see D1) -- it's reached
+#      today at 127.0.0.1:54322 because every host-mode container shares the
+#      host's network namespace. Both `cube` and `mcp_sidecar` need it.
+#      Bridge-networked containers would need `host.docker.internal` /
+#      `extra_hosts: ["host.docker.internal:host-gateway"]` instead, and
+#      every default in this file, .env.example, and the scripts that read
+#      POSTGRES_HOST would need to change consistently, not just one.
+#   2. Inter-service calls between these five (mcp_sidecar -> neo4j/cube,
+#      grafana -> prometheus) currently all resolve via 127.0.0.1 too.
+#      Bridge networking gives real service-name DNS instead (`neo4j:7687`,
+#      `cube:4000`, `prometheus:9090`) -- correct, but it means updating
+#      catalog/prometheus.yml's scrape targets, every
+#      catalog/grafana/provisioning/datasources/*.yml URL, and this file's
+#      own NEO4J_URI/CUBEJS_URL defaults together, then re-verifying each
+#      cross-service call live. Get any one of these wrong and a service
+#      looks "up" (healthcheck passes against itself) while silently unable
+#      to reach its dependency.
+# Both are mechanically doable, but not something to rush through inside an
+# already-large hardening pass on a stack that's been carefully verified
+# working end-to-end -- this belongs in its own dedicated pass with room to
+# debug connectivity issues without extended platform downtime.
+
 services:
   # ===========================================================================
   # 1. Enterprise Catalog & Metadata Governance (OpenMetadata 1.3.1)
@@ -23,6 +65,9 @@ services:
       - "127.0.0.1:33060:3306"
     volumes:
       - ./catalog/mysql-data:/var/lib/mysql
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
     healthcheck:
       test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
       interval: 10s
@@ -53,6 +98,17 @@ services:
       # can reach this port has unauthenticated read/write access to the
       # catalog's search index, so it must not be published beyond localhost.
       - "127.0.0.1:9200:9200"
+    # bootstrap.memory_lock=true above previously had no matching ulimit, so
+    # OpenSearch's own mlockall() call failed silently (logged, not fatal) and
+    # the JVM heap could still be swapped out under host memory pressure --
+    # this is the standard companion setting OpenSearch's own docs recommend.
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
     healthcheck:
       test: ["CMD-SHELL", "curl -s -f http://127.0.0.1:9200 >/dev/null || exit 1"]
       interval: 10s
@@ -69,7 +125,17 @@ services:
         limits:
           memory: 1536m
     ports:
-      - "8585:8585"
+      # Previously unqualified ("8585:8585"), which Docker binds to 0.0.0.0 --
+      # every other backend port in this file is deliberately loopback-only
+      # (see MySQL/OpenSearch above), so this was the one unexplained
+      # inconsistency H4 in the hardening plan flagged. Unlike those two raw
+      # data ports, though, this *is* the platform's human-facing catalog UI
+      # -- there's a legitimate reason someone might want to reach it from
+      # another machine on their LAN -- so the fix here is the same pattern
+      # already used for MCP_HOST: configurable, secure-by-default (loopback
+      # unless deliberately opted out via OPENMETADATA_HOST in .env), rather
+      # than silently either-or.
+      - "${OPENMETADATA_HOST:-127.0.0.1}:8585:8585"
     environment:
       - DB_HOST=openmetadata_db
       - DB_PORT=3306
@@ -96,6 +162,9 @@ services:
         condition: service_healthy
       openmetadata_search:
         condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
     healthcheck:
       test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8585/api/v1/system/version || exit 1"]
       interval: 15s
@@ -127,10 +196,19 @@ services:
       # naming only that procedure, not the `apoc.*` wildcard.
       - NEO4J_dbms_memory_heap_initial__size=512m
       - NEO4J_dbms_memory_heap_max__size=1024m
+      # Previously unset, which lets Neo4j auto-size the page cache against
+      # *host* RAM rather than this container's 1536m limit -- a likely
+      # OOM-kill source on a host with more memory than the container is
+      # actually allowed to use. 256m leaves headroom under the 1536m limit
+      # alongside the 1024m max heap and the JVM's own overhead.
+      - NEO4J_dbms_memory_pagecache_size=256m
     volumes:
       - ./neo4j/data:/data
       - ./neo4j/logs:/logs
       - ./neo4j/import:/var/lib/neo4j/import
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
     healthcheck:
       test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:7474 || exit 1"]
       interval: 10s
@@ -178,8 +256,14 @@ services:
       - CUBEJS_API_SECRET=${CUBEJS_API_SECRET}
       - CUBEJS_TELEMETRY=false
     volumes:
-      - ./cube/model:/cube/conf/model
-      - ./cube/cube.js:/cube/conf/cube.js
+      # :ro -- cube.js in particular *is* the auth implementation
+      # (checkAuth); nothing running inside this container has a legitimate
+      # reason to modify either mount (Q14).
+      - ./cube/model:/cube/conf/model:ro
+      - ./cube/cube.js:/cube/conf/cube.js:ro
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
     healthcheck:
       test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:4000/readyz', r => process.exit(r.statusCode < 500 ? 0 : 1)).on('error', () => process.exit(1))"]
       interval: 10s
@@ -200,7 +284,17 @@ services:
         limits:
           memory: 512m
     volumes:
-      - ./catalog/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./catalog/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      # Previously no volume at all for /prometheus -- every metric sample,
+      # not just dashboards/alerts, was destroyed on container recreate
+      # (Q14). Named volume rather than a bind mount: the image runs as a
+      # fixed non-root UID (nobody, 65534) that doesn't necessarily match
+      # any host user, so a bind mount risks a permission mismatch a named
+      # volume (Docker-managed ownership) avoids.
+      - prometheus_data:/prometheus
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
     healthcheck:
       test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:9090/-/healthy || exit 1"]
       interval: 15s
@@ -222,9 +316,20 @@ services:
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
       - GF_USERS_ALLOW_SIGN_UP=false
     volumes:
-      - ./catalog/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources
-      - ./catalog/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards
-      - ./catalog/grafana/dashboards:/etc/grafana/dashboards
+      - ./catalog/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./catalog/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./catalog/grafana/dashboards:/etc/grafana/dashboards:ro
+      # Previously no volume at all for /var/lib/grafana -- every dashboard
+      # edit, annotation, and API key was destroyed on container recreate,
+      # not just the provisioned-from-disk dashboards (Q14). Named volume
+      # for the same host-UID-mismatch reason as Prometheus's, above.
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://127.0.0.1:3000/api/health || exit 1"]
       interval: 15s
@@ -254,6 +359,21 @@ services:
       resources:
         limits:
           memory: 512m
+    # Previously no depends_on at all, so startup order against the two
+    # compose-internal services this container actually queries (Neo4j,
+    # Cube.js) was undefined -- it still self-heals either way (query_pg/
+    # query_neo4j fail per-call and log, they don't crash the process), but
+    # there's no reason to let it start racing them when compose can express
+    # the real dependency. PostgreSQL/Supabase is not expressible here since
+    # it isn't a compose service at all -- see D1/CLAUDE.md.
+    depends_on:
+      neo4j:
+        condition: service_healthy
+      cube:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
     healthcheck:
       test: ["CMD", "python3", "-c", "import socket; socket.create_connection(('127.0.0.1', 8001), timeout=3).close()"]
       interval: 15s
@@ -286,4 +406,11 @@ services:
       # (clearly-tagged) retrieval instead.
       - ALLOW_DEGRADED_EMBEDDINGS=${ALLOW_DEGRADED_EMBEDDINGS:-0}
       - EMBEDDING_MODEL_NAME=${EMBEDDING_MODEL_NAME:-sentence-transformers/all-MiniLM-L6-v2}
+
+volumes:
+  # Named (not bind-mounted): both images run as a fixed non-root UID that
+  # doesn't necessarily match any host user, so Docker-managed ownership
+  # avoids a permission mismatch a bind mount would risk.
+  prometheus_data:
+  grafana_data:
 

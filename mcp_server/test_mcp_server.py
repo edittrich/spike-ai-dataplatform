@@ -114,6 +114,19 @@ async def test_mcp_server():
     print("\n5. `check_data_quality('deposit_account')`:")
     await call_and_check("check_data_quality", {"table_name": "deposit_account"}, "check_data_quality")
 
+    # Q9 in the hardening plan: "hybrid_rag_search is registration-checked but
+    # never invoked." It's wrapped in try/except RuntimeError (see
+    # financial_data_mcp_server.py) specifically so it degrades to a clean
+    # error string rather than raising when the embedding model isn't
+    # installed (as in CI) -- so it's safe to actually call here like every
+    # other tool, instead of only checking its registration.
+    print("\n6. `hybrid_rag_search('What is the AML risk rating for high-value customers?')`:")
+    await call_and_check(
+        "hybrid_rag_search",
+        {"prompt": "What is the AML risk rating for high-value customers?"},
+        "hybrid_rag_search",
+    )
+
     print()
     if failures:
         print(f"❌ Enterprise FastMCP Server Tool Verification FAILED ({len(failures)} check(s) failed):")
