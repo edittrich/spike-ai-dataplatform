@@ -419,14 +419,87 @@ services:
       start_period: 30s
 
   # ===========================================================================
-  # 3. Open-Source Semantic Layer (Cube.js Engine)
+  # 3. Open-Source Semantic Layer (Cube.js Engine + Cube Store)
   # ===========================================================================
+  # H1 (hardening plan): standalone Cube Store service, added specifically to
+  # unblock CUBEJS_DEV_MODE=false below -- production mode requires a real
+  # cache/queue driver (CUBEJS_CUBESTORE_HOST/PORT); dev mode's bundled
+  # `cubestore-dev` (still used by H3/D9's pre_aggregations work in earlier
+  # phases) only exists inside a dev-mode `cube` process. Single-instance,
+  # non-clustered Cube Store -- upstream's own docs call this "usually
+  # unsuitable for production," but that's exactly the same single-operator
+  # local-PoC scale tradeoff already accepted throughout this platform (single
+  # Postgres instance, single Neo4j instance, no HA anywhere); a real
+  # multi-node router/worker Cube Store cluster would be disproportionate.
+  # All three of its ports (HTTP for cube's own queries, MySQL-wire, and the
+  # status probe) are explicitly bound to loopback (H4's established pattern
+  # for internal services under network_mode: host) via CUBESTORE_*_BIND_ADDR
+  # -- verified live these are genuine, working env vars (`grep -a -o
+  # 'CUBESTORE_[A-Z_]*'` against the binary), not guessed from partial docs.
+  cubestore:
+    image: cubejs/cubestore:v1.7.17
+    container_name: cube_store
+    restart: always
+    network_mode: "host"
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777
+    deploy:
+      resources:
+        limits:
+          memory: 768m
+    environment:
+      - CUBESTORE_HTTP_BIND_ADDR=127.0.0.1:3030
+      - CUBESTORE_BIND_ADDR=127.0.0.1:3306
+      - CUBESTORE_STATUS_BIND_ADDR=127.0.0.1:3031
+      - CUBESTORE_TELEMETRY=false
+    volumes:
+      # Persists metastore + partition data across container recreates --
+      # same reasoning as prometheus_data/grafana_data (Q14): without this,
+      # every pre_aggregation rollup silently rebuilds from scratch on
+      # every restart, not data loss (a regenerable cache) but real,
+      # avoidable rebuild cost.
+      - cubestore_data:/cube/.cubestore
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+    healthcheck:
+      # /readyz confirmed live to return 200 (verified every other path
+      # under the status port 404s except /readyz and /livez), but this
+      # image has neither wget nor curl (verified live: only Debian
+      # coreutils/bash) -- so the check is a bash /dev/tcp connect against
+      # the status port instead of an HTTP request, same class of
+      # TCP-reachability check mcp_sidecar's own healthcheck uses for the
+      # identical "no HTTP client available" reason.
+      test: ["CMD", "bash", "-c", "echo > /dev/tcp/127.0.0.1/3031"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
   cube:
     image: cubejs/cube:v0.35
     container_name: cube_semantic_layer
     restart: always
     network_mode: "host"
     read_only: true
+    # H1: production mode (CUBEJS_REFRESH_WORKER=true below) writes
+    # temporary CSV export/import staging files to /tmp while building
+    # pre_aggregations -- dev mode's embedded cubestore-dev never needed
+    # this (the old cube_store_data mount at /cube/conf/.cubestore covered
+    # its own, different write path). Verified live: without this, every
+    # pre-aggregation build failed with "EROFS: read-only file system,
+    # open '/tmp/<hash>'". Short-form `path:options` string (same as
+    # neo4j's /tmp below, for the same reason: the long `volumes:`-with-
+    # `type: tmpfs` form used elsewhere in this file works too here, but
+    # this form's `mode=1777` is parsed as real octal directly, unlike
+    # that form's `mode:` field -- see Q14's tmpfs-mode comment on
+    # openmetadata_db for the full decimal-vs-octal explanation).
+    tmpfs:
+      - /tmp:mode=1777
+    depends_on:
+      cubestore:
+        condition: service_healthy
     deploy:
       resources:
         limits:
@@ -436,8 +509,14 @@ services:
       - CUBEJS_DB_HOST=${POSTGRES_HOST:-127.0.0.1}
       - CUBEJS_DB_PORT=54322
       - CUBEJS_DB_NAME=${POSTGRES_DB:-postgres}
-      - CUBEJS_DB_USER=${POSTGRES_USER:-postgres}
-      - CUBEJS_DB_PASS=${POSTGRES_PASSWORD}
+      # H1: connects as the least-privilege cube_readonly role (see
+      # supabase/migrations/20260808150000_create_cube_readonly_role.sql),
+      # not the postgres superuser this previously defaulted to -- Cube.js
+      # only ever issues SELECT queries against financial/ref; superuser
+      # was never functionally required. A deliberate sibling of C2's
+      # mcp_readonly, not a shared login -- see the migration's own comment.
+      - CUBEJS_DB_USER=${CUBE_PG_READONLY_USER:-cube_readonly}
+      - CUBEJS_DB_PASS=${CUBE_PG_READONLY_PASSWORD}
       - CUBEJS_DB_SCHEMA=financial
       - CUBEJS_PORT=4000
       # No CUBEJS_SQL_PORT: the Postgres-wire SQL API it would open has no
@@ -445,18 +524,33 @@ services:
       # CUBEJS_SQL_PASSWORD configured), and nothing in this repo uses it --
       # leaving it enabled meant an unauthenticated query interface to the
       # semantic layer on a network_mode: host port.
-      # CUBEJS_DEV_MODE stays `true` -- tried flipping this to `false` as part
-      # of the same hardening pass that removed CUBEJS_SQL_PORT above, but
-      # production mode requires a separate Cube Store service for its
-      # cache/queue driver (CUBEJS_CUBESTORE_HOST/PORT), which isn't deployed
-      # in this compose file; every query fails without it. Disabling dev mode
-      # is still the right target -- it serves the Developer Playground and
-      # loosens some defaults on a network_mode: host port -- but it needs a
-      # Cube Store service added first, not a one-line flip. checkAuth in
-      # cube/cube.js itself is enforced in both modes (verified), so the
-      # authentication story this platform relies on is unaffected either way.
-      - CUBEJS_DEV_MODE=true
+      # H1: CUBEJS_DEV_MODE=false, now that the cubestore service above
+      # gives production mode a real cache/queue driver to talk to
+      # (CUBEJS_CUBESTORE_HOST/PORT below) -- verified live: the Developer
+      # Playground is gone (production mode's own behavior, not a separate
+      # toggle), and checkAuth's role-based enforcement (see cube/cube.js)
+      # is unaffected -- it was already enforced in both modes before this
+      # flip. A real, live-discovered gap this flip introduced: dev mode
+      # auto-builds a pre_aggregation's partitions on first query; without
+      # a refresh worker, production mode does not, so the 4 rollups from
+      # H3/D9 failed with "No pre-aggregation partitions were built yet"
+      # on every query until CUBEJS_REFRESH_WORKER=true below -- the
+      # documented single-node pattern (same instance also acts as its own
+      # refresh worker) rather than a separate refresh-worker container,
+      # consistent with this being a single-operator local PoC, not a
+      # multi-node deployment.
+      - CUBEJS_DEV_MODE=false
+      - CUBEJS_CUBESTORE_HOST=127.0.0.1
+      - CUBEJS_CUBESTORE_PORT=3030
+      - CUBEJS_REFRESH_WORKER=true
+      # H1: two real, independently-issued roles (see cube/cube.js's
+      # checkAuth/queryRewrite) instead of one shared secret granting every
+      # cube -- CUBEJS_API_SECRET is the privileged role (used by
+      # mcp_sidecar/hybrid_rag_retriever.py, includes AML-risk-restricted
+      # cubes/measures); CUBEJS_API_SECRET_RESTRICTED is a second, real
+      # token for general BIAN/FIBO access without AML risk classifications.
       - CUBEJS_API_SECRET=${CUBEJS_API_SECRET}
+      - CUBEJS_API_SECRET_RESTRICTED=${CUBEJS_API_SECRET_RESTRICTED}
       - CUBEJS_TELEMETRY=false
     volumes:
       # :ro -- cube.js in particular *is* the auth implementation
@@ -464,15 +558,6 @@ services:
       # reason to modify either mount (Q14).
       - ./cube/model:/cube/conf/model:ro
       - ./cube/cube.js:/cube/conf/cube.js:ro
-      # Phase 4 (Part 5 item 6 / H3): CUBEJS_DEV_MODE=true bundles an embedded
-      # `cubestore-dev` process (verified live via `find` inside the container
-      # -- /cube/conf/.cubestore) that materializes pre_aggregations rollups.
-      # Named volume, not a bind mount (same reasoning as prometheus_data/
-      # grafana_data below): without it, every rollup is silently rebuilt from
-      # scratch on the next container recreate -- not data loss (it's a
-      # regenerable cache, unlike Prometheus/Grafana's history), but real,
-      # avoidable rebuild cost this closes for free.
-      - cube_store_data:/cube/conf/.cubestore
     security_opt:
       - no-new-privileges:true
     logging: *default-logging
@@ -985,7 +1070,13 @@ volumes:
   prometheus_data:
   grafana_data:
   tempo_data:
-  cube_store_data:
+  # H1: renamed from cube_store_data (dev-mode's bundled cubestore-dev
+  # inside the `cube` container itself, now unused now that CUBEJS_DEV_MODE
+  # is false) to cubestore_data, mounted into the new standalone
+  # `cubestore` service instead. The old volume's cached rollup data is not
+  # migrated -- it's a regenerable cache (same reasoning as the original
+  # comment on this volume), not data loss.
+  cubestore_data:
   jmx_exporter_agent:
   alertmanager_data:
 

@@ -62,12 +62,14 @@ anything depending on them uses `condition: service_started` rather than `servic
 `neo4j_jmx_agent_init` is a one-shot init container (`restart: "no"`), not a long-running service, so
 it has no healthcheck either -- `neo4j` gates on it via `condition: service_completed_successfully`.
 `openmetadata_server` gates on `openmetadata_db`/`openmetadata_search`, `mcp_sidecar` gates on
-`neo4j`/`cube`, `grafana` gates on `prometheus` (healthy) and `tempo` (started), `otel_collector` gates
+`neo4j`/`cube`, `cube` itself gates on `cubestore` (H1), `grafana` gates on `prometheus` (healthy) and
+`tempo` (started), `otel_collector` gates
 on `tempo` (started), and `mysqld_exporter` gates on `openmetadata_db` (healthy) — all via `depends_on`
 (fixes real startup races — see Troubleshooting). Every service also sets
 `security_opt: no-new-privileges:true` and a bounded `logging:` driver; Prometheus, Grafana, Tempo,
-Cube.js's embedded `cubestore-dev`, and the Neo4j JMX agent's jar persist to named volumes
-(`prometheus_data`/`grafana_data`/`tempo_data`/`cube_store_data`/`jmx_exporter_agent`, plus
+the standalone `cubestore` service (H1 — production mode's real Cube Store, not dev mode's embedded
+`cubestore-dev`), and the Neo4j JMX agent's jar persist to named volumes
+(`prometheus_data`/`grafana_data`/`tempo_data`/`cubestore_data`/`jmx_exporter_agent`, plus
 `alertmanager_data`) instead of losing all history (or, for the two agent/jar cases, having to
 re-download/rebuild) on every recreate; config bind mounts (Cube.js's model/`cube.js`, Prometheus's
 config + rules, Grafana's provisioning, `tempo.yaml`, `otel-collector-config.yaml`,
@@ -259,23 +261,29 @@ Operational quirks worth knowing before you conclude something in your own setup
   degraded (clearly-tagged) retrieval instead. Running `scripts/hybrid_rag_retriever.py` directly on
   the host works normally if `sentence-transformers`/`torch` are installed there (`pip install -r
   requirements.txt`). See `scripts/_embedding_backend.py`.
-- **`CUBEJS_DEV_MODE` is still `true`.** Disabling it is the right long-term move (dev mode serves the
-  Developer Playground and loosens some defaults on a `network_mode: host` port), but production mode
-  requires a Cube Store service for its cache/queue driver that isn't deployed in this compose file —
-  flipping the flag alone breaks every query (`CUBEJS_CUBESTORE_HOST`/`PORT` not set). `checkAuth` in
-  `cube/cube.js` is enforced in both modes (verified live), so authentication itself isn't weaker in
-  dev mode — only the Playground/relaxed-defaults surface is. Also still open in the same area:
-  `checkAuth` compares the bearer token with `!==` rather than a timing-safe comparison (the MCP
-  sidecar's `hmac.compare_digest` got this right; Cube.js never did), it sets an empty
-  `req.securityContext = {}` so there is no row-level/tenant authorization — one secret grants every
-  cube — and Cube.js still connects to Postgres as the `postgres` superuser rather than a restricted
-  role. **Accepted limitation — not planned; do not implement a fix for any part of this (Cube Store
-  deployment, timing-safe compare, `queryRewrite`-based row-level/tenant authorization via
-  `securityContext`, or a restricted Cube.js DB role) without an explicit request.** Note:
-  `cube/cube.js` *does* now define a `queryRewrite` (added for H2, below) — that one blocks specific
-  special-category-PII *columns* unconditionally for every caller; it does not touch
-  `req.securityContext` and implements no per-tenant/per-role *row* filtering, so it doesn't overlap
-  with the row-level-authorization gap this accepted limitation covers.
+- **H1: `CUBEJS_DEV_MODE` is now `false` (production mode), with a real 2-role authorization model —
+  no longer an accepted limitation, fixed on explicit request.** A standalone `cubestore` service
+  (`cubejs/cubestore:v1.7.17`, single-instance — the same single-operator local-PoC scale tradeoff
+  already accepted throughout this platform) gives production mode a real cache/queue driver
+  (`CUBEJS_CUBESTORE_HOST`/`PORT`); `cube` also runs as its own refresh worker
+  (`CUBEJS_REFRESH_WORKER=true`), which production mode needs to actually build `pre_aggregations`
+  rollups (dev mode did this implicitly on first query; production mode does not without a refresh
+  worker — a real, live-discovered gap, not assumed). `checkAuth` in `cube/cube.js` now compares
+  bearer tokens with `crypto.timingSafeEqual` instead of `!==`, and recognizes **two** real,
+  independently-issued tokens: `CUBEJS_API_SECRET` (privileged — full access) and
+  `CUBEJS_API_SECRET_RESTRICTED` (restricted — general BIAN/FIBO access only). `queryRewrite`'s
+  `AML_RESTRICTED_MEMBERS` set enforces the boundary: AML risk classification fields
+  (`party_role_customer.aml_risk_rating`/`high_aml_risk_count`/`high_aml_risk_ratio`,
+  `ref_country.is_high_risk_aml`/`high_risk_aml_country_count`,
+  `ref_nace_industry.risk_level`/`high_risk_industry_count`) require the privileged role — real
+  compliance-sensitive data, not an invented tenant dimension. A genuine bug caught live while
+  verifying this: `collectReferencedMembers` (H2's PII-masking helper, reused here) only walked
+  `dimensions`/`timeDimensions`/`filters`, never `measures` — an AML-restricted *measure* queried via
+  `{"measures": [...]}` alone sailed straight through the check unblocked until fixed. Cube.js also
+  now connects to Postgres as the least-privilege `cube_readonly` role (see
+  `supabase/migrations/20260808150000_create_cube_readonly_role.sql`) instead of the `postgres`
+  superuser — a deliberate sibling of `mcp_readonly`, not a shared login. Configure both roles'
+  passwords with `python3 scripts/configure_readonly_role.py`.
 - **H2: `public: false` on a Cube.js dimension does not, by itself, block a REST query against it in
   this Cube.js version.** Verified live by reading `api-gateway`'s own source: `cube.public === false`
   is checked only in `graphql.js` (GraphQL schema generation), never in the REST `/load` query path. A
