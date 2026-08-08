@@ -42,7 +42,7 @@ docker compose restart <service>
 
 `scripts/bootstrap_platform.sh` runs the full sequence below (this plus the data pipeline) in one command from an empty checkout.
 
-`package.json`'s `cube:*`, `neo4j:*`, and `catalog:*` npm scripts point at `cube/docker-compose.yml`, `neo4j/docker-compose.yml`, and `catalog/docker-compose.yml` — those per-service compose files were consolidated into the root `docker-compose.yml` and currently don't exist on disk. Use the plain `docker compose` commands above instead of those npm scripts.
+`package.json` used to have `cube:*`, `neo4j:*`, and `catalog:*` npm scripts pointing at `cube/docker-compose.yml`, `neo4j/docker-compose.yml`, and `catalog/docker-compose.yml` — those per-service compose files were consolidated into the root `docker-compose.yml` a while ago and never existed again on disk, so all 9 scripts had been broken since (Q12/Q14). Removed rather than fixed: their functionality is exactly the plain `docker compose` commands above, so re-pointing them at the root compose file would just be a longer way to type the same thing. Use the plain `docker compose` commands above.
 
 ### Syntax check / verification
 
@@ -53,6 +53,10 @@ python3 -m py_compile scripts/*.py mcp_server/*.py                    # syntax c
 python3 -m ruff check --select E9,F821,F822,F823 scripts mcp_server   # undefined-name/syntax lint (blocking)
 python3 -m ruff check --select F scripts mcp_server                   # broader style lint (informational only)
 python3 -m pip_audit -r requirements.txt                              # dependency CVE scan (informational only)
+python3 -m bandit -r scripts mcp_server -ll                           # Python security static analysis (informational only) --
+                                                                        # the local-OSS equivalent to CodeQL used here instead (Q14):
+                                                                        # CodeQL/Dependabot are GitHub-hosted services with no
+                                                                        # standalone local equivalent, unlike bandit/pip_audit
 python3 -m pytest tests/ -v                             # negative security tests, auth middleware tests, contract/schema drift check
 python3 scripts/ai_safety_guardrails.py                 # PII redaction / prompt-injection / read-only-query self-test
 python3 scripts/llmops_telemetry.py                     # telemetry tracing self-test

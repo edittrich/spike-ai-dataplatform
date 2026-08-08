@@ -23,6 +23,19 @@ import sys
 
 from mcp_server.financial_data_mcp_server import mcp
 
+# Q10 (hardening plan) named this alongside the other two duplicated tool
+# schemas (docstrings, and scripts/ollama_agentic_tool_runner.py's
+# OLLAMA_TOOLS literal) as a "three sources of truth" problem. The other two
+# are now genuinely consolidated: OLLAMA_TOOLS is derived at runtime from
+# mcp.list_tools() instead of hand-copied. This hardcoded name set is
+# deliberately NOT collapsed the same way -- if it instead asked
+# `mcp.list_tools()` what's registered and compared that against itself, the
+# test would be vacuous (it would always pass, catching nothing). Its whole
+# job is to be an independent, hand-maintained expectation that a real
+# accidental tool removal/rename fails against -- exactly the same role any
+# other regression test's hardcoded expected value plays. Update this set
+# deliberately when a tool is intentionally added/removed/renamed; treat a
+# failure here as a real signal, not friction to route around.
 EXPECTED_TOOLS = {
     "search_data_catalog",
     "query_semantic_metrics",

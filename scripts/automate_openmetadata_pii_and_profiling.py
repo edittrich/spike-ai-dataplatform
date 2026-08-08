@@ -35,7 +35,11 @@ load_env()
 # must be imported after load_env() -- see its module docstring.
 from scripts._openmetadata_client import api_get, api_put, api_post  # noqa: E402
 
-def query_pg(sql):
+def query_pg(sql: str) -> str:
+    """Runs one SQL statement via `docker exec ... psql -t -A` and returns
+    its raw stdout (pipe-delimited for multi-column results). Raises
+    subprocess.CalledProcessError on failure (check=True) -- callers must
+    not treat a caught exception here as "zero rows" (Q4)."""
     cmd = [
         "docker", "exec", "supabase_db_ai-dataplatform", "psql",
         "-U", "postgres", "-d", "postgres", "-t", "-A", "-c", sql
@@ -43,7 +47,12 @@ def query_pg(sql):
     res = subprocess.run(cmd, capture_output=True, text=True, check=True)
     return res.stdout.strip()
 
-def run_pii_classification():
+def run_pii_classification() -> None:
+    """Fetches every registered table's columns from OpenMetadata, tags any
+    column matching PII_SPECIAL_PATTERNS/PII_PERSONAL_PATTERNS (see
+    scripts/_pii_classification.py) with the matching
+    PersonalData.SpecialCategory/PersonalData.Personal tag, and PUTs the
+    updated column list back for any table that changed."""
     print("\n🔍 Phase 1: Automated PII & Sensitivity Classification")
     print("---------------------------------------------------------")
     
@@ -96,9 +105,13 @@ def run_pii_classification():
             }
             api_put("tables", put_payload)
 
-    print(f"✅ Successfully verified and tagged sensitive PII columns across catalog entities.")
+    print("✅ Successfully verified and tagged sensitive PII columns across catalog entities.")
 
-def run_data_profiling():
+def run_data_profiling() -> None:
+    """Computes row counts and per-column null/distinct counts for every
+    registered table's first 5 columns and publishes them to OpenMetadata's
+    tableProfile endpoint. Skips (rather than fabricates a stat for) any
+    table/column whose query fails -- see the Q4 comments below."""
     print("\n📊 Phase 2: Automated Real-Time Data Profiling & Statistics")
     print("------------------------------------------------------------")
 
@@ -125,11 +138,21 @@ def run_data_profiling():
             print(f"  ⚠️ Skipping unknown table `{schema_name}.{tbl_name}` (not in information_schema).")
             continue
 
+        # Q4 (hardening plan): a failed COUNT(*) used to silently become
+        # `row_count = 0` -- indistinguishable from the table genuinely being
+        # empty, and published to OpenMetadata as a real "0 rows" profile
+        # (the same "broken DB looks like an empty one" shape
+        # build_knowledge_graph.py's run_psql_json had, fixed there by
+        # raising). A profiling job is a batch over many tables, so raising
+        # here would abort every remaining table over one query failure --
+        # skipping just this table's profile, loudly, is the correct
+        # granularity instead of either extreme.
         try:
             row_cnt_str = query_pg(f"SELECT COUNT(*) FROM {schema_name}.{tbl_name};")
             row_count = int(row_cnt_str)
-        except Exception:
-            row_count = 0
+        except Exception as e:
+            print(f"  ❌ Skipping profile for `{schema_name}.{tbl_name}`: row count query failed: {e}")
+            continue
 
         columns = tbl.get("columns", [])
         column_profiles = []
@@ -149,9 +172,14 @@ def run_data_profiling():
                 """)
                 non_null_cnt, dist_cnt = [int(x) for x in col_stats_str.split("|")]
                 null_cnt = max(0, row_count - non_null_cnt)
-            except Exception:
-                null_cnt = 0
-                dist_cnt = row_count
+            except Exception as e:
+                # Q4: previously fabricated `null_cnt = 0, dist_cnt = row_count`
+                # here -- a fake "0% null, every value unique" stat published
+                # to the catalog as if it were real, on any query failure.
+                # Skip this one column's profile entry entirely instead of
+                # publishing invented numbers.
+                print(f"  ❌ Skipping column profile for `{schema_name}.{tbl_name}.{col_name}`: stats query failed: {e}")
+                continue
 
             column_profiles.append({
                 "name": col_name,
@@ -175,13 +203,18 @@ def run_data_profiling():
         if res:
             print(f"  📈 Profiled {schema_name}.{tbl_name}: {row_count:,} rows, {len(columns)} columns")
 
-def trigger_reindex():
+def trigger_reindex() -> None:
+    """Triggers OpenMetadata's SearchIndexingApplication so the tags/
+    profiles just written render in the catalog UI/search immediately
+    instead of waiting for the next scheduled reindex."""
     print("\n🔄 Phase 3: Triggering OpenSearch Reindexing")
     print("---------------------------------------------")
     res = api_post("apps/trigger/SearchIndexingApplication")
     print(f"  ⚡ SearchIndexApp Trigger Status: {res if res else 'Triggered'}")
 
-def main():
+def main() -> None:
+    """Runs all three phases in order: PII tagging, data profiling, then
+    an OpenSearch reindex so both are immediately visible in the catalog."""
     print("🚀 Running Automated PII Tagging & Data Quality Profiling Pipeline...")
     run_pii_classification()
     run_data_profiling()

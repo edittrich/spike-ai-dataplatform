@@ -2,6 +2,19 @@
 # list -- catalog/Dockerfile.exporter (the standalone fake-telemetry container this
 # file was originally shared with) was removed; the MCP sidecar now serves real
 # Prometheus metrics itself. Kept under this name to avoid an unrelated rename.
+#
+# Q12: this is a deliberate MINIMAL SUBSET of the root requirements.txt, not
+# an independently-drifted copy -- the mcp_sidecar image doesn't need (and
+# should not pay the multi-hundred-MB build cost of) sentence-transformers/
+# torch/transformers (C5: those fail closed in-container by design, see
+# scripts/_embedding_backend.py) or streamlit/pytest (dev/UI-only). Every
+# version bound that DOES appear here should match requirements.txt's for the
+# same package -- previously mcp/uvicorn/starlette's bounds lived only as
+# inline `RUN pip install` args in Dockerfile.mcp itself, a *third* place a
+# version constraint could drift from the other two (verified this isn't
+# hypothetical: Q11's fix added a `<2.0.0` upper bound to requirements.txt
+# after a real breaking change; moved here so it isn't possible to update one
+# file and silently forget the other).
 # NOT requests: mcp_server/financial_data_mcp_server.py and every script it
 # imports use the stdlib's urllib.request, not requests (Q12).
 psycopg2-binary>=2.9.9
@@ -9,6 +22,10 @@ neo4j>=5.18.0
 pyyaml>=6.0.1
 python-dotenv>=1.0.0
 prometheus-client>=0.20.0
+# See requirements.txt's matching comment for why this needs the upper bound.
+mcp>=1.0.0,<2.0.0
+uvicorn>=0.30.0
+starlette>=0.37.0
 # Real distributed-tracing spans -- see scripts/_otel_tracing.py and
 # requirements.txt's matching comment.
 opentelemetry-api>=1.24.0

@@ -56,6 +56,17 @@ supabase/.temp/
 supabase/.branches/
 supabase/snippets/
 .cube/
+# Q14 (hardening plan): generated, non-deterministic artifacts previously
+# committed to git despite being fully regenerated (random UUIDs/values on
+# every run) by scripts/generate_synthetic_data.py and
+# scripts/export_rdf_ontology.py -- every regeneration produced a ~20,000-line
+# diff of no reviewable content. Removed from tracking (`git rm --cached`,
+# files kept on disk); the documented pipeline already generates
+# supabase/seed.sql *before* `supabase db reset` loads it (see CLAUDE.md's
+# canonical pipeline order), so untracking it doesn't change the documented
+# workflow at all.
+supabase/seed.sql
+ontology/instance_knowledge_graph.ttl
 *.db
 *.sqlite
 

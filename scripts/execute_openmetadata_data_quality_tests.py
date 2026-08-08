@@ -102,7 +102,10 @@ TEST_CONFIGS = [
     }
 ]
 
-def query_pg(sql):
+def query_pg(sql: str) -> str:
+    """Runs one SQL statement via `docker exec ... psql -t -A` and returns
+    its raw stdout. Raises subprocess.CalledProcessError on failure
+    (check=True)."""
     cmd = [
         "docker", "exec", "supabase_db_ai-dataplatform", "psql",
         "-U", "postgres", "-d", "postgres", "-t", "-A", "-c", sql
@@ -110,13 +113,19 @@ def query_pg(sql):
     res = subprocess.run(cmd, capture_output=True, text=True, check=True)
     return res.stdout.strip()
 
-def create_or_update_test_case(payload):
+def create_or_update_test_case(payload: dict) -> str:
+    """PUTs one dataQuality testCase and returns its fullyQualifiedName --
+    OpenMetadata's own response if it echoed one back, otherwise the
+    <testSuite>.<name> FQN this script itself would have assigned."""
     res = api_put("dataQuality/testCases", payload)
     if res and isinstance(res, dict) and "fullyQualifiedName" in res:
         return res["fullyQualifiedName"]
     return f"{payload['testSuite']}.{payload['name']}"
 
-def run_data_quality_tests():
+def run_data_quality_tests() -> None:
+    """Runs every assertion in TEST_CONFIGS above (row-count bounds,
+    uniqueness, not-null) against the live database, registers each as an
+    OpenMetadata testCase + result, and prints a pass/fail summary."""
     print("\n🧪 Executing Data Quality Test Suites & Assertions...")
     print("-------------------------------------------------------")
 
@@ -249,7 +258,7 @@ def run_data_quality_tests():
             })
             print(f"    {'✅' if unique_status == 'Success' else '❌'} [{unique_status}] {tbl_name}.{col} Unique: {dup_cnt} duplicates")
 
-    print(f"\n📊 Data Quality Test Execution Summary:")
+    print("\n📊 Data Quality Test Execution Summary:")
     print(f"  ✅ Passed Assertions: {passed_tests}")
     print(f"  ❌ Failed Assertions: {failed_tests}")
 

@@ -26,7 +26,14 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Dict, List, Optional
+from typing import Annotated, Dict, List, Optional
+
+# Q10 (hardening plan): Field(description=...) on each tool parameter below
+# feeds FastMCP's own JSON-Schema generation (mcp.list_tools(), verified live
+# to include these descriptions in each tool's inputSchema) -- the single
+# source of truth scripts/ollama_agentic_tool_runner.py's OLLAMA_TOOLS now
+# derives from at runtime instead of hand-duplicating as a separate literal.
+from pydantic import Field
 
 import psycopg2
 import psycopg2.pool
@@ -36,10 +43,22 @@ from opentelemetry.trace import Status, StatusCode
 from prometheus_client import Counter, Histogram, start_http_server
 from starlette.responses import JSONResponse
 
-try:
-    from mcp.server.fastmcp import FastMCP
-except ImportError:
-    from fastmcp import FastMCP
+# Q11 (hardening plan): this used to fall back to the standalone `fastmcp`
+# package on ImportError. The two are not interchangeable: under `mcp` 1.x,
+# `@mcp.tool()` returns the raw function, which `scripts/ollama_agentic_tool_runner.py`
+# relies on to call tools directly; under standalone `fastmcp` 2.x+, the same
+# decorator returns a `FunctionTool` object and every one of those direct
+# calls raises `TypeError: 'FunctionTool' object is not callable`. Verified
+# live which package actually wins today (both were installed): `mcp` does,
+# since it's tried first and always succeeds -- so the fallback branch was
+# already dead code in practice, silently masking the real risk that a
+# future dependency change (or a fresh install missing `mcp`) would switch
+# to the incompatible API with no signal at all beyond a confusing
+# TypeError deep in the agentic runner. Grepped the whole repo: nothing
+# imports the standalone `fastmcp` package for anything else, so it's
+# removed from requirements.txt/Dockerfile.mcp entirely rather than kept
+# around as an unused fallback.
+from mcp.server.fastmcp import FastMCP
 
 # scripts/ has no __init__.py (namespace package); make it importable regardless
 # of the working directory this module is launched from.
@@ -321,7 +340,9 @@ class BearerAuthMiddleware:
 
 @mcp.tool()
 @track_tool_call
-def search_data_catalog(query: str) -> str:
+def search_data_catalog(
+    query: Annotated[str, Field(description="Catalog search query (e.g. 'deposit_account', 'party')")],
+) -> str:
     """
     Search OpenMetadata Enterprise Catalog for tables, column metadata,
     data products, and W3C FIBO ontology class URIs.
@@ -352,7 +373,10 @@ def search_data_catalog(query: str) -> str:
 
 @mcp.tool()
 @track_tool_call
-def query_semantic_metrics(cube_name: str, measures: List[str]) -> str:
+def query_semantic_metrics(
+    cube_name: Annotated[str, Field(description="Cube name (e.g. 'deposit_balance')")],
+    measures: Annotated[List[str], Field(description="Measure names (e.g. ['total_available_balance'])")],
+) -> str:
     """
     Query Cube.js open-source semantic layer for standardized metrics and KPIs
     (e.g., cube_name='deposit_balance', measures=['total_available_balance']).
@@ -372,7 +396,11 @@ def query_semantic_metrics(cube_name: str, measures: List[str]) -> str:
 
 @mcp.tool()
 @track_tool_call
-def query_knowledge_graph(cypher_query: str) -> str:
+def query_knowledge_graph(
+    cypher_query: Annotated[
+        str, Field(description="Cypher query string (e.g. 'MATCH (l:LoanAgreement) RETURN l LIMIT 5;')")
+    ],
+) -> str:
     """
     Execute multi-hop Cypher queries on Neo4j Knowledge Graph database
     to traverse entity relationships (:Party, :Individual, :Customer, :DepositAccount, :LoanAgreement).
@@ -410,7 +438,9 @@ def query_knowledge_graph(cypher_query: str) -> str:
 
 @mcp.tool()
 @track_tool_call
-def query_financial_database(sql_query: str) -> str:
+def query_financial_database(
+    sql_query: Annotated[str, Field(description="Read-only SQL SELECT query")],
+) -> str:
     """
     Execute read-only SQL queries on Supabase PostgreSQL database schemas (`ref` and `financial`).
     """
@@ -431,7 +461,9 @@ def query_financial_database(sql_query: str) -> str:
 
 @mcp.tool()
 @track_tool_call
-def check_data_quality(table_name: str) -> str:
+def check_data_quality(
+    table_name: Annotated[str, Field(description="Table name (e.g. 'deposit_account')")],
+) -> str:
     """
     Fetch real-time OpenMetadata Data Quality test suite assertions, scorecards, and SLAs.
     """
@@ -478,7 +510,9 @@ def _get_hybrid_retriever():
 
 @mcp.tool()
 @track_tool_call
-def hybrid_rag_search(prompt: str) -> str:
+def hybrid_rag_search(
+    prompt: Annotated[str, Field(description="Natural language prompt")],
+) -> str:
     """
     Execute full 4-tier Hybrid RAG context search (Vector Search + Cypher + Cube.js Metrics + SQL)
     for complex natural language questions.

@@ -146,7 +146,7 @@ or on step 3 — and can run in any order or in parallel.
 - **Neo4j Cypher Manual:** [https://neo4j.com/docs/cypher-manual/current/](https://neo4j.com/docs/cypher-manual/current/)
 - **Cube.js Open-Source Semantic Layer:** [https://cube.dev/docs/](https://cube.dev/docs/)
 - **OpenMetadata Enterprise Catalog (1.3.x):** [https://docs.open-metadata.org/](https://docs.open-metadata.org/)
-- **Anthropic FastMCP Python SDK:** [https://github.com/jlowin/fastmcp](https://github.com/jlowin/fastmcp)
+- **Model Context Protocol Python SDK** (provides `mcp.server.fastmcp.FastMCP`, used throughout `mcp_server/`; pinned `mcp>=1.0.0,<2.0.0` per Q11 in the hardening plan — see `CLAUDE.md`): [https://github.com/modelcontextprotocol/python-sdk](https://github.com/modelcontextprotocol/python-sdk)
 - **Ollama Models & Tool Calling:** [https://ollama.com/library/gemma4](https://ollama.com/library/gemma4)
 - **Prometheus Time-Series Engine:** [https://prometheus.io/docs/introduction/overview/](https://prometheus.io/docs/introduction/overview/)
 - **Grafana Documentation:** [https://grafana.com/docs/grafana/latest/](https://grafana.com/docs/grafana/latest/)

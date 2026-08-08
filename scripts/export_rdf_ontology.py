@@ -17,15 +17,26 @@ PG_CONTAINER = "supabase_db_ai-dataplatform"
 OUTPUT_TTL = "ontology/instance_knowledge_graph.ttl"
 
 def run_psql_json(sql_query):
+    """Q4 (hardening plan): previously returned `[]` on a subprocess failure
+    the same way it did for a legitimately-empty query result -- a broken
+    `docker exec` looked identical to an empty table, and main() would go on
+    to write a technically-valid-but-empty .ttl file and print a success
+    banner regardless (same failure shape build_knowledge_graph.py's
+    run_psql_json had -- fixed there identically, see its comment). Now
+    raises on a real subprocess failure; still returns `[]` only for a
+    genuinely empty result set."""
     wrapped_sql = f"SELECT json_agg(t) FROM ({sql_query}) t;"
     cmd = [
         "docker", "exec", PG_CONTAINER,
         "psql", "-U", "postgres", "-d", "postgres", "-t", "-A", "-c", wrapped_sql
     ]
     res = subprocess.run(cmd, capture_output=True, text=True)
-    if res.returncode != 0 or not res.stdout.strip() or res.stdout.strip() == "[null]":
+    if res.returncode != 0:
+        raise RuntimeError(f"PostgreSQL query failed (docker exec exit {res.returncode}): {res.stderr.strip()}")
+    output = res.stdout.strip()
+    if not output or output == "[null]":
         return []
-    return json.loads(res.stdout.strip())
+    return json.loads(output)
 
 def main():
     print("🚀 Exporting PostgreSQL data to RDF Turtle (.ttl)...")

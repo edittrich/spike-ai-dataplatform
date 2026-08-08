@@ -318,7 +318,15 @@ def main():
             with tab2:
                 st.subheader("Neo4j Multi-Hop Graph Traversal (Cypher Graph-RAG)")
                 graph_data = rag_payload.get("knowledge_graph_context", [])
-                st.code("\n".join(graph_data) if graph_data else "No graph nodes retrieved.")
+                # Real bug, caught while touring this file for Q4: query_neo4j
+                # (like query_pg) has returned list[dict] -- real Python
+                # values, not pipe-delimited/joinable strings -- since Q2's
+                # fix, well before this session. `"\n".join(graph_data)`
+                # crashed with `TypeError: sequence item 0: expected str
+                # instance, dict found` the moment a query returned any real
+                # record. st.json renders a list of dicts natively (same
+                # approach tab3 already used correctly below).
+                st.json(graph_data) if graph_data else st.write("No graph nodes retrieved.")
 
             with tab3:
                 st.subheader("Cube.js Open-Source Semantic Layer Metrics")
@@ -328,7 +336,9 @@ def main():
             with tab4:
                 st.subheader("Supabase PostgreSQL Relational Database SQL Execution")
                 sql_data = rag_payload.get("relational_sql_context", [])
-                st.code("\n".join(sql_data) if sql_data else "No SQL records returned.")
+                # Same Q2/Q4-adjacent bug as tab2 above -- relational_sql_context
+                # is list[dict] too.
+                st.json(sql_data) if sql_data else st.write("No SQL records returned.")
 
             with tab5:
                 st.subheader("AI Safety, PII Masking & Prompt Guardrails Audit")
@@ -340,7 +350,7 @@ def main():
                 st.success(f"✅ Prompt Guardrail Check: {msg}")
                 sample_pii = "Customer John Doe, email: john@example.com, Phone: 555-123-4567, SSN: 123-45-6789"
                 redacted, _ = guardrails.redact_pii(sample_pii)
-                st.markdown(f"**Sample Real-Time PII Masking Test:**")
+                st.markdown("**Sample Real-Time PII Masking Test:**")
                 st.text(f"Original: {sample_pii}\nMasked:   {redacted}")
 
             with tab6:

@@ -26,6 +26,7 @@ import json
 import os
 import urllib.error
 import urllib.request
+from typing import Optional
 
 OPENMETADATA_URL = os.getenv("OPENMETADATA_URL", "http://127.0.0.1:8585/api/v1")
 JWT_TOKEN = os.getenv("OPENMETADATA_JWT_TOKEN", "")
@@ -38,7 +39,13 @@ HEADERS = {
 }
 
 
-def _request(method, endpoint, payload=None, timeout=10):
+def _request(
+    method: str, endpoint: str, payload: Optional[dict] = None, timeout: int = 10
+) -> Optional[dict]:
+    """Issues one OpenMetadata REST call. Returns the parsed JSON body, a
+    `{"status": "success", ...}` placeholder for an empty/non-JSON 2xx body,
+    or None on any connection/HTTP failure (logged here; callers should
+    treat None as "this call failed", not as an empty-but-successful result)."""
     url = f"{OPENMETADATA_URL}/{endpoint}"
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
     req = urllib.request.Request(url, data=data, headers=HEADERS, method=method)
@@ -63,13 +70,21 @@ def _request(method, endpoint, payload=None, timeout=10):
         return None
 
 
-def api_get(endpoint):
+def api_get(endpoint: str) -> Optional[dict]:
+    """GET https://<OPENMETADATA_URL>/<endpoint>. See _request's docstring
+    for the return contract."""
     return _request("GET", endpoint)
 
 
-def api_put(endpoint, payload):
+def api_put(endpoint: str, payload: dict) -> Optional[dict]:
+    """PUT https://<OPENMETADATA_URL>/<endpoint> with a JSON body -- the
+    idempotent create-or-update every OpenMetadata entity type supports.
+    See _request's docstring for the return contract."""
     return _request("PUT", endpoint, payload)
 
 
-def api_post(endpoint, payload=None):
+def api_post(endpoint: str, payload: Optional[dict] = None) -> Optional[dict]:
+    """POST https://<OPENMETADATA_URL>/<endpoint>, e.g. to trigger an
+    application (SearchIndexingApplication) rather than create an entity.
+    See _request's docstring for the return contract."""
     return _request("POST", endpoint, payload)

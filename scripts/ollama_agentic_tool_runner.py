@@ -27,6 +27,7 @@ from scripts.llmops_telemetry import LLMOpsTelemetry
 load_env()
 
 from mcp_server.financial_data_mcp_server import (
+    mcp,
     search_data_catalog,
     query_semantic_metrics,
     query_knowledge_graph,
@@ -41,97 +42,41 @@ DEFAULT_MODEL = "gemma4:latest"
 # -----------------------------------------------------------------------------
 # OLLAMA NATIVE TOOL DEFINITIONS (JSON SCHEMA)
 # -----------------------------------------------------------------------------
-OLLAMA_TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "search_data_catalog",
-            "description": "Search OpenMetadata Enterprise Catalog for tables, column metadata, data products, and W3C FIBO ontology class URIs.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Catalog search query (e.g. 'deposit_account', 'party')"}
-                },
-                "required": ["query"]
-            }
+# Q10 (hardening plan): this used to be a ~90-line hardcoded literal
+# duplicating each tool's name/description/parameter schema -- one of three
+# independent copies (the others: each function's own docstring, and
+# mcp_server/test_mcp_server.py's EXPECTED_TOOLS name set, which is a
+# legitimate independent regression fixture, not duplication in this sense).
+# Now derived at import time from the FastMCP server's own tool registration
+# (mcp.list_tools()) -- the real JSON Schema FastMCP itself generates from
+# each tool function's type hints and `Annotated[..., Field(description=...)]`
+# parameter hints (see financial_data_mcp_server.py's tool signatures). One
+# source of truth instead of two: change a tool's signature or description
+# there, and this reflects it automatically with no separate edit needed.
+def _build_ollama_tools() -> List[Dict[str, Any]]:
+    async def _list_tools():
+        return await mcp.list_tools()
+
+    tools = asyncio.run(_list_tools())
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": t.name,
+                # FastMCP's description is the tool's docstring verbatim,
+                # including its original indentation/newlines -- collapsed
+                # to a single line here, matching the hand-written literal
+                # this replaces (and what Ollama's own tool-calling examples
+                # expect: a short, flat description string).
+                "description": " ".join((t.description or "").split()),
+                "parameters": t.inputSchema,
+            },
         }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "query_semantic_metrics",
-            "description": "Query Cube.js open-source semantic layer for standardized metrics and KPIs.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "cube_name": {"type": "string", "description": "Cube name (e.g. 'deposit_balance')"},
-                    "measures": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Measure names (e.g. ['total_available_balance'])"
-                    }
-                },
-                "required": ["cube_name", "measures"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "query_knowledge_graph",
-            "description": "Execute multi-hop Cypher queries on Neo4j Knowledge Graph database to traverse entity relationships.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "cypher_query": {"type": "string", "description": "Cypher query string (e.g. 'MATCH (l:LoanAgreement) RETURN l LIMIT 5;')"}
-                },
-                "required": ["cypher_query"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "query_financial_database",
-            "description": "Execute read-only SQL queries on Supabase PostgreSQL database schemas (`ref` and `financial`).",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "sql_query": {"type": "string", "description": "Read-only SQL SELECT query"}
-                },
-                "required": ["sql_query"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "check_data_quality",
-            "description": "Fetch real-time OpenMetadata Data Quality test suite assertions, scorecards, and SLAs.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "table_name": {"type": "string", "description": "Table name (e.g. 'deposit_account')"}
-                },
-                "required": ["table_name"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "hybrid_rag_search",
-            "description": "Execute full 4-tier Hybrid RAG context search (Vector Search + Cypher + Cube.js Metrics + SQL) for complex queries.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "prompt": {"type": "string", "description": "Natural language prompt"}
-                },
-                "required": ["prompt"]
-            }
-        }
-    }
-]
+        for t in tools
+    ]
+
+
+OLLAMA_TOOLS = _build_ollama_tools()
 
 class OllamaAgenticRunner:
     def __init__(self, model_name: str = DEFAULT_MODEL):
@@ -213,7 +158,6 @@ class OllamaAgenticRunner:
                 "stream": False
             }
             
-            t_req_start = time.time()
             req = urllib.request.Request(
                 OLLAMA_CHAT_URL,
                 data=json.dumps(req_body).encode("utf-8"),

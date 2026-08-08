@@ -167,7 +167,12 @@ LINEAGE_MAP = [
     ("ref", "ref_nace_industry", "Cube_RefNaceIndustry", "RefIndustry", "NACE Rev. 2 Industry Reference")
 ]
 
-def sync_openmetadata_lineage():
+def sync_openmetadata_lineage() -> None:
+    """Registers a Cube_* table entity (real measures/dimensions parsed from
+    cube/model/cubes/*.yml, see build_cube_columns_and_lineage above) for
+    every table in LINEAGE_MAP, then creates a table-level lineage edge from
+    the real PostgreSQL table to it -- with columnsLineage wherever a
+    measure/dimension resolves to a bare source column (D4)."""
     print("\n🔗 Phase 1: OpenMetadata Catalog End-to-End Lineage Sync")
     print("---------------------------------------------------------")
 
@@ -266,7 +271,11 @@ def sync_openmetadata_lineage():
     print(f"✅ OpenMetadata Lineage Sync Complete: Created {edge_count} table-level lineage edges "
           f"({column_edge_count} column-level edges within them); {len(skipped_cubes)} tables skipped (no cube definition).")
 
-def sync_neo4j_lineage():
+def sync_neo4j_lineage() -> None:
+    """Mirrors LINEAGE_MAP into Neo4j as its own meta-lineage graph:
+    (:PostgreSQLTable)-[:DERIVES_SEMANTICS_TO]->(:SemanticCube)-[:INSTANTIATES_GRAPH]->(:KnowledgeEntityType),
+    separate from (and describing) the actual instance-data graph
+    build_knowledge_graph.py builds."""
     print("\n🕸️ Phase 2: Neo4j Knowledge Graph Meta-Lineage Sync")
     print("----------------------------------------------------")
 
@@ -297,7 +306,9 @@ def sync_neo4j_lineage():
 
     print("✅ Neo4j Meta-Lineage Sync Complete!")
 
-def main():
+def main() -> None:
+    """Runs both lineage syncs (OpenMetadata catalog, then Neo4j
+    meta-lineage) and triggers a reindex so both render immediately."""
     print("🚀 Starting End-to-End Lineage Sync across PostgreSQL, Cube.js, and Neo4j...")
     sync_openmetadata_lineage()
     sync_neo4j_lineage()

@@ -169,7 +169,10 @@ FIBO_GROUNDING_MAP = {
     }
 }
 
-def main():
+def main() -> None:
+    """Creates the FIBO_Ontology tag classification and applies a FIBO URI
+    tag to each table entity named in FIBO_GROUNDING_MAP above, grounding the
+    catalog's BIAN/FIBO-aligned tables to their real FIBO ontology class."""
     print("🌐 Executing FIBO W3C Class URI Semantic Grounding across Catalog Entities...")
 
     # 1. Create Classification `FIBO_Ontology`

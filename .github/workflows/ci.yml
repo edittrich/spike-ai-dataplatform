@@ -39,7 +39,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install ruff pip-audit pytest
+          pip install ruff pip-audit pytest bandit
 
       - name: Verify Python Code Syntax
         run: |
@@ -106,6 +106,30 @@ jobs:
         uses: hadolint/hadolint-action@v3.1.0
         with:
           dockerfile: mcp_server/Dockerfile.mcp
+
+      - name: Scan Python Source for Common Security Issues (bandit, informational)
+        # Q14 named GitHub CodeQL/Dependabot here specifically. Deliberately
+        # NOT added: this whole engagement's standing constraint is
+        # locally-runnable open-source tooling, and unlike hadolint/gitleaks
+        # above (genuine local OSS binaries where only the Action *wrapper*
+        # executes on GitHub's runner), CodeQL's analysis engine and
+        # Dependabot's alerting are both GitHub-hosted services with no
+        # standalone local equivalent to run instead. bandit is the real
+        # local-OSS substitute for CodeQL's role here (a Python-specific
+        # static security analyzer, pip-installable, runs identically on a
+        # laptop or in CI); Dependabot's role (dependency CVE alerting) is
+        # already covered by the pip-audit step above, which predates this
+        # change. Informational: bandit's default ruleset flags several
+        # patterns already covered by dedicated controls elsewhere in this
+        # codebase (fixed-URL urllib.request.urlopen calls to this
+        # platform's own known services, not user-controllable SSRF; SQL/
+        # Cypher string building already guarded by
+        # scripts/ai_safety_guardrails.py and the C6 parameterization fixes)
+        # -- real signal, but not yet triaged finding-by-finding the way the
+        # blocking pytest suite above was.
+        continue-on-error: true
+        run: |
+          python -m bandit -r scripts mcp_server -ll
 
       - name: Scan for Committed Secrets (gitleaks, informational)
         # gitleaks itself is open-source and runs entirely locally against

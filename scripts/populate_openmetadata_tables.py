@@ -11,6 +11,7 @@ and native COMMENT ON COLUMN descriptions) and registers them directly into Open
 import subprocess
 import sys
 import os
+from typing import Dict, List, Tuple
 
 # scripts/ has no __init__.py (namespace package); make it importable regardless
 # of the working directory this script is launched from.
@@ -23,7 +24,11 @@ load_env()
 # must be imported after load_env() -- see its module docstring.
 from scripts._openmetadata_client import api_put  # noqa: E402
 
-def get_pg_tables():
+def get_pg_tables() -> Dict[Tuple[str, str], List[dict]]:
+    """Introspects `financial`/`ref` via information_schema/pg_catalog and
+    returns {(schema_name, table_name): [column_dict, ...]}, where each
+    column_dict is ready to hand to OpenMetadata's `columns` field
+    (name/dataType/description/ordinalPosition, plus dataLength for VARCHAR)."""
     cmd = [
         "docker", "exec", "supabase_db_ai-dataplatform", "psql",
         "-U", "postgres", "-d", "postgres", "-t", "-A", "-c",
@@ -94,7 +99,14 @@ def get_pg_tables():
         tables[key].append(col_dict)
     return tables
 
-def main():
+def main() -> None:
+    """Registers the PostgreSQL_Financial_Platform database service, its
+    postgres database, the ref/financial schemas, and all 19 real tables
+    (with real columns) into OpenMetadata. Required before
+    ground_fibo_ontology_uris.py, automate_openmetadata_pii_and_profiling.py,
+    register_openmetadata_data_contracts.py, and
+    execute_openmetadata_data_quality_tests.py -- each fetches table entities
+    from the catalog and silently no-ops if this hasn't run first (D1)."""
     print("🚀 Populating OpenMetadata Enterprise Data Catalog with PostgreSQL tables...")
 
     # 1. Create Database Service
@@ -113,7 +125,7 @@ def main():
         }
     }
     print("📦 Creating Database Service: PostgreSQL_Financial_Platform")
-    service_res = api_put("services/databaseServices", service_payload)
+    api_put("services/databaseServices", service_payload)
 
     # 2. Create Database
     db_payload = {
@@ -122,7 +134,7 @@ def main():
         "description": "Primary PostgreSQL Database storing operational schemas."
     }
     print("📦 Creating Database: postgres")
-    db_res = api_put("databases", db_payload)
+    api_put("databases", db_payload)
 
     # 3. Create Schemas
     for schema_name in ["ref", "financial"]:

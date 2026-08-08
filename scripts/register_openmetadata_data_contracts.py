@@ -116,7 +116,11 @@ DATA_PRODUCTS = [
     }
 ]
 
-def main():
+def main() -> None:
+    """Creates the 3 BIAN/FIBO domain entities (DOMAINS) and registers each
+    data product/contract's markdown description against its owning table
+    (D2: this still hand-duplicates contract content as markdown rather than
+    reading contracts/*.yaml as the source of truth -- known, open gap)."""
     print("🚀 Creating Domains & Registering Data Products / Contracts in OpenMetadata Catalog...")
 
     # 1. Create Domains

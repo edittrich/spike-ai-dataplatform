@@ -1,4 +1,12 @@
-FROM python:3.11-slim
+# Q12: pinned by digest, not just tag -- a floating tag (even a specific
+# minor version like `3.11-slim`) can be silently repointed at different
+# image content by the registry; the digest can't be. Verified current as of
+# this pin via `docker pull python:3.11-slim` + `docker inspect
+# --format='{{index .RepoDigests 0}}'`. This intentionally does NOT auto-
+# update on a rebuild -- refresh deliberately (re-pull the tag, re-pin the
+# new digest) to pick up base-image security patches, the same tradeoff any
+# digest pin makes.
+FROM python:3.11-slim@sha256:90744cff8f32887f075c47d747a173ff333e9e98801667af93c357fa9f5e28ff
 
 WORKDIR /app
 
@@ -7,9 +15,17 @@ WORKDIR /app
 # minimums as the root requirements.txt (Q12), so a build today can't
 # silently pull a version with a breaking API change that was never tested
 # against this code, and dev/Docker no longer disagree on what's installed.
+#
+# Q12: mcp/uvicorn/starlette's version bounds used to live only as inline
+# args on the `pip install` line below (a third place they could drift from
+# requirements.txt's matching bounds, independent of this file) -- moved
+# into catalog/requirements.exporter.txt itself, so this is a single,
+# ordinary `-r requirements.txt` install with nothing bolted on separately.
+# NOT "fastmcp": the standalone fastmcp package's FastMCP is API-incompatible
+# with mcp.server.fastmcp's and nothing imports it (Q11, see
+# financial_data_mcp_server.py's import comment).
 COPY catalog/requirements.exporter.txt ./requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt \
-    "mcp>=1.0.0" "fastmcp>=0.1.0" "uvicorn>=0.30.0" "starlette>=0.37.0"
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application source code
 COPY . .

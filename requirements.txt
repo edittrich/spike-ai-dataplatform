@@ -12,8 +12,21 @@ sentence-transformers>=2.2.2
 # multi-hundred-MB unused download (Q12).
 torch>=2.0.0
 transformers>=4.38.0
-mcp>=1.0.0
-fastmcp>=0.1.0
+# Q11/Q12: upper bound is load-bearing, not decorative -- caught live while
+# fixing Q11's fastmcp fallback: a fresh `pip install "mcp>=1.0.0"` (no
+# fastmcp alongside it) resolves mcp 2.0.0, which renamed FastMCP to
+# MCPServer and moved it from mcp.server.fastmcp to mcp.server.mcpserver, a
+# breaking change this codebase (and ollama_agentic_tool_runner.py's direct
+# raw-function tool calls specifically) is written against the 1.x shape
+# of. Reproduced in a clean container before adding this bound: the exact
+# `ModuleNotFoundError: No module named 'mcp.server.fastmcp'` this fix
+# prevents.
+mcp>=1.0.0,<2.0.0
+# NOT the standalone fastmcp package: its FastMCP is API-incompatible with
+# mcp.server.fastmcp's (see mcp_server/financial_data_mcp_server.py's import
+# comment, Q11) and nothing in this repo imports it directly -- it was only
+# ever a same-package-name-different-library fallback that risked silently
+# switching to the incompatible API.
 uvicorn>=0.30.0
 starlette>=0.37.0
 psycopg2-binary>=2.9.9

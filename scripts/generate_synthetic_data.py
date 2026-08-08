@@ -12,7 +12,6 @@ Generates:
   - All tables strictly prefixed by Data Product name (ref_, party_, deposit_, loan_)
 """
 
-import sys
 import uuid
 import random
 from datetime import datetime, timedelta, date

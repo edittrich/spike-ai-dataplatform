@@ -35,7 +35,16 @@ from scripts._neo4j_conn import get_driver  # noqa: E402
 PG_CONTAINER = "supabase_db_ai-dataplatform"
 
 def run_psql_json(sql_query):
-    """Executes SQL against PostgreSQL container and returns parsed JSON array."""
+    """Executes SQL against PostgreSQL container and returns parsed JSON array.
+
+    Q4 (hardening plan): this used to print the error and return `[]` on a
+    subprocess failure -- indistinguishable from the query legitimately
+    returning zero rows. A broken `docker exec` (container down, bad
+    credentials, ...) looked exactly like an empty table, and the rest of
+    `main()` would proceed to build an empty section of the graph before
+    printing "Knowledge Graph Build Complete!" regardless. Now raises, so a
+    real failure actually stops the build instead of silently succeeding at
+    building nothing."""
     wrapped_sql = f"SELECT json_agg(t) FROM ({sql_query}) t;"
     cmd = [
         "docker", "exec", PG_CONTAINER,
@@ -43,8 +52,7 @@ def run_psql_json(sql_query):
     ]
     res = subprocess.run(cmd, capture_output=True, text=True)
     if res.returncode != 0:
-        print(f"PostgreSQL Query Error: {res.stderr}")
-        return []
+        raise RuntimeError(f"PostgreSQL query failed (docker exec exit {res.returncode}): {res.stderr.strip()}")
     output = res.stdout.strip()
     if not output or output == "[null]":
         return []
@@ -54,16 +62,19 @@ def execute_cypher_batch(driver, statements_and_params):
     """Executes a list of (cypher_statement, parameters_dict) tuples against
     Neo4j via the native bolt driver -- parameters are bound server-side
     ($placeholders), never string-interpolated, closing the injection surface
-    the old HTTP+f-string version had (see the C6 finding)."""
+    the old HTTP+f-string version had (see the C6 finding).
+
+    Q4 (hardening plan): this used to catch any exception, print it, and
+    return normally -- a mid-batch Cypher failure (e.g. a bad constraint
+    statement, a connectivity blip) was silently swallowed and every caller
+    in main() proceeded as if the batch had fully succeeded. Now raises, so
+    a real failure actually stops the build."""
     if not statements_and_params:
         return
-    try:
-        with driver.session() as session:
-            for statement, params in statements_and_params:
-                result = session.run(statement, params or {})
-                result.consume()
-    except Exception as e:
-        print(f"Cypher Error: {e}")
+    with driver.session() as session:
+        for statement, params in statements_and_params:
+            result = session.run(statement, params or {})
+            result.consume()
 
 SCHEMA_DDL_PATH = os.path.join(
     os.path.dirname(__file__), "..", "neo4j", "schema", "constraints_and_indexes.cypher"

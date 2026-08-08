@@ -109,7 +109,19 @@ async def run_e2e_ollama_pipeline():
     # printing "✅ ... " unconditionally regardless of the payload's content
     # (which previously included a hardcoded "$63.5M" for Tier 3 -- whatever
     # the real value was).
+    #
+    # Q4 (hardening plan): this used to detect a failed tier by sniffing its
+    # context list for the word "Error"/"Exception" or an `"error"` dict key
+    # -- a heuristic that only existed because failed tiers used to return
+    # `[{"error": "..."}]`, a fake row shaped like real data. Now that
+    # hybrid_retrieve() reports failures out-of-band in `_tier_errors`
+    # instead (a genuinely empty list on failure, never a fake row), this
+    # checks that directly -- more accurate (no risk of a false positive on
+    # real data that happens to contain the word "Error", e.g. an account
+    # status of "ERROR_PENDING_REVIEW") and no longer checking for a shape
+    # that can't occur anymore.
     step_failures = []
+    tier_errors = rag_payload.get("_tier_errors", {})
 
     vector_ctx = rag_payload.get("vector_schema_context", [])
     if vector_ctx:
@@ -120,27 +132,25 @@ async def run_e2e_ollama_pipeline():
         print("  ❌ Tier 1 (pgvector HNSW): no matches returned")
 
     graph_ctx = rag_payload.get("knowledge_graph_context", [])
-    graph_str = " ".join(graph_ctx) if isinstance(graph_ctx, list) else str(graph_ctx)
-    if graph_ctx and "Exception" not in graph_str and "Error" not in graph_str:
+    if graph_ctx and "Graph_RAG_Neo4j" not in tier_errors:
         print(f"  ✅ Tier 2 (Neo4j Graph-RAG): {len(graph_ctx)} row(s) returned")
     else:
         step_failures.append("Tier 2 (Neo4j)")
-        print(f"  ❌ Tier 2 (Neo4j Graph-RAG): {graph_str[:120] or 'no rows returned'}")
+        print(f"  ❌ Tier 2 (Neo4j Graph-RAG): {tier_errors.get('Graph_RAG_Neo4j', 'no rows returned')[:120]}")
 
     semantic_ctx = rag_payload.get("semantic_metrics_context", [])
-    if semantic_ctx and not (isinstance(semantic_ctx, list) and semantic_ctx and "error" in semantic_ctx[0]):
+    if semantic_ctx and "Semantic_Metrics_Cubejs" not in tier_errors:
         print(f"  ✅ Tier 3 (Cube.js Metrics): {semantic_ctx}")
     else:
         step_failures.append("Tier 3 (Cube.js)")
-        print(f"  ❌ Tier 3 (Cube.js Metrics): {semantic_ctx}")
+        print(f"  ❌ Tier 3 (Cube.js Metrics): {tier_errors.get('Semantic_Metrics_Cubejs', 'no data returned')}")
 
     sql_ctx = rag_payload.get("relational_sql_context", [])
-    sql_str = " ".join(sql_ctx) if isinstance(sql_ctx, list) else str(sql_ctx)
-    if sql_ctx and "Error" not in sql_str:
+    if sql_ctx and "Relational_SQL_PostgreSQL" not in tier_errors:
         print(f"  ✅ Tier 4 (Supabase SQL): {len(sql_ctx)} row(s) fetched")
     else:
         step_failures.append("Tier 4 (Supabase SQL)")
-        print(f"  ❌ Tier 4 (Supabase SQL): {sql_str[:120] or 'no rows returned'}")
+        print(f"  ❌ Tier 4 (Supabase SQL): {tier_errors.get('Relational_SQL_PostgreSQL', 'no rows returned')[:120]}")
 
     # -------------------------------------------------------------------------
     # STEP 3: FastMCP Tool Verification

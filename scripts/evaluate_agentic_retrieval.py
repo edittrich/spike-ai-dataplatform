@@ -78,7 +78,7 @@ class AgenticEvaluator:
         # Scenario 5: End-to-End MCP Tool Orchestration
         await self.evaluate_scenario_5()
 
-        self.print_summary_report()
+        return self.print_summary_report()
 
     async def evaluate_scenario_1(self):
         print("\n📋 Benchmark 1: High-Risk AML & Overdrawn Customer Exposure Inquiry")
@@ -162,7 +162,8 @@ class AgenticEvaluator:
         # previous code) makes faithfulness 1.0 by construction -- there's no
         # separately-generated answer here to actually evaluate.
         self.record_result("Neo4j Knowledge Graph Multi-Hop Traversal", score, elapsed_ms, None, {
-            "Loan Collateral Graph Path Traversed": graph_matched
+            "Loan Collateral Graph Path Traversed": graph_matched,
+            "Benchmark Prompt": prompt,
         })
 
     async def evaluate_scenario_4(self):
@@ -178,7 +179,8 @@ class AgenticEvaluator:
 
         # No RAG Triad metrics -- see the note in evaluate_scenario_3.
         self.record_result("Data Quality & Governance SLA Scorecard", score, elapsed_ms, None, {
-            "OpenMetadata 59 Assertion Suite Checked": dq_matched
+            "OpenMetadata 59 Assertion Suite Checked": dq_matched,
+            "Benchmark Prompt": prompt,
         })
 
     async def evaluate_scenario_5(self):
@@ -194,7 +196,8 @@ class AgenticEvaluator:
 
         # No RAG Triad metrics -- see the note in evaluate_scenario_3.
         self.record_result("FastMCP Data Catalog Tool Call (`search_data_catalog`)", score, elapsed_ms, None, {
-            "OpenMetadata Search Index Queried": catalog_matched
+            "OpenMetadata Search Index Queried": catalog_matched,
+            "Benchmark Prompt": prompt,
         })
 
     def record_result(self, name, score, latency_ms, triad_metrics, details):
@@ -257,7 +260,14 @@ class AgenticEvaluator:
                 print(f"{scen:<42} | {r['status']:<6} | {r['score']}%     | {'N/A':<11}  | {'N/A':<8} | {'N/A':<8} | {'N/A':<6} | {'N/A':<24}")
 
         print(f"\nBenchmark run complete: {passed_tests}/{total_tests} scenarios passed (score >= 80%).")
+        return passed_tests == total_tests
 
 if __name__ == "__main__":
+    # Q7 (hardening plan): "evaluate_agentic_retrieval.py still doesn't call
+    # sys.exit(1) on a failed run, unlike the E2E script (Q8), which does."
+    # A benchmark with a real failing scenario previously still exited 0 --
+    # indistinguishable from a clean run to any CI job or script checking
+    # `$?`, silently masking a real regression.
     evaluator = AgenticEvaluator()
-    asyncio.run(evaluator.run_benchmark_suite())
+    all_passed = asyncio.run(evaluator.run_benchmark_suite())
+    sys.exit(0 if all_passed else 1)

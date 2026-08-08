@@ -23,9 +23,10 @@ import urllib.request
 import urllib.parse
 import urllib.error
 import time
+from typing import Any, Dict, List, Optional, Tuple
 
 import psycopg2
-from neo4j import READ_ACCESS, GraphDatabase
+from neo4j import READ_ACCESS, Driver, GraphDatabase
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("HybridRAGRetriever")
@@ -41,7 +42,13 @@ from scripts.ai_safety_guardrails import AISafetyGuardrails
 load_env()
 from scripts.llmops_telemetry import LLMOpsTelemetry
 from scripts.neural_reranker import NeuralReranker
-from scripts.text_to_cypher_builder import TextToCypherBuilder
+from scripts.text_to_cypher_builder import (
+    INTENT_AML_RISK,
+    INTENT_COLLATERAL,
+    INTENT_DEFAULT,
+    INTENT_DEPOSIT,
+    TextToCypherBuilder,
+)
 
 # Fails closed by default (raises) if the real sentence-transformers model
 # can't load -- set ALLOW_DEGRADED_EMBEDDINGS=1 to accept a non-semantic
@@ -76,8 +83,58 @@ NEO4J_URI = os.getenv("NEO4J_URI", "bolt://127.0.0.1:7687")
 NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
 NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "")
 
+# Q3 (hardening plan): "the 4-tier hybrid RAG is two dynamic tiers plus two
+# constants" -- Tier 3 always requested deposit_balance.total_available_balance
+# and Tier 4 always ran a fixed party_type count query, regardless of the
+# prompt. Both now route on the SAME shared intent classification Tier 2
+# already used (scripts.text_to_cypher_builder.classify_intent), so all three
+# dynamic tiers agree on what the user asked about instead of each guessing
+# independently (or, for Tiers 3/4 previously, not guessing at all).
+#
+# (cube_name, measures, dimensions) per intent for Tier 3. Every measure
+# combination below was verified live against the running Cube.js container
+# -- in particular, deposit_account.total_available_balance cannot be
+# combined with any other deposit_account measure in one query (a real
+# Cube.js v0.35 bug hit during Phase 4's pre_aggregations work: it references
+# a joined cube's column and the combined query fails with a "row
+# multiplication" FROM-clause error), so the deposit intent uses two
+# same-cube, own-column count measures instead, which combine safely.
+TIER3_INTENT_QUERY_MAP = {
+    INTENT_COLLATERAL: ("loan_collateral", ["total_collateral_assets", "total_appraised_value"], None),
+    INTENT_DEPOSIT: ("deposit_account", ["total_deposit_accounts", "overdrawn_account_count"], None),
+    INTENT_AML_RISK: ("party_role_customer", ["high_aml_risk_count", "active_customers_count"], None),
+    INTENT_DEFAULT: ("party", ["total_party_masters"], None),
+}
+
+# Read-only SQL per intent for Tier 4. Every query verified live against the
+# real database and returns real, non-empty results.
+TIER4_INTENT_QUERY_MAP = {
+    INTENT_COLLATERAL: (
+        "SELECT collateral_type, COUNT(*) AS asset_count, SUM(estimated_value) AS total_value "
+        "FROM financial.loan_collateral WHERE md_is_active = TRUE "
+        "GROUP BY collateral_type ORDER BY total_value DESC LIMIT 10;"
+    ),
+    INTENT_DEPOSIT: (
+        "SELECT da.account_type, COUNT(*) AS account_count, SUM(db.available_balance) AS total_available_balance "
+        "FROM financial.deposit_account da JOIN financial.deposit_balance db "
+        "ON da.deposit_account_id = db.deposit_account_id "
+        "WHERE da.md_is_active = TRUE AND db.md_is_active = TRUE "
+        "GROUP BY da.account_type ORDER BY total_available_balance DESC LIMIT 10;"
+    ),
+    INTENT_AML_RISK: (
+        "SELECT aml_risk_rating, kyc_status, COUNT(*) AS customer_count "
+        "FROM financial.party_role_customer WHERE md_is_active = TRUE "
+        "GROUP BY aml_risk_rating, kyc_status ORDER BY customer_count DESC LIMIT 10;"
+    ),
+    # Unchanged from the previous hardcoded default -- still the right
+    # "no specific intent, give a basic overview" query, now reached via
+    # classification instead of being the only option.
+    INTENT_DEFAULT: "SELECT party_type, count(*) FROM financial.party GROUP BY party_type;",
+}
+
+
 class HybridRAGRetriever:
-    def __init__(self):
+    def __init__(self) -> None:
         self.guardrails = AISafetyGuardrails()
         self.telemetry = LLMOpsTelemetry()
         self.reranker = NeuralReranker()
@@ -94,7 +151,7 @@ class HybridRAGRetriever:
         self._pg_conn = None
         self._neo4j_driver = None
 
-    def _get_pg_conn(self):
+    def _get_pg_conn(self) -> "psycopg2.extensions.connection":
         if self._pg_conn is None or self._pg_conn.closed:
             self._pg_conn = psycopg2.connect(
                 host=POSTGRES_HOST, port=POSTGRES_PORT, user=POSTGRES_USER,
@@ -110,14 +167,14 @@ class HybridRAGRetriever:
             self._pg_conn.set_session(readonly=True, autocommit=True)
         return self._pg_conn
 
-    def _get_neo4j_driver(self):
+    def _get_neo4j_driver(self) -> Driver:
         if self._neo4j_driver is None:
             self._neo4j_driver = GraphDatabase.driver(
                 NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD), connection_timeout=10
             )
         return self._neo4j_driver
 
-    def close(self):
+    def close(self) -> None:
         """Releases this instance's pooled connections. Optional to call --
         the OS reclaims the sockets at process exit regardless -- but worth
         calling explicitly if constructing many short-lived retriever
@@ -128,7 +185,7 @@ class HybridRAGRetriever:
             self._neo4j_driver.close()
             self._neo4j_driver = None
 
-    def query_pg(self, sql, params=None):
+    def query_pg(self, sql: str, params: Optional[Tuple[Any, ...]] = None) -> List[Dict[str, Any]]:
         """Returns list[dict] (one dict per row, keyed by column name) --
         not the pipe-delimited text the previous version reconstructed
         purely to keep vector_semantic_search()/relational_sql_search()'s
@@ -146,7 +203,7 @@ class HybridRAGRetriever:
             columns = [desc[0] for desc in cur.description]
             return [json_safe_row(dict(zip(columns, row))) for row in cur.fetchall()]
 
-    def query_neo4j(self, cypher, params=None):
+    def query_neo4j(self, cypher: str, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """Returns list[dict] -- one dict per record, keyed by the Cypher
         query's own RETURN aliases (via neo4j's record.data())."""
         # Validate read-only Cypher safety
@@ -161,7 +218,9 @@ class HybridRAGRetriever:
             result = session.run(cypher, params or {})
             return [json_safe_row(record.data()) for record in result]
 
-    def vector_semantic_search(self, prompt, top_k=3, fetch_candidates_k=10):
+    def vector_semantic_search(
+        self, prompt: str, top_k: int = 3, fetch_candidates_k: int = 10
+    ) -> List[Dict[str, Any]]:
         """
         Tier 1: 2-Stage Retrieval Pipeline:
         - 1st-Stage: pgvector 0.8.0 HNSW cosine similarity search (fetches candidate_k=10).
@@ -201,15 +260,25 @@ class HybridRAGRetriever:
         reranked_results = self.reranker.rerank_candidates(prompt, candidates, top_k=top_k)
         return reranked_results
 
-    def graph_rag_search(self, cypher_query):
-        """Tier 2: Knowledge Graph Traversal via Neo4j Cypher Graph-RAG."""
-        try:
-            return self.query_neo4j(cypher_query)
-        except Exception as e:
-            return [{"error": f"Graph Query Exception: {e}"}]
+    def graph_rag_search(self, cypher_query: str) -> List[Dict[str, Any]]:
+        """Tier 2: Knowledge Graph Traversal via Neo4j Cypher Graph-RAG.
 
-    def semantic_metric_search(self, cube_name, measures, dimensions=None):
-        """Tier 3: Cube.js Open-Source Semantic Layer Metric Aggregation."""
+        Q4 (hardening plan): this used to catch every exception and return
+        `[{"error": "..."}]` -- a list of dicts, exactly the shape a real
+        result takes, so the caller (and the LLM the payload is ultimately
+        built for) had no way to tell a failed tier from one that genuinely
+        found a single record containing the word "error". Now lets the
+        exception propagate; hybrid_retrieve's per-tier try/except is the
+        single place that decides what a failure looks like in the final
+        payload (an empty list plus a real, separate entry in
+        `_tier_errors` -- never a fake data row)."""
+        return self.query_neo4j(cypher_query)
+
+    def semantic_metric_search(
+        self, cube_name: str, measures: List[str], dimensions: Optional[List[str]] = None
+    ) -> List[Dict[str, Any]]:
+        """Tier 3: Cube.js Open-Source Semantic Layer Metric Aggregation.
+        See graph_rag_search's docstring -- same Q4 fix, same reasoning."""
         query_body = {
             "measures": [f"{cube_name}.{m}" for m in measures]
         }
@@ -225,21 +294,21 @@ class HybridRAGRetriever:
         # metrics result. mcp_server/financial_data_mcp_server.py's
         # query_semantic_metrics always sent this header; this tier had drifted.
         req = urllib.request.Request(url, headers={"Authorization": f"Bearer {CUBEJS_API_SECRET}"})
-        try:
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-                return data.get("data", [])
-        except Exception as e:
-            return [{"error": str(e)}]
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return data.get("data", [])
 
-    def relational_sql_search(self, sql_query):
-        """Tier 4: Relational SQL Query Execution on PostgreSQL."""
-        try:
-            return self.query_pg(sql_query)[:10]
-        except Exception as e:
-            return [{"error": f"SQL Execution Error: {e}"}]
+    def relational_sql_search(self, sql_query: str) -> List[Dict[str, Any]]:
+        """Tier 4: Relational SQL Query Execution on PostgreSQL.
+        See graph_rag_search's docstring -- same Q4 fix, same reasoning."""
+        return self.query_pg(sql_query)[:10]
 
-    def hybrid_retrieve(self, prompt, cypher_override=None, sql_override=None):
+    def hybrid_retrieve(
+        self,
+        prompt: str,
+        cypher_override: Optional[str] = None,
+        sql_override: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
         Unified Multi-Modal Hybrid RAG Pipeline:
         Combines Vector + Graph-RAG + Semantic Metrics + Relational SQL + AI Guardrails + LLMOps Telemetry.
@@ -260,6 +329,16 @@ class HybridRAGRetriever:
         # and broke the session. logging's default handler writes to stderr.
         logger.info(f"Multi-Modal Hybrid RAG Prompt: '{prompt}'")
 
+        # Q4 (hardening plan): "21 broad except Exception clauses, most
+        # converting failures into values that look like results... put
+        # exception text directly into knowledge_graph_context, so the LLM
+        # sees stack messages as retrieved evidence." tier_errors is the
+        # out-of-band home for a tier's failure instead -- populated only on
+        # a real exception, attached to the final payload separately from
+        # the *_context fields (which stay a genuinely empty list on
+        # failure, never a fake error-shaped row).
+        tier_errors = {}
+
         # 1. Vector Semantic Search
         t1_start = time.time()
         vector_results = self.vector_semantic_search(prompt, top_k=3)
@@ -267,6 +346,12 @@ class HybridRAGRetriever:
         logger.info("Tier 1: 2-Stage Vector & Cross-Encoder Neural Re-Ranking Matches:")
         for v in vector_results:
             logger.info(f"  [{v['entity_type']}] {v['display_name']} — Cross-Encoder Score: {v.get('cross_encoder_score', 'N/A')} (Bi-Encoder Sim: {v.get('similarity')})")
+
+        # Q3 (hardening plan): classified once, shared by Tiers 2, 3, and 4
+        # below, so all three dynamic tiers agree on what the prompt is
+        # asking about -- see TIER3_INTENT_QUERY_MAP/TIER4_INTENT_QUERY_MAP's
+        # module-level comment.
+        shared_intent = self.cypher_builder.classify_intent(prompt)
 
         # 2. Graph-RAG Dynamic Text-to-Cypher Execution
         t2_start = time.time()
@@ -276,26 +361,47 @@ class HybridRAGRetriever:
         else:
             cypher, intent = self.cypher_builder.compile_cypher(prompt)
 
-        graph_results = self.graph_rag_search(cypher)
+        try:
+            graph_results = self.graph_rag_search(cypher)
+        except Exception as e:
+            logger.error(f"Tier 2 (Graph_RAG_Neo4j) failed: {e}")
+            tier_errors["Graph_RAG_Neo4j"] = str(e)
+            graph_results = []
         self.telemetry.record_tier_latency(trace, "Graph_RAG_Neo4j", (time.time() - t2_start) * 1000)
         logger.info(f"Tier 2: Knowledge Graph Traversal (Dynamic Text-to-Cypher: {intent}):")
         for g in graph_results:
             logger.info(f"  {g}")
 
         # 3. Semantic Metric Layer Calculation
+        # Q3: previously always requested deposit_balance.total_available_balance
+        # regardless of the prompt -- now routes on shared_intent, the same
+        # classification driving Tier 2 above.
         t3_start = time.time()
-        semantic_results = self.semantic_metric_search("deposit_balance", ["total_available_balance"])
+        tier3_cube, tier3_measures, tier3_dimensions = TIER3_INTENT_QUERY_MAP[shared_intent]
+        try:
+            semantic_results = self.semantic_metric_search(tier3_cube, tier3_measures, tier3_dimensions)
+        except Exception as e:
+            logger.error(f"Tier 3 (Semantic_Metrics_Cubejs) failed: {e}")
+            tier_errors["Semantic_Metrics_Cubejs"] = str(e)
+            semantic_results = []
         self.telemetry.record_tier_latency(trace, "Semantic_Metrics_Cubejs", (time.time() - t3_start) * 1000)
-        logger.info("Tier 3: Semantic Layer Aggregation (Cube.js Metrics):")
+        logger.info(f"Tier 3: Semantic Layer Aggregation (Cube.js Metrics, intent={shared_intent}):")
         for s in semantic_results:
             logger.info(f"  {s}")
 
         # 4. Relational SQL Execution
+        # Q3: previously always ran the same fixed party_type count query
+        # regardless of the prompt -- now routes on shared_intent too.
         t4_start = time.time()
-        sql = sql_override or "SELECT party_type, count(*) FROM financial.party GROUP BY party_type;"
-        sql_results = self.relational_sql_search(sql)
+        sql = sql_override or TIER4_INTENT_QUERY_MAP[shared_intent]
+        try:
+            sql_results = self.relational_sql_search(sql)
+        except Exception as e:
+            logger.error(f"Tier 4 (Relational_SQL_PostgreSQL) failed: {e}")
+            tier_errors["Relational_SQL_PostgreSQL"] = str(e)
+            sql_results = []
         self.telemetry.record_tier_latency(trace, "Relational_SQL_PostgreSQL", (time.time() - t4_start) * 1000)
-        logger.info("Tier 4: Relational Database Execution (PostgreSQL SQL):")
+        logger.info(f"Tier 4: Relational Database Execution (PostgreSQL SQL, intent={shared_intent}):")
         for s in sql_results:
             logger.info(f"  {s}")
 
@@ -310,6 +416,12 @@ class HybridRAGRetriever:
 
         # 5. Sanitize & Redact PII in Context Payload before returning
         sanitized_payload = self.guardrails.sanitize_context_payload(raw_payload)
+
+        # Q4: attached out-of-band, alongside (not inside) the *_context
+        # fields -- empty dict when every tier succeeded, so a caller can
+        # check `bool(_tier_errors)` rather than having to inspect each
+        # context list for a suspicious-looking single "error" record.
+        sanitized_payload["_tier_errors"] = tier_errors
 
         # 6. Finalize LLMOps Telemetry Trace Span
         pipeline_latency_ms = (time.time() - pipeline_start) * 1000
@@ -333,17 +445,21 @@ class HybridRAGRetriever:
 
         return sanitized_payload
 
-def main():
+def main() -> None:
     retriever = HybridRAGRetriever()
 
     # Test Case 1: Master Party & Account Exposure Inquiry
     prompt1 = "Identify overdrawn deposit account customer risk exposure and master party entities"
     payload1 = retriever.hybrid_retrieve(prompt1)
+    assert "_tier_errors" in payload1, "Q4 regression: payload missing _tier_errors"
+    print(f"  Test Case 1 tier_errors: {payload1['_tier_errors']}")
 
     # Test Case 2: Credit Agreement & Collateral Analysis
     prompt2 = "Find loan agreements with pledged collateral assets and interest rate terms"
     sql2 = "SELECT agreement_status, COUNT(*), SUM(principal_amount) FROM financial.loan_agreement GROUP BY agreement_status;"
     payload2 = retriever.hybrid_retrieve(prompt2, sql_override=sql2)
+    assert "_tier_errors" in payload2, "Q4 regression: payload missing _tier_errors"
+    print(f"  Test Case 2 tier_errors: {payload2['_tier_errors']}")
 
     print("\n✅ Multi-Modal Hybrid RAG Retriever Test Successfully Completed!")
 
