@@ -351,28 +351,7 @@ Operational quirks worth knowing before you conclude something in your own setup
   manually. Affects `scripts/sync_end_to_end_lineage.py`'s `sync_openmetadata_lineage()` and any MCP
   tool that calls `search_data_catalog`/`check_data_quality` (both degrade to a clean logged error
   string, not a crash, in that case).
-- **`cadvisor`'s per-container metric discovery may not work in every Docker environment.** It logs
-  `failed to identify the read-write layer ID` for every real container in some environments (this
-  repo's own dev environment among them) and only exposes the aggregate root-cgroup metric
-  (`container_memory_usage_bytes{id="/"}`, etc.) in that case — `/var/lib/docker` does not correspond
-  to the actual dockerd's overlayfs layer metadata as seen from inside the container in this
-  environment; not a permissions issue (`--privileged` makes no difference).
-  `catalog/prometheus_rules.yml`'s container alert is written against the aggregate metric for exactly
-  this reason. On a host where cAdvisor's normal discovery works, the same config should populate real
-  per-container series with no changes needed. **Accepted limitation for this environment
-  specifically.**
-- **Neo4j Community Edition has no Prometheus/Graphite/JMX metrics reporter at all** — that's an
-  Enterprise-only feature. The `neo4j_jvm` Prometheus target (`:9101`) only ever exposes generic
-  `java_lang_*`/`jvm_*`/`process_*` metrics (heap, GC, threads, FDs, CPU) via a
-  `jmx_prometheus_javaagent` attached to the JVM's standard JMX endpoint — genuine JVM-health
-  alerting, but never transaction rate, page cache hit ratio, or other Neo4j-domain metrics; Community
-  registers no custom MBeans for those either. **Accepted limitation — closing this gap would require
-  a paid Neo4j Enterprise license, out of scope under the open-source-only constraint.**
-- **No backup/restore or disaster-recovery path exists for Postgres, Neo4j, or MySQL** — no scheduled
-  dump/snapshot job, no documented restore procedure, and none has ever been tested. `pgBackRest`/
-  `neo4j-admin dump` on a schedule are the likely OSS answer if this becomes a requirement.
-  **Accepted limitation.**
 
-The items above marked "Accepted limitation" are deliberate, out-of-scope trade-offs for this PoC.
-Everything else in this section is genuinely known/expected behavior, documented here so it doesn't
-read as a new bug when you hit it.
+Deliberately accepted, out-of-scope limitations of this PoC (cAdvisor per-container discovery, Neo4j
+Community's absent metrics reporter, backup/restore & DR) are tracked in
+[`PLATFORM_ANALYSIS_PLAN.md`](PLATFORM_ANALYSIS_PLAN.md)'s accepted-limitations register, not here.
