@@ -60,8 +60,9 @@ An enterprise-grade, multi-modal **AI-Enabled Data Platform** combining relation
 ```
 
 This is what's built today. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full
-component breakdown, data model, and a clearly-separated roadmap of what's planned but not yet
-implemented (CDC ingestion, a lakehouse/warehouse tier, hybrid lexical+vector search, orchestration).
+component breakdown and data model, and
+[`docs/PLATFORM_ANALYSIS_PLAN.md`](docs/PLATFORM_ANALYSIS_PLAN.md) for what's proposed but not yet
+implemented (CDC ingestion, a lakehouse/warehouse tier, hybrid lexical+vector search, document RAG).
 
 ---
 
@@ -238,8 +239,9 @@ entirely and let it read your existing `.env` instead of duplicating secrets int
 
 ## 📑 Documentation Index
 
-- [Architecture & Design](docs/ARCHITECTURE.md): system architecture, data model, BIAN/FIBO domain alignment, and roadmap.
-- [Application Runbook](docs/APPLICATION_RUNBOOK.md): service inventory, script-by-script deep dive, troubleshooting, known issues.
+- [Architecture & Design](docs/ARCHITECTURE.md): system architecture, data model, BIAN/FIBO domain alignment, and the security model.
+- [Application Runbook](docs/APPLICATION_RUNBOOK.md): service inventory, script-by-script deep dive, troubleshooting, and known operational quirks.
+- [Platform Analysis & Remediation Plan](docs/PLATFORM_ANALYSIS_PLAN.md): per-dimension findings, ranked issue list, accepted limitations, proposed capabilities, and the phased plan.
 - [Data Contracts](contracts/): data product contract specs.
 - [Test Suite](tests/): pytest negative security tests, auth middleware tests, and the contract/schema drift check.
 - [CLAUDE.md](CLAUDE.md): commands and conventions for agentic coding tools working in this repo.

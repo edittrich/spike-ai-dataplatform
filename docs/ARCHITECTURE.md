@@ -4,10 +4,11 @@ This document describes the platform's architecture, data model, and design rati
 system is and why it is shaped this way. For container-by-container operational detail, script
 behavior, and troubleshooting, see [`APPLICATION_RUNBOOK.md`](APPLICATION_RUNBOOK.md).
 
-This is a proof-of-concept. Everything under [System Architecture](#system-architecture) and
-[Data Model](#data-model) is implemented and runnable today; everything under
-[Roadmap](#roadmap--not-yet-implemented) is not — it is scoped there explicitly so the two are never
-confused.
+This is a proof-of-concept. Everything described in this document — [System
+Architecture](#system-architecture), [Data Model](#data-model), and [Security
+Model](#security-model) — is implemented and runnable today. For what is *not* built yet, together
+with known issues and their remediation plan, see
+[`PLATFORM_ANALYSIS_PLAN.md`](PLATFORM_ANALYSIS_PLAN.md).
 
 ---
 
@@ -267,31 +268,5 @@ document.
 
 ---
 
-## Roadmap — Not Yet Implemented
-
-The platform's target shape is broader than what exists today. The following are genuine future
-directions, not currently-working features — nothing below has any implementation in this repo yet:
-
-- **CDC / streaming ingestion.** Today ingestion is a single synthetic batch generator. A production
-  version would add change-data-capture (e.g. Debezium) and API/streaming connectors alongside the
-  existing batch path.
-- **Lakehouse / warehouse storage tier.** The data plane is Postgres-only. A larger deployment might
-  add an OLAP warehouse or lakehouse (e.g. DuckDB, ClickHouse — kept open-source and local per the
-  project's constraint) for historical/analytical workloads separate from the operational store.
-- **Unstructured object storage.** No document/file ingestion exists; a document-RAG extension would
-  need object storage (e.g. MinIO, self-hosted) and a chunking/embedding pipeline for unstructured
-  content, distinct from the structured-data vectorization that exists today.
-- **Hybrid lexical + vector enterprise search.** Retrieval today is HNSW cosine similarity only. Adding
-  a lexical (BM25) index alongside it — e.g. via Postgres full-text search or OpenSearch, which is
-  already in the stack for OpenMetadata — would let retrieval combine keyword and semantic matching.
-- **Full observability of the data itself.** Prometheus/Grafana currently observe application-level
-  telemetry only; there is no data freshness, volume, or drift monitoring against the SLAs declared in
-  `contracts/*.yaml`.
-
-Per-tool audit logging (a record of which agent ran which query) does not exist yet; it's tracked as
-implementation work rather than a roadmap item, since the components it would extend already exist.
-A real pytest suite lives under `tests/`; pipeline orchestration is `orchestration/definitions.py`'s
-Dagster asset graph (see `docs/APPLICATION_RUNBOOK.md`'s Dagster section for setup and usage); and
-alerting is `catalog/prometheus_rules.yml` plus the
-`alertmanager`/`node_exporter`/`postgres_exporter`/`mysqld_exporter`/`cadvisor` services in
-`docker-compose.yml`.
+For proposed extensions beyond the architecture described above, along with the ranked issue list
+and remediation plan, see [`PLATFORM_ANALYSIS_PLAN.md`](PLATFORM_ANALYSIS_PLAN.md).

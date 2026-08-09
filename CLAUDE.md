@@ -203,5 +203,6 @@ Beware also: `OPENMETADATA_JWT_TOKEN` (the `ingestion-bot`'s credential) is a ti
 
 ### Further reading
 
-- `docs/ARCHITECTURE.md` — high-level architecture, data model design, BIAN/FIBO domain alignment, and roadmap.
-- `docs/APPLICATION_RUNBOOK.md` — full service inventory, script-by-script deep dive, troubleshooting guide, known issues.
+- `docs/ARCHITECTURE.md` — high-level architecture, data model design, BIAN/FIBO domain alignment, and the security model.
+- `docs/APPLICATION_RUNBOOK.md` — full service inventory, script-by-script deep dive, troubleshooting guide, known operational quirks.
+- `docs/PLATFORM_ANALYSIS_PLAN.md` — the single source of truth for platform analysis: per-dimension findings, the ranked issue list, the accepted-limitations register, proposed capabilities, and the phased remediation plan.
