@@ -31,10 +31,10 @@ Scope boundary: this graph starts from `synthetic_seed_data` and ends at
 `vector_embeddings` -- the same 8-ish data-producing steps CLAUDE.md's "Full
 data pipeline" section documents. Starting PostgreSQL (Supabase CLI) and the
 Docker Compose stack is a separate, explicit prerequisite (see
-orchestration/README.md), not something an asset tries to manage -- Dagster
-orchestrates data pipelines, it isn't a service/container manager, and
-folding `docker compose up -d` into asset code would just reinvent
-bootstrap_platform.sh's infra-startup half worse.
+docs/APPLICATION_RUNBOOK.md's Dagster section), not something an asset tries
+to manage -- Dagster orchestrates data pipelines, it isn't a service/container
+manager, and folding `docker compose up -d` into asset code would just
+reinvent bootstrap_platform.sh's infra-startup half worse.
 ===============================================================================
 """
 

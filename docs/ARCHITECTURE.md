@@ -291,6 +291,7 @@ directions, not currently-working features — nothing below has any implementat
 Per-tool audit logging (a record of which agent ran which query) does not exist yet; it's tracked as
 implementation work rather than a roadmap item, since the components it would extend already exist.
 A real pytest suite lives under `tests/`; pipeline orchestration is `orchestration/definitions.py`'s
-Dagster asset graph (see `orchestration/README.md`); and alerting is `catalog/prometheus_rules.yml`
-plus the `alertmanager`/`node_exporter`/`postgres_exporter`/`mysqld_exporter`/`cadvisor` services in
+Dagster asset graph (see `docs/APPLICATION_RUNBOOK.md`'s Dagster section for setup and usage); and
+alerting is `catalog/prometheus_rules.yml` plus the
+`alertmanager`/`node_exporter`/`postgres_exporter`/`mysqld_exporter`/`cadvisor` services in
 `docker-compose.yml`.

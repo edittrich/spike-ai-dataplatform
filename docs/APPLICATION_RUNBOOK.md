@@ -216,18 +216,57 @@ or on step 3 — and can run in any order or in parallel.
    streamlit run scripts/rag_explorer_dashboard.py
    ```
 
-8. **Run the Data Pipeline via Dagster** (a real asset graph — dependencies, retries, backfill, run
-   history — instead of the hand-run sequence above):
+8. **Run the Data Pipeline via Dagster** — [`orchestration/definitions.py`](../orchestration/definitions.py)
+   encodes the same pipeline documented in section 2 above as a real Dagster asset graph, with
+   declared dependencies (including the one non-obvious edge the hand-run sequence's own ordering
+   never makes explicit: `lineage_dag` must run *after* `knowledge_graph`'s graph wipe, not before, or
+   its writes get lost on the next rebuild), automatic retries, backfill, and persisted run history.
+   It runs on the **host**, alongside the other standalone pipeline scripts it orchestrates (not
+   containerized) — it reaches Postgres/Neo4j/OpenMetadata/Cube.js at their host-published
+   `127.0.0.1:<port>` addresses exactly the way a human running these scripts by hand already does.
+
+   **Setup** (once per checkout):
    ```bash
    pip install -r orchestration/requirements.txt
-   export DAGSTER_HOME="$(pwd)/orchestration/.dagster_home" && mkdir -p "$DAGSTER_HOME"
+
+   # Dagster persists run history/logs/event storage under DAGSTER_HOME -- if unset, it falls back
+   # to a temp directory that's wiped on reboot, which would make "run history" illusory. Point it
+   # somewhere real and persistent, and add this line to your shell profile (or re-run it in every
+   # new shell before using Dagster) -- it's read by Dagster itself, not this platform's own Python
+   # code, so it isn't picked up from .env:
+   export DAGSTER_HOME="$(pwd)/orchestration/.dagster_home"
+   mkdir -p "$DAGSTER_HOME"
+   ```
+
+   **Prerequisites** — start PostgreSQL and the Docker Compose stack first, the same prerequisite the
+   pipeline scripts already have when run by hand:
+   ```bash
+   npm run supabase:start
+   docker compose up -d
+   ```
+
+   **Usage:**
+   ```bash
+   # Launches the Dagster UI (asset graph, run history, logs) on :3001 -- not the
+   # default :3000, which Grafana already uses in this platform.
    dagster dev -f orchestration/definitions.py -p 3001   # UI at http://127.0.0.1:3001
    ```
-   See [`orchestration/README.md`](../orchestration/README.md) for the full design rationale
-   (including the one non-obvious dependency edge: `lineage_dag` must run *after*
-   `knowledge_graph`'s graph wipe, not before, or its writes get lost on the next rebuild) and
-   `scripts/bootstrap_platform.sh` for the simpler, dependency-free equivalent that's still the right
-   choice for a first-time or CI-style bring-up.
+   Open `http://127.0.0.1:3001`, select the `full_pipeline` job, and click **Materialize all**. Assets
+   that share only a common upstream dependency (e.g. `knowledge_graph`, `catalog_tables`, and
+   `readonly_role_configured`, which all depend only on `postgres_seeded`) run concurrently —
+   parallelism the hand-run shell sequence has no way to express. A failed asset can be retried
+   individually (each service-calling asset also carries its own automatic retry policy — 2 retries,
+   10s apart, for exactly the transient-connectivity case a fresh `docker compose up -d` often hits)
+   without re-running everything before it. Equivalently, from the CLI:
+   ```bash
+   dagster asset materialize -f orchestration/definitions.py --select '*'
+   ```
+
+   **What this does not replace:** `scripts/bootstrap_platform.sh` still exists and still works — it's
+   the simpler, dependency-free path for a first-time or CI-style bring-up (no `pip install -r
+   orchestration/requirements.txt`, no `DAGSTER_HOME`, no UI to open). This orchestration layer is for
+   iterating on the pipeline afterward: re-running one failed step, backfilling after a schema change,
+   or watching real run history accumulate across many runs, none of which the shell script provides.
 
 ### Troubleshooting Guide
 

@@ -105,7 +105,7 @@ matters. `scripts/bootstrap_platform.sh` runs this entire sequence, plus startin
 Compose, in one command. `orchestration/definitions.py` encodes the same sequence as a real Dagster
 asset graph instead — each script is one `@asset`, dependencies are declared (not just documented in
 prose), independent assets run concurrently, and every run gets retries, backfill, and persisted
-history for free; see `orchestration/README.md`.
+history for free; see `docs/APPLICATION_RUNBOOK.md`'s Dagster section for setup and usage.
 
 Then `scripts/hybrid_rag_retriever.py`, `scripts/ollama_agentic_tool_runner.py`, and `streamlit run scripts/rag_explorer_dashboard.py` operate against the fully-loaded stack.
 
