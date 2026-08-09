@@ -1,12 +1,12 @@
 # Dagster Orchestration
 
-Replaces the prose-only pipeline ordering in `CLAUDE.md`/`README.md` (and the imperative sequence
-in `scripts/bootstrap_platform.sh`) with a real Dagster asset graph — Part 5 item 1 in the hardening
-plan: *"the 8-step pipeline is run by hand, ordering encoded only in prose; no retries, backfill, or
-run history."* See [`definitions.py`](definitions.py)'s module docstring for the full design
-rationale (why each asset shells out to the existing script rather than importing its `main()`, why
-infra startup is deliberately out of scope, and the one non-obvious dependency edge —
-`lineage_dag` → `knowledge_graph` — the prose ordering never made explicit).
+Encodes the data pipeline (otherwise documented only as prose in `CLAUDE.md`/`README.md` and as an
+imperative sequence in `scripts/bootstrap_platform.sh`) as a real Dagster asset graph, with declared
+dependencies, automatic retries, backfill, and persisted run history. See
+[`definitions.py`](definitions.py)'s module docstring for the full design rationale (why each asset
+shells out to the existing script rather than importing its `main()`, why infra startup is
+deliberately out of scope, and the one non-obvious dependency edge — `lineage_dag` → `knowledge_graph`
+— that the pipeline's own prose ordering never makes explicit).
 
 Runs on the **host**, alongside the other standalone pipeline scripts it orchestrates (not
 containerized) — it needs to reach Postgres/Neo4j/OpenMetadata/Cube.js at their host-published
@@ -52,11 +52,11 @@ dagster dev -f orchestration/definitions.py -p 3001
 
 Open `http://127.0.0.1:3001`, select the `full_pipeline` job, and click **Materialize all**. Assets
 that share only a common upstream dependency (e.g. `knowledge_graph`, `catalog_tables`, and
-`readonly_role_configured`, which all depend only on `postgres_seeded`) run concurrently — the real
-parallelism the previous linear, hand-run ordering never expressed. A failed asset can be retried
-individually (each service-calling asset also carries its own automatic retry policy — 2 retries,
-10s apart, for exactly the transient-connectivity case a fresh `docker compose up -d` often hits)
-without re-running everything before it.
+`readonly_role_configured`, which all depend only on `postgres_seeded`) run concurrently — parallelism
+the hand-run shell sequence has no way to express. A failed asset can be retried individually (each
+service-calling asset also carries its own automatic retry policy — 2 retries, 10s apart, for exactly
+the transient-connectivity case a fresh `docker compose up -d` often hits) without re-running
+everything before it.
 
 Equivalently, from the CLI:
 

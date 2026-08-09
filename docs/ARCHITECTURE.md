@@ -236,20 +236,19 @@ WHERE p.md_is_active = TRUE;
   unauthenticated), and defaults to binding `127.0.0.1` only.
 - **PII handling:** `scripts/_pii_classification.py` is the single shared source of truth for which
   column names count as PII (`PII_PERSONAL_PATTERNS`/`PII_SPECIAL_PATTERNS`), consumed by three
-  independent enforcement points that previously disagreed: `scripts/automate_openmetadata_pii_and_profiling.py`
+  independent enforcement points: `scripts/automate_openmetadata_pii_and_profiling.py`
   (catalog tagging), `cube/model/cubes/*.yml`'s `public: false` dimensions + `cube/cube.js`'s
   `queryRewrite` (Cube.js — `public: false` alone only affects GraphQL/Playground introspection in
-  this Cube.js version, verified live it does not block a REST query; `queryRewrite` is the real
-  block, kept in sync with the YAML by `tests/test_pii_cube_enforcement.py`), and
-  `AISafetyGuardrails.redact_row`/`redact_rows` (field-aware redaction by real column name, used by
-  `query_financial_database`/`query_knowledge_graph`'s MCP tool responses and recursively within
-  `sanitize_context_payload`). `AISafetyGuardrails.redact_pii`'s blanket value-shape regexes remain as
-  the fallback for genuinely free-text content with no fixed schema (descriptions, prompts) — label-
-  anchored where shape alone is ambiguous (DOB, passport/national-ID/tax-ID mentions), the same
-  tradeoff `name_pattern` already made; the returned redaction mapping now stores only a PII category
-  label, never the original un-redacted value. `sanitize_context_payload` also now actually quarantines
-  detected prompt-injection spans (replacing them, not just flagging `safety_status` in metadata
-  nothing read) and always attaches an explicit untrusted-data notice.
+  this Cube.js version, not the REST query path; `queryRewrite` is the real block, kept in sync with
+  the YAML by `tests/test_pii_cube_enforcement.py`), and `AISafetyGuardrails.redact_row`/`redact_rows`
+  (field-aware redaction by real column name, used by `query_financial_database`/`query_knowledge_graph`'s
+  MCP tool responses and recursively within `sanitize_context_payload`). `AISafetyGuardrails.redact_pii`'s
+  blanket value-shape regexes remain as the fallback for genuinely free-text content with no fixed
+  schema (descriptions, prompts) — label-anchored where shape alone is ambiguous (DOB, passport/
+  national-ID/tax-ID mentions); the returned redaction mapping stores only a PII category label, never
+  the original un-redacted value. `sanitize_context_payload` quarantines detected prompt-injection
+  spans (replacing them in the payload, not just flagging `safety_status` in unread metadata) and
+  always attaches an explicit untrusted-data notice.
 - **Retrieval honesty:** `scripts/hybrid_rag_retriever.py` and `scripts/neural_reranker.py` fail
   closed (raise, don't silently substitute) if the real embedding/cross-encoder models can't load,
   via `scripts/_embedding_backend.py` — set `ALLOW_DEGRADED_EMBEDDINGS=1` to explicitly opt into a
@@ -259,15 +258,12 @@ WHERE p.md_is_active = TRUE;
   (`prometheus_client`, `mcp_server/financial_data_mcp_server.py`'s `main()`) — there is no separate
   simulator process; Grafana panels move only in response to genuine tool invocations.
 
-This is the intended model, and the items above reflect its current state, not just its design intent
-— each has been applied to the running stack and verified (RLS blocking an anonymous read, the
-`mcp_readonly` role being rejected for file/OS access and writes, Neo4j rejecting a write inside a
-READ_ACCESS session, the SSE endpoint refusing to start without a key, a real MCP tool call
-incrementing a real Prometheus counter end-to-end). A broader security review covers what's left —
-Cube.js still runs in dev mode pending a Cube Store deployment, the prompt-injection check is a fixed
-regex list that warns rather than blocks on retrieved-content matches, and several lower-severity
-findings remain open — those are tracked outside this document since fixing them changes code, not
-architecture.
+This is the intended model, and the items above reflect its current state, not just its design
+intent. The prompt-injection check remains a fixed regex list — paraphrase, other languages, or
+encoding can still evade detection, even though a detected match is now actually removed from the
+payload rather than merely flagged — and audit logging of which agent ran which query does not yet
+exist. Both are tracked as implementation work, not architecture changes, so they live outside this
+document.
 
 ---
 
@@ -292,11 +288,9 @@ directions, not currently-working features — nothing below has any implementat
   telemetry only; there is no data freshness, volume, or drift monitoring against the SLAs declared in
   `contracts/*.yaml`.
 
-Capabilities that exist only partially today (per-tool audit logging, agent-facing PII redaction
-consistently applied to every MCP tool) are tracked as fixes to the existing implementation rather
-than roadmap items, since the components they extend already exist. (A real pytest suite, previously
-listed here, was completed — see `tests/`. Orchestration, also previously listed here, was completed
-too — see `orchestration/definitions.py`'s Dagster asset graph and `orchestration/README.md`.
-Alerting, also previously listed here, was completed too — see `catalog/prometheus_rules.yml` and
-the `alertmanager`/`node_exporter`/`postgres_exporter`/`mysqld_exporter`/`cadvisor` services in
-`docker-compose.yml`.)
+Per-tool audit logging (a record of which agent ran which query) does not exist yet; it's tracked as
+implementation work rather than a roadmap item, since the components it would extend already exist.
+A real pytest suite lives under `tests/`; pipeline orchestration is `orchestration/definitions.py`'s
+Dagster asset graph (see `orchestration/README.md`); and alerting is `catalog/prometheus_rules.yml`
+plus the `alertmanager`/`node_exporter`/`postgres_exporter`/`mysqld_exporter`/`cadvisor` services in
+`docker-compose.yml`.
