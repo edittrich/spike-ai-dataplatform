@@ -469,22 +469,62 @@ def check_data_quality(
     Fetch real-time OpenMetadata Data Quality test suite assertions, scorecards, and SLAs.
     """
     logger.info(f"Executing check_data_quality tool for table '{table_name}'")
-    url = f"{OPENMETADATA_URL}/dataQuality/testCases?limit=20&fields=testCaseResult"
-    req = urllib.request.Request(url, headers=HEADERS)
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            test_cases = data.get("data", [])
-            matched = [tc for tc in test_cases if table_name.lower() in tc.get("entityFQN", "").lower()]
-            results = []
-            for tc in matched:
-                res = tc.get("testCaseResult", {})
-                results.append({
-                    "test_name": tc.get("displayName"),
-                    "status": res.get("testCaseStatus"),
-                    "result_message": res.get("result")
-                })
-            return json.dumps(results, indent=2) if results else f"No active data quality assertions for {table_name}."
+        # Resolve table_name to its exact catalog FQN first, rather than
+        # guessing which schema (financial vs ref) it lives in or
+        # substring-matching every test case's entityFQN against it -- the
+        # previous substring check ("party" in entityFQN) also matched
+        # party_individual/party_organization/party_role_customer/
+        # party_address/party_identification, none of which are the table
+        # actually asked about. Exact match on the search hit's own `name`
+        # field avoids that same trap at the resolution step too.
+        search_url = f"{OPENMETADATA_URL}/search/query?q={urllib.parse.quote(table_name)}&index=table_search_index&size=10"
+        search_req = urllib.request.Request(search_url, headers=HEADERS)
+        with urllib.request.urlopen(search_req, timeout=10) as resp:
+            hits = json.loads(resp.read().decode("utf-8")).get("hits", {}).get("hits", [])
+        table_fqn = next(
+            (h["_source"]["fullyQualifiedName"] for h in hits
+             if h["_source"].get("name", "").lower() == table_name.lower()),
+            None,
+        )
+        if table_fqn is None:
+            return f"No table named '{table_name}' found in the catalog."
+
+        # Test cases are grouped under a per-table test suite
+        # (<table_fqn>.testSuite, the same convention
+        # execute_openmetadata_data_quality_tests.py registers them under);
+        # its numeric id -- not its FQN, verified live that a `testSuite=
+        # <fqn>` filter is silently ignored rather than rejected -- is what
+        # dataQuality/testCases actually filters by via `testSuiteId`. A
+        # table with no registered test suite yet (404 here) has no
+        # assertions to report, not an error.
+        suite_url = f"{OPENMETADATA_URL}/dataQuality/testSuites/name/{urllib.parse.quote(table_fqn)}.testSuite"
+        suite_req = urllib.request.Request(suite_url, headers=HEADERS)
+        try:
+            with urllib.request.urlopen(suite_req, timeout=10) as resp:
+                suite_id = json.loads(resp.read().decode("utf-8"))["id"]
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return f"No active data quality assertions for {table_name}."
+            raise
+
+        # testSuiteId returns every test case belonging to this exact table
+        # -- both table-level (row count, ...) and column-level (not-null,
+        # uniqueness, ...) -- unlike the entityLink filter, which only
+        # matches the table-level test case's own exact entityLink string.
+        tests_url = f"{OPENMETADATA_URL}/dataQuality/testCases?testSuiteId={suite_id}&limit=100&fields=testCaseResult"
+        tests_req = urllib.request.Request(tests_url, headers=HEADERS)
+        with urllib.request.urlopen(tests_req, timeout=10) as resp:
+            test_cases = json.loads(resp.read().decode("utf-8")).get("data", [])
+        results = []
+        for tc in test_cases:
+            res = tc.get("testCaseResult", {})
+            results.append({
+                "test_name": tc.get("displayName"),
+                "status": res.get("testCaseStatus"),
+                "result_message": res.get("result")
+            })
+        return json.dumps(results, indent=2) if results else f"No active data quality assertions for {table_name}."
     except Exception as e:
         logger.error(f"Data quality check error: {e}")
         # Surface the real failure instead of a fabricated "Success" assertion
