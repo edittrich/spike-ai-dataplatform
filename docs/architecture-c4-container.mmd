@@ -1,0 +1,94 @@
+C4Container
+    title Container Diagram — Enterprise AI-Enabled Data Platform (PoC)
+
+    UpdateLayoutConfig($c4ShapeInRow="4", $c4BoundaryInRow="4")
+
+    Person(analyst, "Data / Financial Analyst", "Explores data via the RAG UI; watches platform health in Grafana.")
+    Person(operator, "Platform Operator", "Bootstraps the stack; runs the data pipeline.")
+
+    System_Ext(agent_client, "AI Agent / MCP Client", "Claude Desktop, Cursor, Antigravity. Connects over SSE with a bearer token, or over stdio.")
+    System_Ext(ollama, "Ollama Runtime", "Local gemma4:latest — autonomous tool calling and LLM-judge scoring. :11434")
+
+    System_Boundary(platform, "Enterprise AI-Enabled Data Platform") {
+
+        Container_Boundary(consumption, "Consumption & Agentic Protocol") {
+            Container(streamlit, "RAG Explorer Dashboard", "Python / Streamlit, :8501", "6-tab UI over the 4-tier RAG payload, guardrails audit and LLMOps telemetry. Drives the retriever and agentic runner in-process.")
+            Container(mcp, "MCP Sidecar", "Python / FastMCP — SSE :8001, metrics :8000", "6 agent tools + 2 resources. Bearer auth, PII redaction, read-only guardrails, real per-call metrics and OTel spans.")
+        }
+
+        Container_Boundary(retrieval, "Retrieval & Semantic Layer") {
+            Container(retriever, "Hybrid RAG Retriever", "Python library, in-process", "Fuses pgvector HNSW + cross-encoder re-rank, NL-to-Cypher, Cube.js metrics and SQL into one sanitized payload.")
+            Container(cube, "Cube.js Semantic Layer", "Node / Cube.js v0.35, :4000", "19 cubes + the customer_360 view. Two bearer roles; queryRewrite blocks PII outright and AML members for the restricted role.")
+            ContainerDb(cubestore, "Cube Store", "cubejs/cubestore, bridge-internal only", "Pre-aggregation cache and queue driver; its own refresh worker.")
+        }
+
+        Container_Boundary(dataplane, "Multi-Model Data Plane") {
+            ContainerDb(pg, "PostgreSQL + pgvector", "Supabase Postgres 15, :54322", "3NF BIAN/FIBO core: 19 tables (16 with SCD2 headers) + the entity_embeddings HNSW index. RLS deny-by-default; mcp_readonly / cube_readonly roles.")
+            ContainerDb(neo4j, "Neo4j Knowledge Graph", "Neo4j 5.18 Community, :7687", "Party/account/loan instance graph, full-text name indexes. READ_ACCESS sessions; no APOC plugin.")
+        }
+
+        Container_Boundary(governance, "Catalog & Governance") {
+            Container(om, "OpenMetadata Server", "Java / OpenMetadata 1.3.1, :8585", "Data products, ODCS contracts, PII tags, quality assertions, FIBO grounding, lineage.")
+            ContainerDb(omdb, "MySQL", "mysql:8.0.35, :33060 loopback", "OpenMetadata's backing store.")
+            ContainerDb(omsearch, "OpenSearch", "opensearch:2.11.0, :9200 loopback", "Catalog search index.")
+        }
+
+        Container_Boundary(orchestration, "Ingestion & Orchestration") {
+            Container(dagster, "Dagster Orchestrator", "Python / Dagster, UI :3001", "13-asset graph with declared deps, retries, backfill and a daily bot-token rotation schedule.")
+            Container(pipeline, "Pipeline Scripts", "Python, run on the host", "Seed generation, graph build, catalog registration, FIBO grounding, contracts, quality tests, lineage, embeddings.")
+        }
+
+        Container_Boundary(metrics, "Metrics & Alerting") {
+            Container(prom, "Prometheus", "prom/prometheus, :9090", "Scrapes 8 targets and evaluates the platform alert rules.")
+            Container(am, "Alertmanager", "prom/alertmanager, :9093", "Dedupes alerts. Receiver is a deliberate no-op — no external channel configured.")
+            Container(exporters, "Metric Exporters", "node / postgres / mysqld / cAdvisor / Neo4j JMX", "Host, database, container and JVM metrics.")
+        }
+
+        Container_Boundary(tracing, "Tracing & Visualization") {
+            Container(otel, "OTel Collector", "otel-collector, :4317 / :4318", "Receives and batches real trace spans from the MCP sidecar.")
+            ContainerDb(tempo, "Tempo", "grafana/tempo, query API :3200", "Trace storage and TraceQL backend, local filesystem.")
+            Container(graf, "Grafana", "grafana:13.1.3, :3000", "Provisioned Prometheus, Tempo and Alertmanager datasources + LLMOps dashboard.")
+        }
+    }
+
+    Rel(analyst, streamlit, "Explores data, submits prompts", "HTTP :8501")
+    Rel(analyst, graf, "Views dashboards and alerts", "HTTP :3000")
+    Rel(operator, dagster, "Materializes pipeline assets", "HTTP :3001")
+    Rel(agent_client, mcp, "Calls the 6 MCP tools", "SSE + Bearer, :8001")
+
+    Rel(streamlit, retriever, "4-tier retrieval", "in-process")
+    Rel(streamlit, ollama, "Grounded generation", "HTTP :11434")
+    Rel(mcp, ollama, "Autonomous tool-calling loop", "HTTP :11434")
+
+    Rel(mcp, retriever, "hybrid_rag_search", "in-process")
+    Rel(mcp, pg, "Read-only SQL as mcp_readonly", "psycopg2, :54322")
+    Rel(mcp, neo4j, "Read-only Cypher", "Bolt :7687")
+    Rel(mcp, cube, "Metric queries", "REST + Bearer")
+    Rel(mcp, om, "Catalog search, quality scorecards", "REST + JWT")
+    Rel(mcp, otel, "Tool-call and per-tier spans", "OTLP/gRPC")
+
+    Rel(retriever, pg, "Vector and SQL tiers", "psycopg2")
+    Rel(retriever, neo4j, "Graph-RAG tier", "Bolt")
+    Rel(retriever, cube, "Semantic metrics tier", "REST + Bearer")
+
+    Rel(cube, pg, "Aggregations as cube_readonly", "Postgres wire")
+    Rel(cube, cubestore, "Builds and reads rollups", "internal :3030")
+
+    Rel(om, omdb, "Entity persistence", "JDBC")
+    Rel(om, omsearch, "Index and search", "HTTP")
+
+    Rel(dagster, pipeline, "Runs each script as an asset", "subprocess")
+    Rel(pipeline, pg, "Applies seed, writes embeddings", "psql / psycopg2")
+    Rel(pipeline, neo4j, "Builds graph, writes lineage", "Bolt")
+    Rel(pipeline, om, "Registers tables, contracts, tests, lineage", "REST + JWT")
+
+    Rel(prom, mcp, "Scrapes real per-call metrics", "HTTP :8000")
+    Rel(prom, exporters, "Scrapes infrastructure metrics", "HTTP")
+    Rel(prom, am, "Fires alerts", "HTTP :9093")
+    Rel(exporters, pg, "Postgres metrics as mcp_readonly", "Postgres wire")
+    Rel(exporters, omdb, "MySQL metrics", "MySQL wire")
+
+    Rel(otel, tempo, "Forwards spans", "OTLP :4319")
+    Rel(graf, prom, "Queries metrics", "HTTP")
+    Rel(graf, tempo, "Queries traces", "TraceQL :3200")
+    Rel(graf, am, "Reads alert state", "HTTP")
