@@ -27,7 +27,7 @@ cutting across every layer.
                                                   |
 +---------------------------------------------------------------------------------------------------+
 |                        TIER 5: AGENTIC PROTOCOL & INTERFACE LAYER                                 |
-|  [Model Context Protocol (MCP) Server]      [Ollama Autonomous Tool-Calling Runner]               |
+|  [Model Context Protocol (MCP) Server]      [Agentic Tool Runner (Ollama | Moonshot Kimi)]        |
 +---------------------------------------------------------------------------------------------------+
                                                   ^
                                                   |
