@@ -115,7 +115,22 @@ def fetch_table_comment(cur, schema, table):
 
 def fetch_constraints(cur, schema, table):
     """Returns dict: pk_col, fk={col: (ref_schema, ref_table, ref_col)},
-    unique_cols=set(), other_notes=[def strings for CHECK/EXCLUDE]."""
+    unique_cols=set(), other_notes=[def strings for CHECK/EXCLUDE].
+
+    `ORDER BY c.oid` is load-bearing, not decorative: without it, Postgres
+    is free to return pg_constraint rows in whatever order its query
+    planner picks for that particular scan, which depends on the catalog's
+    physical layout (accumulated autovacuum/ANALYZE state), not just the
+    schema itself -- verified live to differ between two Postgres instances
+    built from the byte-identical migrations, non-deterministically
+    flipping the "Constraints: ..." Note string's item order and failing
+    tests/test_schema_dbml_drift.py's on-disk comparison depending on which
+    instance last regenerated schema.dbml. `c.oid` (creation order) is
+    deterministic across any instance seeded from the same migrations in
+    the same order -- it's also the only ordering here that means
+    something (inline CREATE TABLE constraints before later ALTER TABLE
+    ones), rather than an arbitrary tiebreaker.
+    """
     cur.execute(
         """
         SELECT contype, pg_get_constraintdef(c.oid)
@@ -123,6 +138,7 @@ def fetch_constraints(cur, schema, table):
         JOIN pg_class t ON t.oid = c.conrelid
         JOIN pg_namespace n ON n.oid = t.relnamespace
         WHERE n.nspname = %s AND t.relname = %s
+        ORDER BY c.oid
         """,
         (schema, table),
     )
