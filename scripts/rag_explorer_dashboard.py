@@ -4,7 +4,7 @@
 Enterprise AI Data Platform & Multi-Modal RAG Explorer (Streamlit Dashboard)
 ===============================================================================
 Interactive Web UI for real-time RAG context inspection, AI Guardrails audit,
-local Ollama Gemma 4 inference, and LLMOps Telemetry trace span visualization.
+LLM inference via the configured provider, and LLMOps Telemetry trace span visualization.
 ===============================================================================
 """
 
@@ -13,7 +13,6 @@ import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import json
-import time
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -22,11 +21,11 @@ import streamlit as st
 from scripts._dotenv_boot import load_env
 from scripts.ai_safety_guardrails import AISafetyGuardrails
 from scripts.hybrid_rag_retriever import HybridRAGRetriever
-from scripts.ollama_agentic_tool_runner import OllamaAgenticRunner
 
 load_env()
 
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434/api/generate")
+from scripts._llm_backend import LLMBackendError, get_llm_backend  # noqa: E402
+from scripts.agentic_tool_runner import AgenticToolRunner  # noqa: E402
 POSTGRES_HOST = os.getenv("POSTGRES_HOST", "127.0.0.1")
 POSTGRES_PORT = int(os.getenv("POSTGRES_PORT", "54322"))
 POSTGRES_USER = os.getenv("POSTGRES_USER", "postgres")
@@ -87,12 +86,14 @@ def get_system_status() -> dict:
     except Exception as e:
         status["Cube.js Semantic Engine"] = (False, str(e))
 
+    # Provider-aware: reports whichever LLM backend LLM_PROVIDER selects,
+    # rather than always probing Ollama even when Moonshot is configured.
     try:
-        req = urllib.request.Request(OLLAMA_URL.replace("/api/generate", "/api/tags"))
-        urllib.request.urlopen(req, timeout=2)
-        status["Ollama Local Engine"] = (True, "Active (Port 11434)")
-    except Exception as e:
-        status["Ollama Local Engine"] = (False, str(e))
+        backend = get_llm_backend()
+        ok, detail = backend.is_available()
+        status[f"LLM ({backend.model_label})"] = (ok, detail)
+    except LLMBackendError as e:
+        status["LLM (unconfigured)"] = (False, str(e))
 
     return status
 
@@ -154,8 +155,8 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-def call_ollama_model(model_name: str, prompt_text: str, context_payload: dict) -> dict:
-    """Invokes local Ollama LLM endpoint."""
+def call_llm_model(model_name: str, prompt_text: str, context_payload: dict) -> dict:
+    """Invokes whichever LLM backend LLM_PROVIDER selects (Ollama or Moonshot)."""
     system_prompt = (
         "You are an expert Financial Risk & Enterprise Data Platform AI Assistant. "
         "Analyze the provided multi-modal RAG context (Vector, Neo4j Graph, Cube.js Semantic Metrics, Relational SQL) "
@@ -167,34 +168,27 @@ def call_ollama_model(model_name: str, prompt_text: str, context_payload: dict) 
         f"--- USER QUESTION ---\n{prompt_text}\n\n"
         f"--- FINANCIAL ANALYSIS & RESPONSE ---"
     )
-    req_body = {
-        "model": model_name,
-        "prompt": full_prompt,
-        "stream": False,
-        "options": {"temperature": 0.2}
-    }
-    t_start = time.time()
     try:
-        req = urllib.request.Request(
-            OLLAMA_URL,
-            data=json.dumps(req_body).encode("utf-8"),
-            headers={"Content-Type": "application/json"}
+        backend = get_llm_backend()
+        if model_name:
+            backend.model = model_name
+        result = backend.chat(
+            [{"role": "user", "content": full_prompt}],
+            temperature=0.2,
         )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            latency_ms = round((time.time() - t_start) * 1000, 2)
-            return {
-                "response": data.get("response", "").strip(),
-                "prompt_eval_count": data.get("prompt_eval_count", 0),
-                "eval_count": data.get("eval_count", 0),
-                "latency_ms": latency_ms
-            }
-    except Exception as e:
-        return {"error": f"Ollama Connection Error: {e}", "latency_ms": 0}
+        return {
+            "response": result.content,
+            "prompt_eval_count": result.prompt_tokens,
+            "eval_count": result.completion_tokens,
+            "latency_ms": result.latency_ms,
+            "model_label": result.model_label,
+        }
+    except LLMBackendError as e:
+        return {"error": f"LLM Error: {e}", "latency_ms": 0}
 
 def main():
     st.markdown('<div class="main-header">🏛️ Enterprise AI Data Platform & RAG Explorer</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-header">Multi-Modal 4-Tier Context Retrieval (pgvector + Neo4j + Cube.js + SQL) powered by Local Ollama Gemma 4</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">Multi-Modal 4-Tier Context Retrieval (pgvector + Neo4j + Cube.js + SQL) powered by the configured LLM provider</div>', unsafe_allow_html=True)
 
     # Top Architecture Summary Cards
     col1, col2, col3, col4 = st.columns(4)
@@ -205,7 +199,11 @@ def main():
     with col3:
         st.metric(label="📊 Semantic Layer", value="Cube.js REST API", delta="16 Data Cubes")
     with col4:
-        st.metric(label="🤖 Local LLM Engine", value="Ollama Gemma 4", delta="$0.00 / 1k Tokens")
+        try:
+            _b = get_llm_backend()
+            st.metric(label="🤖 LLM Engine", value=_b.provider.title(), delta=_b.model)
+        except LLMBackendError:
+            st.metric(label="🤖 LLM Engine", value="Unconfigured", delta="set LLM_PROVIDER")
 
     st.markdown("---")
 
@@ -215,10 +213,27 @@ def main():
         "Select Execution Mode",
         ["🤖 Autonomous Gemma 4 Function Calling", "🔍 4-Tier Hybrid RAG Pipeline"]
     )
-    model_choice = st.sidebar.selectbox(
-        "Select LLM Model Profile",
-        ["gemma4:latest", "gemma4:12b", "gemini-2.0-flash", "claude-3-5-sonnet"]
-    )
+    # Provider-aware. The previous hardcoded list offered gemini-2.0-flash and
+    # claude-3-5-sonnet, neither of which this platform can reach -- picking one
+    # sent an unknown model name straight to Ollama. The default entry uses
+    # whatever LLM_PROVIDER/`*_MODEL` resolve to in .env; the alternatives are
+    # models the *configured provider* actually serves.
+    try:
+        _backend = get_llm_backend()
+        _default_label = f"Configured default ({_backend.model_label})"
+        _alternatives = {
+            "ollama": ["gemma4:latest", "gemma4:12b"],
+            "moonshot": ["kimi-k2.6", "kimi-k2.5", "kimi-k3", "moonshot-v1-128k"],
+        }.get(_backend.provider, [])
+        _options = [_default_label] + [m for m in _alternatives if m != _backend.model]
+    except LLMBackendError as e:
+        _default_label = "LLM unconfigured"
+        _options = [_default_label]
+        st.sidebar.error(f"LLM backend: {e}")
+
+    _selected = st.sidebar.selectbox("Select LLM Model Profile", _options)
+    # None -> the backend keeps the model from .env.
+    model_choice = None if _selected == _default_label else _selected
     
     st.sidebar.markdown("---")
     st.sidebar.subheader("🔌 System Status")
@@ -246,8 +261,8 @@ def main():
             return
 
         if "Autonomous" in execution_mode:
-            with st.spinner("🤖 Ollama Gemma 4 Thinking & Autonomously Invoking FastMCP Tools..."):
-                agent_runner = OllamaAgenticRunner(model_name=model_choice)
+            with st.spinner("🤖 Agent thinking & autonomously invoking FastMCP tools..."):
+                agent_runner = AgenticToolRunner(model_name=model_choice)
                 result = agent_runner.run_agentic_loop(user_prompt)
 
             st.markdown("### 💬 Autonomous Gemma 4 Response & Decision Log")
@@ -277,7 +292,7 @@ def main():
                     return
 
                 rag_payload = retriever.hybrid_retrieve(user_prompt)
-                ollama_res = call_ollama_model(model_choice, user_prompt, rag_payload)
+                ollama_res = call_llm_model(model_choice, user_prompt, rag_payload)
 
             st.markdown("### 💬 Grounded AI Financial Analysis (Local Gemma 4)")
             if "error" in ollama_res:
@@ -290,7 +305,7 @@ def main():
         # 4-Tier Interactive Context Tabs -- only meaningful in RAG Pipeline
         # mode, which is the only branch above that populates rag_payload/
         # ollama_res/guardrails. Autonomous mode drives MCP tools directly via
-        # OllamaAgenticRunner (its own tool-call log is rendered above) and
+        # AgenticToolRunner (its own tool-call log is rendered above) and
         # has no equivalent 4-tier payload -- rendering this section
         # unconditionally previously raised NameError the first time anyone
         # ran Autonomous mode and clicked through to these tabs.
@@ -365,7 +380,8 @@ def main():
                 with m_col3:
                     st.metric("Generation Latency", f"{ollama_res.get('latency_ms', 0)} ms")
                 with m_col4:
-                    st.metric("Cumulative Cost", "$0.0000 USD (Local)")
+                    st.metric("Cumulative Cost",
+                              f"${rag_payload.get('_telemetry_span', {}).get('cost_usd', 0):.6f} USD")
 
                 st.json(rag_payload.get("_telemetry_span", {}))
 

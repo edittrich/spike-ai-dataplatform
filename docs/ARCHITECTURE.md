@@ -67,7 +67,7 @@ cutting across every layer.
 | 2. Storage | Multi-model data plane | Supabase PostgreSQL + pgvector, Neo4j 5 Community, MySQL (OpenMetadata's own backing store) |
 | 3. Semantic & governance | Business metrics, catalog, ontology grounding | Cube.js, OpenMetadata, `ontology/*.ttl` |
 | 4. Retrieval | Turns tiers 2–3 into LLM-ready context | `scripts/hybrid_rag_retriever.py` (vector + graph + metrics + SQL), `scripts/neural_reranker.py`, `scripts/text_to_cypher_builder.py` |
-| 5. Agentic protocol | Standardized tool interface for AI agents | `mcp_server/financial_data_mcp_server.py` (FastMCP, stdio or SSE) |
+| 5. Agentic protocol | Standardized tool interface for AI agents | `mcp_server/financial_data_mcp_server.py` (FastMCP, stdio or SSE); `scripts/_llm_backend.py` selects the driving model via `LLM_PROVIDER` (Ollama or Moonshot Kimi-K2.6) |
 | 6. Consumption | Human and agent-facing surfaces | Streamlit dashboard, Grafana |
 | Cross-cutting | Security and operational visibility | `scripts/ai_safety_guardrails.py`, `scripts/llmops_telemetry.py`, Prometheus (+ `node_exporter`/`postgres_exporter`/`mysqld_exporter`/`cadvisor`/Neo4j JVM exporter, `catalog/prometheus_rules.yml`, `alertmanager`), real OTel distributed tracing (`scripts/_otel_tracing.py` -> `otel_collector` -> `tempo`) |
 
@@ -250,6 +250,14 @@ WHERE p.md_is_active = TRUE;
   the original un-redacted value. `sanitize_context_payload` quarantines detected prompt-injection
   spans (replacing them in the payload, not just flagging `safety_status` in unread metadata) and
   always attaches an explicit untrusted-data notice.
+- **LLM provider boundary:** `LLM_PROVIDER` selects between a local Ollama model and the
+  Moonshot API (`scripts/_llm_backend.py`). This is a real trust-boundary choice, not just a
+  performance one: under `moonshot`, prompts and retrieved RAG context — already PII-redacted and
+  injection-quarantined by `AISafetyGuardrails.sanitize_context_payload` before they reach any
+  model — leave the host to a third-party API over TLS, whereas `ollama` keeps every token on the
+  machine. Embeddings and cross-encoder re-ranking always run locally regardless. The switch fails
+  closed: an unknown provider, or `moonshot` with no `MOONSHOT_API_KEY`, refuses to start rather
+  than silently answering with the other model.
 - **Retrieval honesty:** `scripts/hybrid_rag_retriever.py` and `scripts/neural_reranker.py` fail
   closed (raise, don't silently substitute) if the real embedding/cross-encoder models can't load,
   via `scripts/_embedding_backend.py` — set `ALLOW_DEGRADED_EMBEDDINGS=1` to explicitly opt into a

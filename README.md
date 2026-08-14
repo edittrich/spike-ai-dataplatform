@@ -80,6 +80,7 @@ implemented (CDC ingestion, a lakehouse/warehouse tier, hybrid lexical+vector se
 - **Dynamic Text-to-Cypher Knowledge Graph Query Builder**: Natural language to read-only Cypher query compiler in [scripts/text_to_cypher_builder.py](scripts/text_to_cypher_builder.py) supporting entity extraction, relationship traversal, and security validation.
 - **Multi-Modal Hybrid RAG Retriever**: Unified 4-tier retrieval engine combining 2-Stage Neural Vector Search + Neo4j Graph-RAG Cypher + Cube.js Semantic Metrics + PostgreSQL Relational SQL.
 - **FastMCP Agentic Protocol Sidecar Server (`:8001/sse`)**: Persistent sidecar service in [mcp_server/Dockerfile.mcp](mcp_server/Dockerfile.mcp) exposing 6 agent tools over HTTP/SSE.
+- **Pluggable LLM Provider (`LLM_PROVIDER`)**: One `.env` switch moves every LLM-calling component between local Ollama (`gemma4:latest`) and the Moonshot API (`moonshotai/Kimi-K2.6`), via the shared backend in [scripts/_llm_backend.py](scripts/_llm_backend.py). Embeddings and cross-encoder re-ranking always stay local, so retrieval behaves identically under both.
 - **RAG Triad Smoke-Test Suite**: Heuristic (token-overlap) evaluator in [scripts/rag_triad_evaluator.py](scripts/rag_triad_evaluator.py) scoring Context Relevance, Faithfulness, and Answer Relevance as a fast sanity check — no model is in the loop, so treat scores as pass/fail smoke tests rather than accuracy or hallucination measurements.
 
 ### Cluster 3: Master Orchestration & Observability Suite
@@ -112,7 +113,7 @@ implemented (CDC ingestion, a lakehouse/warehouse tier, hybrid lexical+vector se
 | **Grafana Dashboards** | `http://127.0.0.1:3000` | Credentials via `GRAFANA_ADMIN_USER`/`GRAFANA_ADMIN_PASSWORD` in `.env` |
 | **Tempo Trace Query API** | `http://127.0.0.1:3200` | Queried through Grafana's Tempo datasource, or directly (`/api/search`, `/api/traces/<id>`) |
 | **OTel Collector (OTLP ingest)** | `http://127.0.0.1:4317` (gRPC) | Configured via `OTEL_EXPORTER_OTLP_ENDPOINT` / `.env` |
-| **Local Ollama LLM Engine** | `http://127.0.0.1:11434` | Local model `gemma4:latest` |
+| **LLM Provider** | Ollama `http://127.0.0.1:11434` **or** Moonshot `https://api.moonshot.ai/v1` | Switched by `LLM_PROVIDER` in `.env` (`ollama` \| `moonshot`); Moonshot needs `MOONSHOT_API_KEY` |
 
 ---
 
@@ -122,6 +123,21 @@ implemented (CDC ingestion, a lakehouse/warehouse tier, hybrid lexical+vector se
 ```bash
 cp .env.example .env
 ```
+
+**Choose the LLM.** One value in `.env` switches the model behind every
+LLM-calling component — the agentic tool runner, the RAG-Triad judge, the
+Streamlit dashboard and the E2E test:
+
+```bash
+LLM_PROVIDER=ollama     # local gemma4:latest via Ollama (default; free, no API key)
+LLM_PROVIDER=moonshot   # moonshotai/Kimi-K2.6 via the Moonshot API (set MOONSHOT_API_KEY)
+```
+
+Nothing else needs changing — see [`scripts/_llm_backend.py`](scripts/_llm_backend.py),
+which normalizes the differences between the two APIs (tool-call argument
+encoding, tool-result envelopes, token accounting, temperature limits). It fails
+closed: an unknown provider, or `moonshot` with no key, refuses to start rather
+than silently answering with the other model.
 
 Also, once per checkout, before your first commit — installs a local git hook that blocks a commit
 containing a likely secret (`gitleaks protect --staged`, via Docker):
@@ -192,11 +208,12 @@ python3 -m mcp_server.test_mcp_server
 # Run Agentic Evaluation Smoke-Test Suite (5 scenarios; checks each subsystem responds, not answer accuracy)
 python3 scripts/evaluate_agentic_retrieval.py
 
-# Execute End-to-End Application Test against Local Ollama Gemma 4
-python3 scripts/test_e2e_ollama_pipeline.py
+# Execute End-to-End Application Test against the configured LLM (LLM_PROVIDER)
+python3 scripts/test_e2e_pipeline.py
 
-# Run Ollama Gemma 4 Autonomous Function-Calling & Tool Runner
-python3 scripts/ollama_agentic_tool_runner.py
+# Run Autonomous Function-Calling & Tool Runner (LLM_PROVIDER selects the model;
+# prefix with LLM_PROVIDER=moonshot to override for one run)
+python3 scripts/agentic_tool_runner.py
 
 # Launch Interactive Streamlit RAG Explorer Web UI Dashboard
 streamlit run scripts/rag_explorer_dashboard.py

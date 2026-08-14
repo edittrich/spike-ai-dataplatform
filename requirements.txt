@@ -16,7 +16,7 @@ transformers>=4.38.0
 # fixing Q11's fastmcp fallback: a fresh `pip install "mcp>=1.0.0"` (no
 # fastmcp alongside it) resolves mcp 2.0.0, which renamed FastMCP to
 # MCPServer and moved it from mcp.server.fastmcp to mcp.server.mcpserver, a
-# breaking change this codebase (and ollama_agentic_tool_runner.py's direct
+# breaking change this codebase (and agentic_tool_runner.py's direct
 # raw-function tool calls specifically) is written against the 1.x shape
 # of. Reproduced in a clean container before adding this bound: the exact
 # `ModuleNotFoundError: No module named 'mcp.server.fastmcp'` this fix

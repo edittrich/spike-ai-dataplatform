@@ -144,12 +144,12 @@ or on step 3 — and can run in any order or in parallel.
 13. **[`scripts/ai_safety_guardrails.py`](../scripts/ai_safety_guardrails.py):** Implements PII redaction, prompt injection defense, and read-only query enforcement (regex/keyword-based, with separate SQL and Cypher keyword lists and string-literal-aware tokenization). This is the first of two enforcement layers, not the only one: the MCP server's database connections carry their own privilege- and access-mode-level restrictions regardless of what this scan misses — see `mcp_readonly` in [`mcp_server/financial_data_mcp_server.py`](../mcp_server/financial_data_mcp_server.py) and `docs/ARCHITECTURE.md`'s Security Model. The prompt-injection check is a fixed regex list (paraphrase, other languages, or encoding easily evade it), but a detected match is actually quarantined (replaced in the payload) via `sanitize_context_payload`/`quarantine_injection_matches`, not just flagged in metadata — treat detection itself as a coarse filter, not a guarantee, but what it *does* detect no longer reaches an LLM unchanged. PII redaction has two paths: `redact_pii` (blanket value-shape regexes over free text, label-anchored for DOB/passport/national-ID/tax-ID to cut false positives, IBAN checked before the credit-card pattern, returned mapping holds only a category label never the original value) and `redact_row`/`redact_rows` (field-aware, by real column name against `scripts/_pii_classification.py`'s shared patterns — used by the MCP tools below and recursively inside `sanitize_context_payload`).
 13b. **[`scripts/_pii_classification.py`](../scripts/_pii_classification.py):** Single shared source of truth for "what counts as PII" (`PII_PERSONAL_PATTERNS`/`PII_SPECIAL_PATTERNS`/`PII_CUBEJS_MASK_PATTERNS`), consumed by the catalog auto-tagger, the guardrails module above, and Cube.js's dimension masking (`cube/cube.js`'s `queryRewrite`).
 14. **[`scripts/llmops_telemetry.py`](../scripts/llmops_telemetry.py):** Tracks per-call latencies, token accounting, and model cost estimates as structured JSON trace spans, as real `prometheus_client` Counters/Histograms served by `mcp_sidecar` itself, and as real OTel spans (one per RAG tier, nested under the calling tool's span) exported via [`scripts/_otel_tracing.py`](../scripts/_otel_tracing.py) to `otel_collector` -> `tempo`.
-15. **[`scripts/ollama_agentic_tool_runner.py`](../scripts/ollama_agentic_tool_runner.py):** Native tool-calling runner allowing a local Ollama model (default `gemma4:latest`) to execute FastMCP tools autonomously.
+15. **[`scripts/agentic_tool_runner.py`](../scripts/agentic_tool_runner.py):** Native tool-calling runner letting the configured LLM execute FastMCP tools autonomously. The provider comes from `LLM_PROVIDER` in `.env` (`ollama` -> local `gemma4:latest`, `moonshot` -> `moonshotai/Kimi-K2.6`) via [`scripts/_llm_backend.py`](../scripts/_llm_backend.py); nothing in this file branches on provider.
 16. **[`mcp_server/financial_data_mcp_server.py`](../mcp_server/financial_data_mcp_server.py):** FastMCP server exposing 6 tools (`search_data_catalog`, `query_semantic_metrics`, `query_knowledge_graph`, `query_financial_database`, `check_data_quality`, `hybrid_rag_search`).
 
 ### E. Evaluation, Web UI & Benchmarks
 17. **[`scripts/rag_triad_evaluator.py`](../scripts/rag_triad_evaluator.py):** Heuristic (token-overlap) scorer for Context Relevance, Faithfulness, and Answer Relevance. The fallback scorer, used only when the LLM judge (below) is unavailable — on its own, treat its scores as pass/fail sanity checks, not as accuracy or hallucination measurements, since it has no model in the loop.
-17b. **[`scripts/llm_judge_evaluator.py`](../scripts/llm_judge_evaluator.py):** Real semantic RAG-Triad scoring via the local `gemma4:latest` Ollama model, the primary scorer whenever Ollama is reachable and the model is pulled (checked once via `is_available()`). Fails open, not closed — an unavailable judge falls back to #17 rather than aborting the benchmark. Empty responses are scored 0 via a deterministic code-level short-circuit rather than a prompt instruction, since the judge model does not reliably self-correct on that degenerate case when merely asked to.
+17b. **[`scripts/llm_judge_evaluator.py`](../scripts/llm_judge_evaluator.py):** Real semantic RAG-Triad scoring via whichever model `LLM_PROVIDER` selects, the primary scorer whenever that provider is reachable and the model is available (checked once via `is_available()`). Its result carries `deterministic: false` when the provider refused the `temperature=0.0` it asks for -- `kimi-k2.6` does, so Kimi-scored runs are not reproducible or comparable to Ollama-scored ones. Fails open, not closed — an unavailable judge falls back to #17 rather than aborting the benchmark. Empty responses are scored 0 via a deterministic code-level short-circuit rather than a prompt instruction, since the judge model does not reliably self-correct on that degenerate case when merely asked to.
 18. **[`scripts/evaluate_agentic_retrieval.py`](../scripts/evaluate_agentic_retrieval.py):** 5-scenario smoke-test suite that checks each subsystem responds without error, plus the RAG Triad scores above (LLM judge first, substring fallback second, via its own `score_triad()` method). Not an accuracy benchmark for the same reason as #17.
 19. **[`scripts/rag_explorer_dashboard.py`](../scripts/rag_explorer_dashboard.py):** Interactive 6-Tab Streamlit Web Dashboard (`http://localhost:8501`).
 
@@ -206,10 +206,15 @@ or on step 3 — and can run in any order or in parallel.
    against the `mcp_readonly` role / the DB-introspected schema when a database is reachable, and
    skip cleanly (not fail) otherwise.
 
-6. **Test Autonomous Ollama Gemma 4 Function Calling:**
+6. **Test Autonomous Function Calling** (against whichever provider `LLM_PROVIDER` selects):
    ```bash
-   python3 scripts/ollama_agentic_tool_runner.py
+   python3 scripts/agentic_tool_runner.py
+
+   # Or override for a single run, without editing .env:
+   LLM_PROVIDER=moonshot python3 scripts/agentic_tool_runner.py
    ```
+   It prints the resolved provider and model, and an availability probe, before doing any work --
+   and exits non-zero if the loop fails, rather than reporting success regardless of outcome.
 
 7. **Launch Streamlit Web UI:**
    ```bash
@@ -335,6 +340,13 @@ Operational quirks worth knowing before you conclude something in your own setup
   Cypher keyword guardrail, but it does *not* block a non-write procedure call (e.g. an APOC
   HTTP-fetch procedure used for SSRF), which is why the guardrail's Cypher keyword list still blocks
   `CALL` and no APOC plugin is installed at all.
+- **`kimi-k2.6` accepts only `temperature=1`.** Any other value returns `HTTP 400 invalid
+  temperature: only 1 is allowed for this model`. `scripts/_llm_backend.py` omits the field for
+  `kimi-*` models rather than coercing it, and flags the call as
+  `temperature_honored: false`. The visible consequence is the RAG-Triad LLM judge: it requests
+  `0.0` for reproducible scores and cannot get it under Kimi, so its output carries
+  `deterministic: false` and its scores vary between runs. Scores from the two providers are
+  therefore not directly comparable. Ollama honors any temperature.
 - **`schema.dbml` is a generated file** (`python3 scripts/generate_schema_dbml.py`) — do not hand-edit
   it; a migration that changes the schema without regenerating it will show up as drift under
   `--check` (and in `tests/test_schema_dbml_drift.py`, when a live database is reachable).
