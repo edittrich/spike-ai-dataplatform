@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ===============================================================================
-End-to-End (E2E) Application Test Suite against Local Ollama Gemma 4
+End-to-End (E2E) Application Test Suite against the configured LLM provider
 ===============================================================================
 Executes a complete 360° E2E workflow:
 1. Prompt Guardrails Security Audit (PII Masking & Injection Check)
@@ -11,7 +11,7 @@ Executes a complete 360° E2E workflow:
    - Tier 3: Cube.js Semantic Metric Layer Aggregation
    - Tier 4: Supabase PostgreSQL Read-Only SQL Execution
 3. FastMCP Server Tool Dispatch & Context Payload Formatting
-4. Local Ollama LLM Inference (`gemma4:latest` @ http://127.0.0.1:11434)
+4. LLM Inference via the configured provider (LLM_PROVIDER: ollama | moonshot)
 5. LLMOps Telemetry, Cost Accounting ($0.00) & OpenTelemetry Span Export
 ===============================================================================
 """
@@ -21,67 +21,49 @@ import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import json
-import time
-import urllib.request
-import urllib.parse
-import urllib.error
 import asyncio
 
+from scripts._dotenv_boot import load_env
+
+# Loaded before _llm_backend is used so the provider credentials in .env are
+# visible when this script is run directly (its documented usage). Idempotent.
+load_env()
+
+from scripts._llm_backend import LLMBackendError, get_llm_backend  # noqa: E402
 from scripts.ai_safety_guardrails import AISafetyGuardrails
 from scripts.hybrid_rag_retriever import HybridRAGRetriever
 from scripts.llmops_telemetry import LLMOpsTelemetry
 from mcp_server.financial_data_mcp_server import mcp
 
-OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
-MODEL_NAME = "gemma4:latest"
 
-def call_ollama(prompt_text: str, context_payload: dict) -> dict:
-    """Invokes local Ollama gemma4:latest model with RAG context."""
+def call_llm(prompt_text: str, context_payload: dict) -> dict:
+    """Invokes the configured LLM backend (Ollama or Moonshot) with RAG context."""
     system_prompt = (
-        "You are an expert Financial Risk & Data Platform AI Assistant. "
-        "Use the provided 4-tier RAG context (Vector, Graph, Semantic Metrics, Relational SQL) "
-        "to deliver a concise, precise, and professional answer."
+        "You are an expert Financial Risk & Enterprise Data Platform AI Assistant. "
+        "Analyze the provided multi-modal RAG context and answer the user question."
     )
-    
     full_prompt = (
         f"{system_prompt}\n\n"
-        f"--- GROUNDED RAG CONTEXT ---\n"
-        f"{json.dumps(context_payload, indent=2)}\n\n"
-        f"--- USER QUESTION ---\n"
-        f"{prompt_text}\n\n"
-        f"--- FINANCIAL ANALYSIS & RESPONSE ---"
-    )
-
-    req_body = {
-        "model": MODEL_NAME,
-        "prompt": full_prompt,
-        "stream": False,
-        "options": {
-            "temperature": 0.2
-        }
-    }
-
-    t_start = time.time()
-    req = urllib.request.Request(
-        OLLAMA_URL,
-        data=json.dumps(req_body).encode("utf-8"),
-        headers={"Content-Type": "application/json"}
+        f"--- GROUNDED RAG CONTEXT ---\n{json.dumps(context_payload, indent=2)}\n\n"
+        f"--- USER QUESTION ---\n{prompt_text}\n\n"
+        f"--- RESPONSE ---"
     )
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            latency_ms = round((time.time() - t_start) * 1000, 2)
-            return {
-                "response": data.get("response", "").strip(),
-                "eval_count": data.get("eval_count", 0),
-                "prompt_eval_count": data.get("prompt_eval_count", 0),
-                "ollama_latency_ms": latency_ms
-            }
-    except Exception as e:
-        return {"error": f"Ollama Call Error: {e}", "ollama_latency_ms": 0}
+        backend = get_llm_backend()
+        result = backend.chat([{"role": "user", "content": full_prompt}], temperature=0.2)
+        return {
+            "response": result.content,
+            "prompt_eval_count": result.prompt_tokens,
+            "eval_count": result.completion_tokens,
+            "llm_latency_ms": result.latency_ms,
+            "model_label": result.model_label,
+        }
+    except LLMBackendError as e:
+        return {"error": f"LLM Call Error: {e}", "llm_latency_ms": 0}
 
-async def run_e2e_ollama_pipeline():
-    print("🚀 Starting End-to-End (E2E) Application Test against Ollama (gemma4:latest)...")
+
+async def run_e2e_pipeline():
+    print("🚀 Starting End-to-End (E2E) Application Test against the configured LLM...")
     print("==================================================================================")
 
     # Test Inquiry
@@ -165,19 +147,19 @@ async def run_e2e_ollama_pipeline():
         print("  ✅ FastMCP `search_data_catalog` tool invoked successfully")
 
     # -------------------------------------------------------------------------
-    # STEP 4: Local Ollama Gemma 4 LLM Inference
+    # STEP 4: LLM Inference via the configured provider
     # -------------------------------------------------------------------------
-    print(f"\n🤖 Step 4: Invoking Local Ollama ({MODEL_NAME}) Inference Engine...")
-    ollama_res = call_ollama(user_prompt, rag_payload)
+    print("\n🤖 Step 4: Invoking the configured LLM inference engine...")
+    llm_res = call_llm(user_prompt, rag_payload)
 
-    if "error" in ollama_res:
-        print(f"❌ Ollama Error: {ollama_res['error']}")
+    if "error" in llm_res:
+        print(f"❌ LLM Error: {llm_res['error']}")
         return
 
     print("\n" + "="*80)
-    print("💬 OLLAMA (GEMMA 4) GENERATED RESPONSE:")
+    print("💬 GENERATED RESPONSE:")
     print("="*80)
-    print(ollama_res["response"])
+    print(llm_res["response"])
     print("="*80)
 
     # -------------------------------------------------------------------------
@@ -185,28 +167,28 @@ async def run_e2e_ollama_pipeline():
     # -------------------------------------------------------------------------
     print("\n📊 Step 5: LLMOps Telemetry & OpenTelemetry Span Export...")
     telemetry = LLMOpsTelemetry()
-    trace = telemetry.start_trace(user_prompt, model=f"ollama/{MODEL_NAME}")
+    trace = telemetry.start_trace(user_prompt, model=llm_res.get("model_label", "unknown"))
     
     # Record LLM inference metrics
-    total_tokens = ollama_res["prompt_eval_count"] + ollama_res["eval_count"]
+    total_tokens = llm_res["prompt_eval_count"] + llm_res["eval_count"]
     final_span = telemetry.finalize_trace(
         trace, 
-        ollama_res["response"], 
-        total_latency_ms=rag_payload.get("_telemetry_span", {}).get("latency_ms", 0) + ollama_res["ollama_latency_ms"]
+        llm_res["response"], 
+        total_latency_ms=rag_payload.get("_telemetry_span", {}).get("latency_ms", 0) + llm_res["llm_latency_ms"]
     )
 
-    print(f"  🎯 Model:            ollama/{MODEL_NAME}")
-    print(f"  🎯 Prompt Tokens:    {ollama_res['prompt_eval_count']}")
-    print(f"  🎯 Output Tokens:    {ollama_res['eval_count']}")
+    print(f"  🎯 Model:            {llm_res.get('model_label', 'unknown')}")
+    print(f"  🎯 Prompt Tokens:    {llm_res['prompt_eval_count']}")
+    print(f"  🎯 Output Tokens:    {llm_res['eval_count']}")
     print(f"  🎯 Total Tokens:     {total_tokens}")
-    print(f"  🎯 Ollama Latency:   {ollama_res['ollama_latency_ms']}ms")
-    print(f"  🎯 Cumulative Cost:  ${final_span['cost_usd']:.6f} USD (100% Free Local Execution)")
+    print(f"  🎯 LLM Latency:      {llm_res['llm_latency_ms']}ms")
+    print(f"  🎯 Cumulative Cost:  ${final_span['cost_usd']:.6f} USD")
     print(f"  🎯 OpenTelemetry ID: {final_span['trace_id']}")
 
     if step_failures:
         print(f"\n⚠️  E2E test completed with {len(step_failures)} tier(s)/tool(s) reporting errors: {', '.join(step_failures)}")
         sys.exit(1)
-    print("\n✨ E2E application test against Ollama completed -- all tiers and tools returned data.")
+    print("\n✨ E2E application test completed -- all tiers and tools returned data.")
 
 if __name__ == "__main__":
-    asyncio.run(run_e2e_ollama_pipeline())
+    asyncio.run(run_e2e_pipeline())

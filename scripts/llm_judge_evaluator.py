@@ -8,8 +8,8 @@ substring-based -- an empty response scores a perfect 1.0 (nothing to
 disprove), and any digit or ALL_CAPS token appearing anywhere in the context
 counts a response fact as "grounded" regardless of actual meaning. That
 scorer still exists (unchanged) as a zero-dependency fallback; this module
-adds a real semantic judge using the local Ollama model already required by
-`scripts/ollama_agentic_tool_runner.py` (`gemma4:latest`, confirmed present
+adds a real semantic judge using whichever model LLM_PROVIDER selects, already required by
+`scripts/agentic_tool_runner.py` (`gemma4:latest`, confirmed present
 via `ollama list`), scoring the same three RAG Triad dimensions
 (context relevance, faithfulness, answer relevance) via natural-language
 judgment instead of token overlap.
@@ -42,19 +42,25 @@ import json
 import logging
 import os
 import re
-import socket
-import urllib.error
-import urllib.request
+import sys
 from typing import Any, Dict, Optional
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from scripts._dotenv_boot import load_env  # noqa: E402
+
+# This module is both imported (by evaluate_agentic_retrieval.py, which loads
+# .env itself) and run directly for its own self-test. Loading here too makes
+# the standalone path work: without it, `python3 scripts/llm_judge_evaluator.py`
+# saw no MOONSHOT_API_KEY and the backend correctly refused to start. Idempotent.
+load_env()
+
+from scripts._llm_backend import LLMBackendError, get_llm_backend  # noqa: E402
 
 logger = logging.getLogger("LLMJudgeEvaluator")
 
-OLLAMA_CHAT_URL = os.getenv("OLLAMA_CHAT_URL", "http://127.0.0.1:11434/api/chat")
-OLLAMA_TAGS_URL = os.getenv("OLLAMA_TAGS_URL", "http://127.0.0.1:11434/api/tags")
-LLM_JUDGE_MODEL = os.getenv("LLM_JUDGE_MODEL", "gemma4:latest")
-# Cold model load was observed live at ~6.3s; 30s leaves real headroom for a
-# larger model or a loaded host without falsely timing out.
-LLM_JUDGE_TIMEOUT_SECONDS = float(os.getenv("LLM_JUDGE_TIMEOUT_SECONDS", "30"))
+# Cold model load was observed live at ~6.3s on Ollama; a remote Kimi call with
+# reasoning tokens is slower still, so the default is generous. Overridable.
+LLM_JUDGE_TIMEOUT_SECONDS = float(os.getenv("LLM_JUDGE_TIMEOUT_SECONDS", "120"))
 
 _JUDGE_SYSTEM_PROMPT = (
     "You are a strict, impartial evaluator of Retrieval-Augmented Generation "
@@ -84,53 +90,51 @@ def _clamp01(value: Any) -> float:
 
 
 class LLMJudgeEvaluator:
-    """Real semantic RAG-Triad scoring via a local Ollama model. See module
+    """Real semantic RAG-Triad scoring via the configured LLM provider. See module
     docstring for the fail-open contract and the empty-response caveat."""
 
-    def __init__(self, model: Optional[str] = None, chat_url: Optional[str] = None,
-                 tags_url: Optional[str] = None, timeout: Optional[float] = None):
-        self.model = model or LLM_JUDGE_MODEL
-        self.chat_url = chat_url or OLLAMA_CHAT_URL
-        self.tags_url = tags_url or OLLAMA_TAGS_URL
+    def __init__(self, model: Optional[str] = None, timeout: Optional[float] = None,
+                 backend=None):
         self.timeout = timeout if timeout is not None else LLM_JUDGE_TIMEOUT_SECONDS
+        self.backend = backend or get_llm_backend()
+        if model:
+            self.backend.model = model
+        self.model = self.backend.model
+        self.model_label = self.backend.model_label
+        # Set by _call_llm() when the provider refused the deterministic
+        # temperature this judge asks for -- surfaced in evaluate_triad()'s
+        # result so a score can never be reported as reproducible when it
+        # isn't. `kimi-k2.6` is exactly that case (only temperature=1).
+        self.deterministic = True
 
     def is_available(self) -> bool:
-        """Quick reachability + model-presence check against Ollama's own
-        /api/tags -- lets a caller decide whether to attempt the (slower)
+        """Reachability + model-presence check against whichever provider is
+        configured -- lets a caller decide whether to attempt the (slower)
         judge call at all, or fall back immediately."""
-        try:
-            with urllib.request.urlopen(self.tags_url, timeout=5) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-        except (urllib.error.URLError, socket.timeout, ValueError, OSError) as e:
-            logger.warning("Ollama unreachable at %s: %s", self.tags_url, e)
-            return False
-        names = {m.get("name") for m in data.get("models", [])}
-        if self.model not in names:
-            logger.warning("Ollama is reachable but model '%s' is not pulled (available: %s)", self.model, sorted(names))
-            return False
-        return True
+        ok, detail = self.backend.is_available()
+        if not ok:
+            logger.warning("LLM judge unavailable: %s", detail)
+        return ok
 
-    def _call_ollama(self, user_content: str) -> Optional[str]:
-        payload = json.dumps({
-            "model": self.model,
-            "stream": False,
-            "options": {"temperature": 0.0},
-            "messages": [
-                {"role": "system", "content": _JUDGE_SYSTEM_PROMPT},
-                {"role": "user", "content": user_content},
-            ],
-        }).encode("utf-8")
-        req = urllib.request.Request(
-            self.chat_url, data=payload, method="POST",
-            headers={"Content-Type": "application/json"},
-        )
+    def _call_llm(self, user_content: str) -> Optional[str]:
+        """Requests temperature 0.0 for reproducible scoring. A provider that
+        refuses it (see LLMResponse.temperature_honored) still answers, but
+        the score is no longer deterministic and says so."""
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                body = json.loads(resp.read().decode("utf-8"))
-        except (urllib.error.URLError, socket.timeout, ValueError, OSError) as e:
-            logger.warning("LLM judge call failed (%s): %s", self.chat_url, e)
+            result = self.backend.chat(
+                [
+                    {"role": "system", "content": _JUDGE_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_content},
+                ],
+                temperature=0.0,
+                timeout=self.timeout,
+            )
+        except LLMBackendError as e:
+            logger.warning("LLM judge call failed: %s", e)
             return None
-        return (body.get("message") or {}).get("content")
+        if not result.temperature_honored:
+            self.deterministic = False
+        return result.content
 
     def evaluate_triad(self, prompt: str, context_text: str, response_text: str) -> Optional[Dict[str, Any]]:
         """Returns the same shape as RAGTriadEvaluator.evaluate_triad, plus
@@ -157,7 +161,7 @@ class LLMJudgeEvaluator:
             f"GENERATED RESPONSE: {response_text}\n\n"
             "Evaluate the response per the schema."
         )
-        raw = self._call_ollama(user_content)
+        raw = self._call_llm(user_content)
         if raw is None:
             return None
 
@@ -183,20 +187,28 @@ class LLMJudgeEvaluator:
             "triad_composite_score": composite,
             "triad_score_percent": f"{round(composite * 100, 1)}%",
             "rationale": str(parsed.get("rationale", ""))[:500],
-            "judge_mode": "ollama_llm_judge",
-            "judge_model": self.model,
+            "judge_mode": f"{self.backend.provider}_llm_judge",
+            "judge_model": self.model_label,
+            # False when the provider refused temperature=0.0 (e.g. kimi-k2.6
+            # accepts only 1), meaning this score is NOT reproducible run to run.
+            "deterministic": self.deterministic,
         }
 
 
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-    print("🚀 Verifying LLM-as-Judge RAG Evaluation Engine (Ollama)...")
+    print("🚀 Verifying LLM-as-Judge RAG Evaluation Engine...")
     print("=============================================================")
 
-    judge = LLMJudgeEvaluator()
+    try:
+        judge = LLMJudgeEvaluator()
+    except LLMBackendError as e:
+        print(f"❌ LLM backend misconfigured: {e}")
+        return
+    print(f"   Provider: {judge.backend.provider} | Model: {judge.model_label}")
     if not judge.is_available():
-        print(f"⚠️  Ollama not reachable or model '{judge.model}' not pulled at {judge.chat_url} -- "
-              f"skipping self-test (this is a clean degrade, not a failure: callers fall back to "
+        print(f"⚠️  Judge model '{judge.model_label}' is not reachable -- skipping self-test "
+              f"(this is a clean degrade, not a failure: callers fall back to "
               f"RAGTriadEvaluator's substring scorer in this case).")
         return
 

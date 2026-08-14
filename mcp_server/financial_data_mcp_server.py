@@ -31,7 +31,7 @@ from typing import Annotated, Dict, List, Optional
 # Q10 (hardening plan): Field(description=...) on each tool parameter below
 # feeds FastMCP's own JSON-Schema generation (mcp.list_tools(), verified live
 # to include these descriptions in each tool's inputSchema) -- the single
-# source of truth scripts/ollama_agentic_tool_runner.py's OLLAMA_TOOLS now
+# source of truth scripts/agentic_tool_runner.py's OLLAMA_TOOLS now
 # derives from at runtime instead of hand-duplicating as a separate literal.
 from pydantic import Field
 
@@ -45,7 +45,7 @@ from starlette.responses import JSONResponse
 
 # Q11 (hardening plan): this used to fall back to the standalone `fastmcp`
 # package on ImportError. The two are not interchangeable: under `mcp` 1.x,
-# `@mcp.tool()` returns the raw function, which `scripts/ollama_agentic_tool_runner.py`
+# `@mcp.tool()` returns the raw function, which `scripts/agentic_tool_runner.py`
 # relies on to call tools directly; under standalone `fastmcp` 2.x+, the same
 # decorator returns a `FunctionTool` object and every one of those direct
 # calls raises `TypeError: 'FunctionTool' object is not callable`. Verified

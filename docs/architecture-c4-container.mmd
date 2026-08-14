@@ -7,12 +7,14 @@ C4Container
     Person(operator, "Platform Operator", "Bootstraps the stack; runs the data pipeline.")
 
     System_Ext(agent_client, "AI Agent / MCP Client", "Claude Desktop, Cursor, Antigravity. Connects over SSE with a bearer token, or over stdio.")
-    System_Ext(ollama, "Ollama Runtime", "Local gemma4:latest — autonomous tool calling and LLM-judge scoring. :11434")
+    System_Ext(ollama, "Ollama Runtime", "LLM_PROVIDER=ollama. Local gemma4:latest — every token stays on the host. :11434")
+    System_Ext(moonshot, "Moonshot API", "LLM_PROVIDER=moonshot. moonshotai/Kimi-K2.6 — third-party API over TLS; redacted prompts and RAG context leave the host.")
 
     System_Boundary(platform, "Enterprise AI-Enabled Data Platform") {
 
         Container_Boundary(consumption, "Consumption & Agentic Protocol") {
             Container(streamlit, "RAG Explorer Dashboard", "Python / Streamlit, :8501", "6-tab UI over the 4-tier RAG payload, guardrails audit and LLMOps telemetry. Drives the retriever and agentic runner in-process.")
+            Container(llmbackend, "LLM Backend", "Python — scripts/_llm_backend.py", "One LLM_PROVIDER switch behind every LLM call. Normalizes tool-call argument encoding, tool-result envelopes, token accounting and temperature limits across the two providers; fails closed on misconfiguration.")
             Container(mcp, "MCP Sidecar", "Python / FastMCP — SSE :8001, metrics :8000", "6 agent tools + 2 resources. Bearer auth, PII redaction, read-only guardrails, real per-call metrics and OTel spans.")
         }
 
@@ -57,8 +59,9 @@ C4Container
     Rel(agent_client, mcp, "Calls the 6 MCP tools", "SSE + Bearer, :8001")
 
     Rel(streamlit, retriever, "4-tier retrieval", "in-process")
-    Rel(streamlit, ollama, "Grounded generation", "HTTP :11434")
-    Rel(mcp, ollama, "Autonomous tool-calling loop", "HTTP :11434")
+    Rel(streamlit, llmbackend, "Grounded generation + agentic tool loop", "in-process")
+    Rel(llmbackend, ollama, "when LLM_PROVIDER=ollama", "HTTP :11434")
+    Rel(llmbackend, moonshot, "when LLM_PROVIDER=moonshot", "HTTPS + Bearer")
 
     Rel(mcp, retriever, "hybrid_rag_search", "in-process")
     Rel(mcp, pg, "Read-only SQL as mcp_readonly", "psycopg2, :54322")

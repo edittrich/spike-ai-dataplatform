@@ -14,8 +14,48 @@ Enterprise AI-Enabled Data Platform (PoC): a BIAN/FIBO-aligned financial data pl
 cp .env.example .env   # then fill in POSTGRES_PASSWORD, OPENMETADATA_JWT_TOKEN, OPENMETADATA_MYSQL_PASSWORD,
                         # CUBEJS_API_SECRET, CUBEJS_API_SECRET_RESTRICTED, NEO4J_PASSWORD,
                         # GRAFANA_ADMIN_PASSWORD, MCP_API_KEY, MCP_PG_READONLY_PASSWORD,
-                        # CUBE_PG_READONLY_PASSWORD, OPENMETADATA_ADMIN_EMAIL, OPENMETADATA_ADMIN_PASSWORD
+                        # CUBE_PG_READONLY_PASSWORD, OPENMETADATA_ADMIN_EMAIL, OPENMETADATA_ADMIN_PASSWORD,
+                        # and MOONSHOT_API_KEY if you set LLM_PROVIDER=moonshot
 ```
+
+### Switching the LLM provider
+
+`LLM_PROVIDER` in `.env` selects the model behind **every** LLM-calling component
+at once — `scripts/agentic_tool_runner.py`, `scripts/llm_judge_evaluator.py`,
+`scripts/rag_explorer_dashboard.py` and `scripts/test_e2e_pipeline.py`:
+
+```bash
+LLM_PROVIDER=ollama     # local gemma4:latest via Ollama (default; free, no key)
+LLM_PROVIDER=moonshot   # moonshotai/Kimi-K2.6 via the Moonshot API (needs MOONSHOT_API_KEY)
+```
+
+`scripts/_llm_backend.py` is the single place that difference lives; no consumer
+branches on provider. It fails closed — an unknown `LLM_PROVIDER`, or `moonshot`
+with no `MOONSHOT_API_KEY`, refuses to start rather than silently answering with
+the other provider, since that would invalidate every number the evaluation
+harness reports.
+
+Four provider differences are normalized there, each verified against the live
+APIs rather than inferred from documentation:
+
+| | Ollama | Moonshot `kimi-k2.6` |
+|---|---|---|
+| Tool-call `arguments` | JSON object | JSON **string** (parsed to a dict) |
+| Tool-result message | `{role, content}` | also requires **`tool_call_id`** |
+| Token counts | `prompt_eval_count`/`eval_count` | `usage.prompt_tokens`/`completion_tokens` |
+| Temperature | any value | **only `1`** — anything else is HTTP 400 |
+
+Beware: that last row has a real consequence. The RAG-Triad LLM judge asks for
+`temperature=0.0` so its scores are reproducible; `kimi-k2.6` refuses. The judge
+still runs, but its result carries `deterministic: false` and its scores vary
+run to run — so a Kimi-scored benchmark is not comparable to an Ollama-scored
+one. Embeddings and cross-encoder re-ranking are unaffected by this switch; they
+always run locally via `sentence-transformers`.
+
+Beware also: a script that reads provider credentials must call
+`scripts._dotenv_boot.load_env()` itself if it can be run directly.
+`llm_judge_evaluator.py` and `test_e2e_pipeline.py` previously relied on
+their importer to do it, which worked only because Ollama needs no credentials.
 
 `OPENMETADATA_MYSQL_PASSWORD` and `MCP_API_KEY` have no fallback default — leaving either unset breaks `openmetadata_server` (MySQL auth failure) or, in SSE mode, makes the MCP server refuse to start at all (it fails closed rather than falling back to unauthenticated), respectively. See `docker-compose.yml`'s comments on `DB_USER_PASSWORD` and `mcp_server/financial_data_mcp_server.py`'s `BearerAuthMiddleware` for why. `MCP_PG_READONLY_PASSWORD` and `CUBE_PG_READONLY_PASSWORD` also have no fallback — the MCP server/`scripts/hybrid_rag_retriever.py` and Cube.js respectively connect to Postgres as their own least-privilege role (`mcp_readonly`/`cube_readonly`, not the superuser), neither of whose passwords are set by its migration; both must be applied once via `python3 scripts/configure_readonly_role.py`. `CUBEJS_API_SECRET_RESTRICTED` also has no fallback and, like `CUBEJS_API_SECRET`, must be set or Cube.js refuses to authenticate any request. `OPENMETADATA_ADMIN_EMAIL`/`OPENMETADATA_ADMIN_PASSWORD` are used only by `scripts/rotate_openmetadata_bot_token.py` to mint/renew the OpenMetadata ingestion-bot's JWT.
 
@@ -53,7 +93,8 @@ python3 -m ruff check --select E9,F821,F822,F823 scripts mcp_server   # undefine
 python3 -m ruff check --select F scripts mcp_server                   # broader style lint (informational only)
 python3 -m pip_audit -r requirements.txt                              # dependency CVE scan (informational only)
 python3 -m bandit -r scripts mcp_server -ll                           # Python security static analysis (informational only)
-python3 -m pytest tests/ -v                             # negative security tests, auth middleware tests, contract/schema drift check
+python3 -m pytest tests/ -v                             # negative security tests, auth middleware tests, contract/schema drift,
+                                                          # and the LLM_PROVIDER switch (tests/test_llm_backend.py)
 python3 scripts/ai_safety_guardrails.py                 # PII redaction / prompt-injection / read-only-query self-test
 python3 scripts/llmops_telemetry.py                     # telemetry tracing self-test
 python3 -m mcp_server.test_mcp_server                    # asserts registration of all 6 MCP tools + 2 resources, and
@@ -107,7 +148,7 @@ asset graph instead — each script is one `@asset`, dependencies are declared (
 prose), independent assets run concurrently, and every run gets retries, backfill, and persisted
 history for free; see `docs/APPLICATION_RUNBOOK.md`'s Dagster section for setup and usage.
 
-Then `scripts/hybrid_rag_retriever.py`, `scripts/ollama_agentic_tool_runner.py`, and `streamlit run scripts/rag_explorer_dashboard.py` operate against the fully-loaded stack.
+Then `scripts/hybrid_rag_retriever.py`, `scripts/agentic_tool_runner.py`, and `streamlit run scripts/rag_explorer_dashboard.py` operate against the fully-loaded stack.
 
 ## Architecture
 
@@ -117,8 +158,8 @@ Then `scripts/hybrid_rag_retriever.py`, `scripts/ollama_agentic_tool_runner.py`,
 2. **Storage** — Supabase PostgreSQL+pgvector (`:54322`), Neo4j 5 (`:7687`), MySQL (OpenMetadata's backend DB).
 3. **Semantic & governance** — Cube.js cubes in `cube/model/cubes/*.yml` (`:4000`), including `ref_country`/`ref_currency`/`ref_nace_industry` (explicit schema-qualified `sql_table:`, since `CUBEJS_DB_SCHEMA=financial` only affects introspection) joined into the party/deposit/loan cubes for AML/country/industry slicing, plus 4 `pre_aggregations` rollups served by the standalone `cubestore` service and a `customer_360` view (`cube/model/cubes/views/customer_360.yml`) combining customer/deposit/loan data. Special-category PII dimensions (`date_of_birth`, `gender`, `id_number`, `registration_number` — classified via the shared `scripts/_pii_classification.py`) are marked `public: false` and blocked at query time by `cube/cube.js`'s `queryRewrite`, whose `MASKED_PII_MEMBERS` list (kept in sync with the YAML via `tests/test_pii_cube_enforcement.py`) is the real enforcement mechanism — `public: false` alone only hides a field from GraphQL/Playground introspection, not the REST `/load` query path. OpenMetadata catalog (`:8585`) with domains/contracts under `contracts/*.yaml`; W3C FIBO ontology grounding (`ontology/*.ttl`).
 4. **Retrieval** — `scripts/hybrid_rag_retriever.py` is the orchestrator: it fuses pgvector HNSW vector search, `scripts/neural_reranker.py` cross-encoder re-ranking, `scripts/text_to_cypher_builder.py` NL→Cypher compilation, Cube.js metrics, and raw SQL into a single "4-tier hybrid RAG" call.
-5. **Agentic protocol** — `mcp_server/financial_data_mcp_server.py` is a FastMCP server exposing 6 tools (`search_data_catalog`, `query_semantic_metrics`, `query_knowledge_graph`, `query_financial_database`, `check_data_quality`, `hybrid_rag_search`), runnable over stdio or as the `mcp_sidecar` SSE container (`:8001/sse`, `MCP_TRANSPORT=sse`). `query_financial_database`/`query_knowledge_graph` redact every returned row via `AISafetyGuardrails.redact_rows` (field-aware, by real column/property name against `scripts/_pii_classification.py`'s shared patterns) before returning it, and both tools' exception handlers return a generic message rather than raw exception text. `scripts/ollama_agentic_tool_runner.py` drives these tools autonomously via a local Ollama model; its system prompt frames every tool result as untrusted data, and `AISafetyGuardrails.sanitize_context_payload` (used by `hybrid_rag_search`) quarantines detected prompt-injection spans rather than only flagging them. Both this file and `scripts/hybrid_rag_retriever.py` reach Postgres/Neo4j via native drivers (`psycopg2`, `neo4j`), not `docker exec` — the `mcp_sidecar` container has neither the `docker` CLI nor a mounted `docker.sock`. The standalone pipeline scripts in `scripts/` are meant to be run on the host; most use `docker exec` for read-only queries, which is fine there, but any script that *writes* uses a native driver instead (`generate_vector_embeddings.py`'s INSERT, `build_knowledge_graph.py`'s and `sync_end_to_end_lineage.py`'s Cypher) — see `scripts/_neo4j_conn.py`.
-6. **Consumption & observability** — Streamlit dashboard (`scripts/rag_explorer_dashboard.py`, `:8501`); Grafana (`:3000`) + Prometheus (`:9090`) scraping real metrics served directly by `mcp_sidecar` (`:8000/metrics`, via `prometheus_client.start_http_server()` in `mcp_server/financial_data_mcp_server.py`'s `main()`) — metrics live in the same process that executes tool calls, since Prometheus client objects don't share state across processes. Prometheus also scrapes `node_exporter` (`:9100`, host metrics), `postgres_exporter` (`:9187`, connects as the `mcp_readonly` role), `mysqld_exporter` (`:9104`), `cadvisor` (`:8081`, container metrics — falls back to the aggregate root-cgroup metric where per-container discovery doesn't work in a given environment), and a JVM-only Neo4j exporter (`:9101`, a `jmx_prometheus_javaagent` attached in-process via `NEO4J_server_jvm_additional` — Neo4j *Community* has no native Prometheus reporter, that's Enterprise-only). `catalog/prometheus_rules.yml` defines alert rules evaluated against these; `alertmanager` (`:9093`, config in `catalog/alertmanager.yml`) receives them — its receiver is a deliberate no-op (`local-null`) since no real notification channel (SMTP/Slack/etc.) is configured anywhere in this repo; alerts are still visible via Alertmanager's own UI/API and a provisioned Grafana datasource. Distributed tracing (`scripts/_otel_tracing.py`) runs alongside the metrics: every MCP tool call gets an OTel span (via `track_tool_call`), and `hybrid_rag_search` additionally gets one child span per RAG tier (Vector/Graph/Semantic/SQL), nested under the tool-call span via OTel's own context propagation. Spans export via OTLP/gRPC to the `otel_collector` service (`:4317`), which forwards to `tempo` (`:3200` query API) for storage and TraceQL querying through a provisioned Grafana datasource. Fails open by design (`OTEL_TRACES_ENABLED=0` opts out entirely). Cross-cutting: `scripts/ai_safety_guardrails.py` (PII redaction, prompt-injection defense, read-only query enforcement) and `scripts/llmops_telemetry.py` (per-tier latency tracing feeding the process-global Prometheus metrics, the OTel spans above, and a per-call JSON trace view), used by the retrieval/agentic layers above. `scripts/llm_judge_evaluator.py` scores `evaluate_agentic_retrieval.py`'s RAG Triad benchmarks via the local `gemma4:latest` Ollama model, falling back to `rag_triad_evaluator.py`'s substring-overlap scorer only when Ollama is unreachable.
+5. **Agentic protocol** — `mcp_server/financial_data_mcp_server.py` is a FastMCP server exposing 6 tools (`search_data_catalog`, `query_semantic_metrics`, `query_knowledge_graph`, `query_financial_database`, `check_data_quality`, `hybrid_rag_search`), runnable over stdio or as the `mcp_sidecar` SSE container (`:8001/sse`, `MCP_TRANSPORT=sse`). `query_financial_database`/`query_knowledge_graph` redact every returned row via `AISafetyGuardrails.redact_rows` (field-aware, by real column/property name against `scripts/_pii_classification.py`'s shared patterns) before returning it, and both tools' exception handlers return a generic message rather than raw exception text. `scripts/agentic_tool_runner.py` drives these tools autonomously via whichever model `LLM_PROVIDER` selects (local Ollama, or Moonshot Kimi-K2.6 -- see "Switching the LLM provider" above); its system prompt frames every tool result as untrusted data, and `AISafetyGuardrails.sanitize_context_payload` (used by `hybrid_rag_search`) quarantines detected prompt-injection spans rather than only flagging them. Both this file and `scripts/hybrid_rag_retriever.py` reach Postgres/Neo4j via native drivers (`psycopg2`, `neo4j`), not `docker exec` — the `mcp_sidecar` container has neither the `docker` CLI nor a mounted `docker.sock`. The standalone pipeline scripts in `scripts/` are meant to be run on the host; most use `docker exec` for read-only queries, which is fine there, but any script that *writes* uses a native driver instead (`generate_vector_embeddings.py`'s INSERT, `build_knowledge_graph.py`'s and `sync_end_to_end_lineage.py`'s Cypher) — see `scripts/_neo4j_conn.py`.
+6. **Consumption & observability** — Streamlit dashboard (`scripts/rag_explorer_dashboard.py`, `:8501`); Grafana (`:3000`) + Prometheus (`:9090`) scraping real metrics served directly by `mcp_sidecar` (`:8000/metrics`, via `prometheus_client.start_http_server()` in `mcp_server/financial_data_mcp_server.py`'s `main()`) — metrics live in the same process that executes tool calls, since Prometheus client objects don't share state across processes. Prometheus also scrapes `node_exporter` (`:9100`, host metrics), `postgres_exporter` (`:9187`, connects as the `mcp_readonly` role), `mysqld_exporter` (`:9104`), `cadvisor` (`:8081`, container metrics — falls back to the aggregate root-cgroup metric where per-container discovery doesn't work in a given environment), and a JVM-only Neo4j exporter (`:9101`, a `jmx_prometheus_javaagent` attached in-process via `NEO4J_server_jvm_additional` — Neo4j *Community* has no native Prometheus reporter, that's Enterprise-only). `catalog/prometheus_rules.yml` defines alert rules evaluated against these; `alertmanager` (`:9093`, config in `catalog/alertmanager.yml`) receives them — its receiver is a deliberate no-op (`local-null`) since no real notification channel (SMTP/Slack/etc.) is configured anywhere in this repo; alerts are still visible via Alertmanager's own UI/API and a provisioned Grafana datasource. Distributed tracing (`scripts/_otel_tracing.py`) runs alongside the metrics: every MCP tool call gets an OTel span (via `track_tool_call`), and `hybrid_rag_search` additionally gets one child span per RAG tier (Vector/Graph/Semantic/SQL), nested under the tool-call span via OTel's own context propagation. Spans export via OTLP/gRPC to the `otel_collector` service (`:4317`), which forwards to `tempo` (`:3200` query API) for storage and TraceQL querying through a provisioned Grafana datasource. Fails open by design (`OTEL_TRACES_ENABLED=0` opts out entirely). Cross-cutting: `scripts/ai_safety_guardrails.py` (PII redaction, prompt-injection defense, read-only query enforcement) and `scripts/llmops_telemetry.py` (per-tier latency tracing feeding the process-global Prometheus metrics, the OTel spans above, and a per-call JSON trace view), used by the retrieval/agentic layers above. `scripts/llm_judge_evaluator.py` scores `evaluate_agentic_retrieval.py`'s RAG Triad benchmarks via whichever model `LLM_PROVIDER` selects, falling back to `rag_triad_evaluator.py`'s substring-overlap scorer only when that provider is unreachable.
 
 ### Data domains
 

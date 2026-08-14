@@ -24,7 +24,7 @@ import sys
 from mcp_server.financial_data_mcp_server import mcp
 
 # Q10 (hardening plan) named this alongside the other two duplicated tool
-# schemas (docstrings, and scripts/ollama_agentic_tool_runner.py's
+# schemas (docstrings, and scripts/agentic_tool_runner.py's
 # OLLAMA_TOOLS literal) as a "three sources of truth" problem. The other two
 # are now genuinely consolidated: OLLAMA_TOOLS is derived at runtime from
 # mcp.list_tools() instead of hand-copied. This hardcoded name set is

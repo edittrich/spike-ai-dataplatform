@@ -74,14 +74,35 @@ TIER_LATENCY_MS = Histogram(
 )
 
 # Standard Model Pricing per 1,000 Tokens (USD)
+#
+# Locally-hosted models are genuinely $0. Moonshot is a *paid* API, so cost
+# accounting stops being decorative the moment LLM_PROVIDER=moonshot -- but the
+# rates are deliberately read from the environment and default to 0.0 rather
+# than being hardcoded here: a price baked into source goes stale silently and
+# would report confidently wrong dollar figures. Set
+# MOONSHOT_PRICE_INPUT_PER_1K / MOONSHOT_PRICE_OUTPUT_PER_1K in `.env` from
+# Moonshot's current published price list to get real numbers; leave them at 0.0
+# and the cost column honestly reads $0.00 rather than a fabricated estimate.
 MODEL_PRICING = {
     "ollama/gemma4": {"input": 0.00000, "output": 0.00000},
+    "ollama/gemma4:latest": {"input": 0.00000, "output": 0.00000},
     "ollama/gemma2": {"input": 0.00000, "output": 0.00000},
     "sentence-transformers/all-MiniLM-L6-v2": {"input": 0.00000, "output": 0.00000},
     "gemini-2.0-flash": {"input": 0.00010, "output": 0.00040},
     "claude-3-5-sonnet": {"input": 0.00300, "output": 0.01500},
-    "gpt-4o-mini": {"input": 0.00015, "output": 0.00060}
+    "gpt-4o-mini": {"input": 0.00015, "output": 0.00060},
 }
+
+
+def _moonshot_rates() -> Dict[str, float]:
+    """Read at call time, not import time, so changing the rate in `.env` takes
+    effect on the next call rather than needing a process restart (and so a
+    test can set it without reimporting this module, which would re-register
+    the module-level Prometheus collectors and raise DuplicateTimeseries)."""
+    return {
+        "input": float(os.getenv("MOONSHOT_PRICE_INPUT_PER_1K", "0.0") or 0.0),
+        "output": float(os.getenv("MOONSHOT_PRICE_OUTPUT_PER_1K", "0.0") or 0.0),
+    }
 
 # Cap on the in-process trace_history used by export_telemetry_dashboard()'s
 # per-instance JSON view -- previously an unbounded list, which in a
@@ -103,8 +124,19 @@ class LLMOpsTelemetry:
         return max(1, len(text) // 4)
 
     def calculate_cost(self, model: str, prompt_tokens: int, completion_tokens: int) -> float:
-        """Calculates estimated cost ($ USD) based on model token rates."""
-        pricing = MODEL_PRICING.get(model, {"input": 0.00000, "output": 0.00000})
+        """Calculates estimated cost ($ USD) based on model token rates.
+
+        An unknown model label costs 0.0 -- but a `moonshot/*` label falls back
+        to the configured Moonshot rate rather than 0.0, so a newly-released
+        Kimi model that isn't in MODEL_PRICING yet still bills at the operator's
+        configured rate instead of silently reporting free.
+        """
+        if model.startswith("moonshot/"):
+            # Configured rate wins for every moonshot/* label, including a
+            # model too new to be listed in MODEL_PRICING.
+            pricing = _moonshot_rates()
+        else:
+            pricing = MODEL_PRICING.get(model, {"input": 0.00000, "output": 0.00000})
         cost_in = (prompt_tokens / 1000.0) * pricing["input"]
         cost_out = (completion_tokens / 1000.0) * pricing["output"]
         return round(cost_in + cost_out, 6)
