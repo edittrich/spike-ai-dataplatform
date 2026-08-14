@@ -22,6 +22,12 @@ import time
 import asyncio
 from mcp_server.financial_data_mcp_server import mcp
 from scripts.hybrid_rag_retriever import HybridRAGRetriever
+from scripts.text_to_cypher_builder import (
+    INTENT_AML_RISK,
+    INTENT_COLLATERAL,
+    INTENT_DEFAULT,
+    INTENT_DEPOSIT,
+)
 from scripts.rag_triad_evaluator import RAGTriadEvaluator
 from scripts.llm_judge_evaluator import LLMJudgeEvaluator
 
@@ -29,7 +35,7 @@ class AgenticEvaluator:
     def __init__(self):
         self.retriever = HybridRAGRetriever()
         self.triad_evaluator = RAGTriadEvaluator()
-        # Phase 4 (hardening plan, Q7): a real local Ollama model judges
+        # Phase 4 (hardening plan, Q7): a real LLM (LLM_PROVIDER) judges
         # faithfulness/relevance semantically instead of by token overlap --
         # see llm_judge_evaluator.py's module docstring for the exact defect
         # this fixes (empty response scoring 1.0, digit-substring "grounding").
@@ -96,7 +102,24 @@ class AgenticEvaluator:
         # (always False, a false-negative rather than a crash) and the triad
         # context line below crashed outright on `" ".join(...)` over dicts.
         # Both fixed by stringifying each row instead of assuming str rows.
-        sql_match = any("INDIVIDUAL" in json.dumps(row) for row in payload["relational_sql_context"])
+        # This asserted `"INDIVIDUAL" in row` -- a value only the *default*
+        # Tier-4 query (`SELECT party_type ... FROM financial.party`) can ever
+        # return. Since Q3 introduced intent routing, this prompt classifies as
+        # INTENT_DEPOSIT and Tier 4 runs the deposit_account/account_type
+        # aggregation instead, which cannot contain "INDIVIDUAL" -- so the
+        # assertion had become unsatisfiable and this scenario scored 50%
+        # regardless of whether retrieval actually worked. Assert instead that
+        # the SQL tier returned real rows carrying the column the *classified*
+        # intent's query actually selects; that is what this smoke check is for,
+        # and it stays meaningful whichever branch the router picks.
+        _intent_sql_key = {
+            INTENT_COLLATERAL: "collateral_type",
+            INTENT_DEPOSIT: "account_type",
+            INTENT_AML_RISK: "aml_risk_rating",
+            INTENT_DEFAULT: "party_type",
+        }[self.retriever.cypher_builder.classify_intent(prompt)]
+        sql_rows = payload["relational_sql_context"]
+        sql_match = bool(sql_rows) and all(_intent_sql_key in row for row in sql_rows)
         score = 100 if (vector_match and sql_match) else 50
 
         # RAG Triad Evaluation
