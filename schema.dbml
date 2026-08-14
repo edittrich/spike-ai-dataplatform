@@ -42,7 +42,7 @@ Table financial.deposit_account {
     md_is_active [name: 'idx_deposit_account_scd_active', note: 'WHERE (md_is_active = true)']
   }
 
-  Note: 'Deposit account core contract entity (BIAN Deposit Account) -- Constraints: CHECK ((md_valid_from_utc < md_valid_to_utc)); CHECK (((account_status)::text = ANY ((ARRAY[\'ACTIVE\'::character varying, \'DORMANT\'::character varying, \'FROZEN\'::character varying, \'CLOSED\'::character varying])::text[]))); CHECK (((account_type)::text = ANY ((ARRAY[\'SAVINGS\'::character varying, \'CHECKING\'::character varying, \'TERM_DEPOSIT\'::character varying])::text[]))); EXCLUDE USING gist (account_number WITH =, tstzrange(md_valid_from_utc, md_valid_to_utc) WITH &&)'
+  Note: 'Deposit account core contract entity (BIAN Deposit Account) -- Constraints: CHECK (((account_type)::text = ANY ((ARRAY[\'SAVINGS\'::character varying, \'CHECKING\'::character varying, \'TERM_DEPOSIT\'::character varying])::text[]))); CHECK (((account_status)::text = ANY ((ARRAY[\'ACTIVE\'::character varying, \'DORMANT\'::character varying, \'FROZEN\'::character varying, \'CLOSED\'::character varying])::text[]))); CHECK ((md_valid_from_utc < md_valid_to_utc)); EXCLUDE USING gist (account_number WITH =, tstzrange(md_valid_from_utc, md_valid_to_utc) WITH &&)'
 }
 
 Table financial.deposit_balance {
@@ -88,7 +88,7 @@ Table financial.deposit_interest_term {
     (md_is_active, deposit_account_id) [name: 'idx_deposit_interest_term_account']
   }
 
-  Note: 'Deposit account interest terms and accrual rates -- Constraints: CHECK ((md_valid_from_utc < md_valid_to_utc)); CHECK (((accrual_frequency)::text = ANY ((ARRAY[\'DAILY\'::character varying, \'MONTHLY\'::character varying, \'ANNUALLY\'::character varying])::text[]))); CHECK (((calculation_basis)::text = ANY ((ARRAY[\'ACT/360\'::character varying, \'ACT/365\'::character varying, \'30/360\'::character varying])::text[]))); CHECK (((rate_type)::text = ANY ((ARRAY[\'FIXED\'::character varying, \'VARIABLE\'::character varying])::text[])))'
+  Note: 'Deposit account interest terms and accrual rates -- Constraints: CHECK (((rate_type)::text = ANY ((ARRAY[\'FIXED\'::character varying, \'VARIABLE\'::character varying])::text[]))); CHECK (((accrual_frequency)::text = ANY ((ARRAY[\'DAILY\'::character varying, \'MONTHLY\'::character varying, \'ANNUALLY\'::character varying])::text[]))); CHECK (((calculation_basis)::text = ANY ((ARRAY[\'ACT/360\'::character varying, \'ACT/365\'::character varying, \'30/360\'::character varying])::text[]))); CHECK ((md_valid_from_utc < md_valid_to_utc))'
 }
 
 Table financial.deposit_overdraft_facility {
@@ -109,7 +109,7 @@ Table financial.deposit_overdraft_facility {
     (md_is_active, deposit_account_id) [name: 'idx_deposit_overdraft_facility_account']
   }
 
-  Note: 'Approved overdraft facility bounds for deposit accounts -- Constraints: CHECK ((md_valid_from_utc < md_valid_to_utc)); CHECK (((facility_status)::text = ANY ((ARRAY[\'ACTIVE\'::character varying, \'SUSPENDED\'::character varying, \'CANCELLED\'::character varying])::text[])))'
+  Note: 'Approved overdraft facility bounds for deposit accounts -- Constraints: CHECK (((facility_status)::text = ANY ((ARRAY[\'ACTIVE\'::character varying, \'SUSPENDED\'::character varying, \'CANCELLED\'::character varying])::text[]))); CHECK ((md_valid_from_utc < md_valid_to_utc))'
 }
 
 Table financial.deposit_transaction {
@@ -134,7 +134,7 @@ Table financial.deposit_transaction {
     currency_code [name: 'idx_deposit_transaction_currency_code']
   }
 
-  Note: 'Deposit transaction accounting journal records -- Constraints: CHECK ((md_valid_from_utc < md_valid_to_utc)); CHECK (((transaction_status)::text = ANY ((ARRAY[\'BOOKED\'::character varying, \'PENDING\'::character varying, \'REVERSED\'::character varying])::text[]))); CHECK (((transaction_type)::text = ANY ((ARRAY[\'DEPOSIT\'::character varying, \'WITHDRAWAL\'::character varying, \'TRANSFER_IN\'::character varying, \'TRANSFER_OUT\'::character varying, \'INTEREST_CREDIT\'::character varying, \'FEE\'::character varying])::text[]))); EXCLUDE USING gist (transaction_reference WITH =, tstzrange(md_valid_from_utc, md_valid_to_utc) WITH &&)'
+  Note: 'Deposit transaction accounting journal records -- Constraints: CHECK (((transaction_type)::text = ANY ((ARRAY[\'DEPOSIT\'::character varying, \'WITHDRAWAL\'::character varying, \'TRANSFER_IN\'::character varying, \'TRANSFER_OUT\'::character varying, \'INTEREST_CREDIT\'::character varying, \'FEE\'::character varying])::text[]))); CHECK (((transaction_status)::text = ANY ((ARRAY[\'BOOKED\'::character varying, \'PENDING\'::character varying, \'REVERSED\'::character varying])::text[]))); CHECK ((md_valid_from_utc < md_valid_to_utc)); EXCLUDE USING gist (transaction_reference WITH =, tstzrange(md_valid_from_utc, md_valid_to_utc) WITH &&)'
 }
 
 Table financial.entity_embeddings {
@@ -184,7 +184,7 @@ Table financial.loan_agreement {
     md_is_active [name: 'idx_loan_agreement_scd_active', note: 'WHERE (md_is_active = true)']
   }
 
-  Note: 'Core contractual loan agreement (FIBO Loan Agreement) -- Constraints: CHECK ((md_valid_from_utc < md_valid_to_utc)); EXCLUDE USING gist (agreement_number WITH =, tstzrange(md_valid_from_utc, md_valid_to_utc) WITH &&); CHECK (((agreement_status)::text = ANY ((ARRAY[\'ACTIVE\'::character varying, \'DEFAULTED\'::character varying, \'PAID_OFF\'::character varying])::text[])))'
+  Note: 'Core contractual loan agreement (FIBO Loan Agreement) -- Constraints: CHECK (((agreement_status)::text = ANY ((ARRAY[\'ACTIVE\'::character varying, \'DEFAULTED\'::character varying, \'PAID_OFF\'::character varying])::text[]))); CHECK ((md_valid_from_utc < md_valid_to_utc)); EXCLUDE USING gist (agreement_number WITH =, tstzrange(md_valid_from_utc, md_valid_to_utc) WITH &&)'
 }
 
 Table financial.loan_application {
@@ -209,7 +209,7 @@ Table financial.loan_application {
     currency_code [name: 'idx_loan_application_currency_code']
   }
 
-  Note: 'Loan origination and credit application lifecycle -- Constraints: CHECK ((md_valid_from_utc < md_valid_to_utc)); EXCLUDE USING gist (application_number WITH =, tstzrange(md_valid_from_utc, md_valid_to_utc) WITH &&); CHECK (((application_status)::text = ANY ((ARRAY[\'SUBMITTED\'::character varying, \'UNDERWRITING\'::character varying, \'APPROVED\'::character varying, \'REJECTED\'::character varying])::text[])))'
+  Note: 'Loan origination and credit application lifecycle -- Constraints: CHECK (((application_status)::text = ANY ((ARRAY[\'SUBMITTED\'::character varying, \'UNDERWRITING\'::character varying, \'APPROVED\'::character varying, \'REJECTED\'::character varying])::text[]))); CHECK ((md_valid_from_utc < md_valid_to_utc)); EXCLUDE USING gist (application_number WITH =, tstzrange(md_valid_from_utc, md_valid_to_utc) WITH &&)'
 }
 
 Table financial.loan_collateral {
@@ -232,7 +232,7 @@ Table financial.loan_collateral {
     currency_code [name: 'idx_loan_collateral_currency_code']
   }
 
-  Note: 'Pledged security assets securing loan contracts -- Constraints: CHECK ((md_valid_from_utc < md_valid_to_utc)); CHECK (((collateral_status)::text = ANY ((ARRAY[\'PLEDGED\'::character varying, \'RELEASED\'::character varying, \'LIQUIDATED\'::character varying])::text[]))); CHECK (((collateral_type)::text = ANY ((ARRAY[\'REAL_ESTATE\'::character varying, \'VEHICLE\'::character varying, \'SECURITIES\'::character varying, \'CASH_DEPOSIT\'::character varying])::text[])))'
+  Note: 'Pledged security assets securing loan contracts -- Constraints: CHECK (((collateral_type)::text = ANY ((ARRAY[\'REAL_ESTATE\'::character varying, \'VEHICLE\'::character varying, \'SECURITIES\'::character varying, \'CASH_DEPOSIT\'::character varying])::text[]))); CHECK (((collateral_status)::text = ANY ((ARRAY[\'PLEDGED\'::character varying, \'RELEASED\'::character varying, \'LIQUIDATED\'::character varying])::text[]))); CHECK ((md_valid_from_utc < md_valid_to_utc))'
 }
 
 Table financial.loan_disbursement {
@@ -255,7 +255,7 @@ Table financial.loan_disbursement {
     currency_code [name: 'idx_loan_disbursement_currency_code']
   }
 
-  Note: 'Loan principal disbursement execution events -- Constraints: CHECK ((md_valid_from_utc < md_valid_to_utc)); EXCLUDE USING gist (disbursement_reference WITH =, tstzrange(md_valid_from_utc, md_valid_to_utc) WITH &&); CHECK (((disbursement_status)::text = ANY ((ARRAY[\'COMPLETED\'::character varying, \'PENDING\'::character varying, \'FAILED\'::character varying])::text[])))'
+  Note: 'Loan principal disbursement execution events -- Constraints: CHECK (((disbursement_status)::text = ANY ((ARRAY[\'COMPLETED\'::character varying, \'PENDING\'::character varying, \'FAILED\'::character varying])::text[]))); CHECK ((md_valid_from_utc < md_valid_to_utc)); EXCLUDE USING gist (disbursement_reference WITH =, tstzrange(md_valid_from_utc, md_valid_to_utc) WITH &&)'
 }
 
 Table financial.loan_repayment_schedule {
@@ -279,7 +279,7 @@ Table financial.loan_repayment_schedule {
     (loan_agreement_id, installment_number) [name: 'idx_loan_repayment_schedule_agreement']
   }
 
-  Note: 'Amortization repayment schedule installments -- Constraints: CHECK ((md_valid_from_utc < md_valid_to_utc)); CHECK (((installment_status)::text = ANY ((ARRAY[\'PENDING\'::character varying, \'PAID\'::character varying, \'OVERDUE\'::character varying, \'PARTIALLY_PAID\'::character varying])::text[])))'
+  Note: 'Amortization repayment schedule installments -- Constraints: CHECK (((installment_status)::text = ANY ((ARRAY[\'PENDING\'::character varying, \'PAID\'::character varying, \'OVERDUE\'::character varying, \'PARTIALLY_PAID\'::character varying])::text[]))); CHECK ((md_valid_from_utc < md_valid_to_utc))'
 }
 
 Table financial.party {
@@ -299,7 +299,7 @@ Table financial.party {
     (md_valid_from_utc, md_valid_to_utc) [name: 'idx_party_scd_temporal']
   }
 
-  Note: 'Master Party entity supertype (BIAN Party Domain) -- Constraints: CHECK ((md_valid_from_utc < md_valid_to_utc)); EXCLUDE USING gist (party_bk WITH =, tstzrange(md_valid_from_utc, md_valid_to_utc) WITH &&); CHECK (((party_type)::text = ANY ((ARRAY[\'INDIVIDUAL\'::character varying, \'ORGANIZATION\'::character varying])::text[]))); CHECK (((status_code)::text = ANY ((ARRAY[\'ACTIVE\'::character varying, \'INACTIVE\'::character varying, \'SUSPENDED\'::character varying])::text[])))'
+  Note: 'Master Party entity supertype (BIAN Party Domain) -- Constraints: CHECK (((party_type)::text = ANY ((ARRAY[\'INDIVIDUAL\'::character varying, \'ORGANIZATION\'::character varying])::text[]))); CHECK (((status_code)::text = ANY ((ARRAY[\'ACTIVE\'::character varying, \'INACTIVE\'::character varying, \'SUSPENDED\'::character varying])::text[]))); CHECK ((md_valid_from_utc < md_valid_to_utc)); EXCLUDE USING gist (party_bk WITH =, tstzrange(md_valid_from_utc, md_valid_to_utc) WITH &&)'
 }
 
 Table financial.party_address {
@@ -323,7 +323,7 @@ Table financial.party_address {
     country_code [name: 'idx_party_address_country_code']
   }
 
-  Note: 'Physical and registered address details for parties -- Constraints: CHECK ((md_valid_from_utc < md_valid_to_utc)); CHECK (((address_type)::text = ANY ((ARRAY[\'RESIDENTIAL\'::character varying, \'REGISTERED\'::character varying, \'MAILING\'::character varying])::text[])))'
+  Note: 'Physical and registered address details for parties -- Constraints: CHECK (((address_type)::text = ANY ((ARRAY[\'RESIDENTIAL\'::character varying, \'REGISTERED\'::character varying, \'MAILING\'::character varying])::text[]))); CHECK ((md_valid_from_utc < md_valid_to_utc))'
 }
 
 Table financial.party_identification {
@@ -346,7 +346,7 @@ Table financial.party_identification {
     issuing_country_code [name: 'idx_party_identification_issuing_country']
   }
 
-  Note: 'Official identification and tax documents for parties -- Constraints: CHECK ((md_valid_from_utc < md_valid_to_utc)); CHECK (((id_type)::text = ANY ((ARRAY[\'PASSPORT\'::character varying, \'NATIONAL_ID\'::character varying, \'TAX_ID\'::character varying, \'LEI\'::character varying])::text[]))); CHECK (((verification_status)::text = ANY ((ARRAY[\'VERIFIED\'::character varying, \'UNVERIFIED\'::character varying])::text[])))'
+  Note: 'Official identification and tax documents for parties -- Constraints: CHECK (((id_type)::text = ANY ((ARRAY[\'PASSPORT\'::character varying, \'NATIONAL_ID\'::character varying, \'TAX_ID\'::character varying, \'LEI\'::character varying])::text[]))); CHECK (((verification_status)::text = ANY ((ARRAY[\'VERIFIED\'::character varying, \'UNVERIFIED\'::character varying])::text[]))); CHECK ((md_valid_from_utc < md_valid_to_utc))'
 }
 
 Table financial.party_individual {
@@ -419,7 +419,7 @@ Table financial.party_role_customer {
     md_is_active [name: 'idx_customer_scd_active', note: 'WHERE (md_is_active = true)']
   }
 
-  Note: 'Customer role context assigned to a party -- Constraints: CHECK ((md_valid_from_utc < md_valid_to_utc)); EXCLUDE USING gist (customer_number WITH =, tstzrange(md_valid_from_utc, md_valid_to_utc) WITH &&); CHECK (((aml_risk_rating)::text = ANY ((ARRAY[\'LOW\'::character varying, \'MEDIUM\'::character varying, \'HIGH\'::character varying])::text[]))); CHECK (((customer_segment)::text = ANY ((ARRAY[\'RETAIL\'::character varying, \'SME\'::character varying, \'CORPORATE\'::character varying, \'WEALTH\'::character varying])::text[]))); CHECK (((kyc_status)::text = ANY ((ARRAY[\'VERIFIED\'::character varying, \'PENDING\'::character varying, \'EXPIRED\'::character varying])::text[])))'
+  Note: 'Customer role context assigned to a party -- Constraints: CHECK (((customer_segment)::text = ANY ((ARRAY[\'RETAIL\'::character varying, \'SME\'::character varying, \'CORPORATE\'::character varying, \'WEALTH\'::character varying])::text[]))); CHECK (((kyc_status)::text = ANY ((ARRAY[\'VERIFIED\'::character varying, \'PENDING\'::character varying, \'EXPIRED\'::character varying])::text[]))); CHECK (((aml_risk_rating)::text = ANY ((ARRAY[\'LOW\'::character varying, \'MEDIUM\'::character varying, \'HIGH\'::character varying])::text[]))); CHECK ((md_valid_from_utc < md_valid_to_utc)); EXCLUDE USING gist (customer_number WITH =, tstzrange(md_valid_from_utc, md_valid_to_utc) WITH &&)'
 }
 
 // ----------------------------------------------------------------------------
