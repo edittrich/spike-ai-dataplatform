@@ -365,6 +365,46 @@ services:
       retries: 10
       start_period: 90s
 
+  # `openmetadata_search`'s data directory is a tmpfs mount by design (see its
+  # own service comment above) -- every container recreate starts with an
+  # empty index, and `table_search_index` doesn't exist at all until something
+  # repopulates it. Several pipeline scripts already trigger a reindex as a
+  # side effect of their own work, which is why a full `bootstrap_platform.sh`
+  # run self-heals -- but a bare `docker compose down`/`up`, `restart`, or
+  # crash-recreate with no pipeline re-run previously left the catalog
+  # searchable via direct ID lookup but broken for `search_data_catalog`/
+  # `check_data_quality` (both query via the search index): a real, live-
+  # reproduced `HTTP 500 index_not_found_exception`, distinct from the
+  # OPENMETADATA_JWT_TOKEN-unset 500 documented in the runbook's Known Issues,
+  # with the same visible symptom. This one-shot container closes that gap
+  # unconditionally, on every `docker compose up`, not just a full pipeline
+  # run -- no custom image needed: bind-mounts the real script (no
+  # duplicated logic) and runs it with the stdlib-only interpreter, same
+  # digest pin as mcp_server/Dockerfile.mcp for the same base image.
+  # Idempotent -- safe to run against an already-fully-indexed catalog.
+  openmetadata_search_reindex:
+    image: python:3.11-slim@sha256:90744cff8f32887f075c47d747a173ff333e9e98801667af93c357fa9f5e28ff
+    container_name: openmetadata_search_reindex
+    restart: "no"
+    networks:
+      - platform_network
+    depends_on:
+      openmetadata_server:
+        condition: service_healthy
+    read_only: true
+    environment:
+      - PYTHONDONTWRITEBYTECODE=1
+      - OPENMETADATA_URL=http://openmetadata_server:8585/api/v1
+      - OPENMETADATA_JWT_TOKEN=${OPENMETADATA_JWT_TOKEN}
+      - REINDEX_TIMEOUT_SECONDS=${REINDEX_TIMEOUT_SECONDS:-300}
+    volumes:
+      - ./scripts:/app/scripts:ro
+    working_dir: /app
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+    command: ["python3", "scripts/rebuild_search_index.py"]
+
   # ===========================================================================
   # 2. Knowledge Graph Database (Neo4j 5 Community Edition)
   # ===========================================================================

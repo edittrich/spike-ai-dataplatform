@@ -29,6 +29,22 @@ document has been revised — treat the evidence as historical, not as a descrip
   get the `temperature=0.0` it asks for (`kimi-k2.6` accepts only `1`), so its scores are
   non-reproducible and carry `deterministic: false`. Scores from the two providers are not
   comparable, which strengthens the case for the baseline/threshold work ISS-17 proposes.
+- **A new deployment defect was found and fixed, not present in the ranked list below.**
+  `openmetadata_search`'s data directory is a tmpfs mount by design (`docker-compose.yml`'s own
+  comment: "Search is a rebuildable projection of MySQL"), so `table_search_index` doesn't exist at
+  all immediately after that container is recreated. Several pipeline scripts trigger a reindex as a
+  side effect of their own work, which is why a full pipeline run self-heals — but nothing
+  repopulated it on a bare `docker compose down`/`up`, `restart`, or crash-recreate, live-reproduced
+  as `search_data_catalog`/`check_data_quality` returning `HTTP 500 index_not_found_exception` with a
+  fully valid `OPENMETADATA_JWT_TOKEN` and fully intact catalog/relational data — a different root
+  cause than the JWT-unset 500 this document's evidence (and the runbook, before this fix) already
+  documents, producing an identical symptom. Fixed by a new `openmetadata_search_reindex` one-shot
+  container (mirroring the existing `neo4j_jmx_agent_init` pattern) that runs
+  `scripts/rebuild_search_index.py` automatically once `openmetadata_server` reports healthy, on
+  every `docker compose up` — verified live: forced the empty-index state, ran a bare
+  `docker compose up -d` with no other manual step, and confirmed both tools work again. Not filed
+  as an `ISS-*` since it was found and closed in the same session, after this document's ranked list
+  was written.
 
 ---
 

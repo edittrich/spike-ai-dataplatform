@@ -52,6 +52,12 @@ step "4/10  Syncing the postgres superuser's password after the reset"
 python3 scripts/sync_postgres_superuser_password.py
 
 step "5/10  Starting the Docker Compose stack (OpenMetadata, Neo4j, Cube.js, Prometheus, Grafana, OTel Collector + Tempo, MCP sidecar)"
+# openmetadata_search's data dir is a tmpfs mount by design (see its own
+# docker-compose.yml comment) -- the openmetadata_search_reindex one-shot
+# container this starts rebuilds the search index automatically once
+# openmetadata_server reports healthy, so search_data_catalog/
+# check_data_quality work immediately even on a from-empty first bring-up,
+# not just after the catalog pipeline runs later in this script.
 docker compose up -d
 
 step "6/11  Waiting for openmetadata_server to report healthy (this is the slowest starter)"
