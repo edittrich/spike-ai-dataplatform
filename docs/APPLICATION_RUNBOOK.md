@@ -42,6 +42,7 @@ the `ports:` mapping's host-side address.
 | `openmetadata_mysql` | `mysql:8.0.35` | `3306` (published loopback-only as `127.0.0.1:33060`) | `MYSQL_ROOT_PASSWORD`, `MYSQL_PASSWORD` (both `${OPENMETADATA_MYSQL_PASSWORD}`, no fallback — required) | OpenMetadata catalog backend database |
 | `openmetadata_search` | `opensearchproject/opensearch:2.11.0` | `9200` (published loopback-only as `127.0.0.1:9200`) | `DISABLE_SECURITY_PLUGIN=true` | Catalog search index (security plugin off; only reachable from the host or the internal Docker network, never externally) |
 | `openmetadata_server` | `openmetadata/server:1.3.1` | `8585` (published loopback-only as `127.0.0.1:8585` unless `OPENMETADATA_HOST` overrides it) | `OPENMETADATA_URL`, `OPENMETADATA_JWT_TOKEN`, `DB_USER_PASSWORD` (⚠️ not `DB_PASSWORD` — see Troubleshooting) | Enterprise Data Catalog UI & REST API |
+| `openmetadata_search_reindex` | `python:3.11-slim` (same digest pin as [`mcp_server/Dockerfile.mcp`](../mcp_server/Dockerfile.mcp)) | n/a (one-shot, `restart: "no"`) | bind-mounts `scripts/` read-only and runs [`scripts/rebuild_search_index.py`](../scripts/rebuild_search_index.py); `depends_on: openmetadata_server: condition: service_healthy` | Init container — rebuilds `openmetadata_search`'s tmpfs-backed index (see that service's row and its own comment in `docker-compose.yml`) on every `docker compose up`, not just a full pipeline run. Idempotent; not a long-running service. |
 | `neo4j_knowledge_graph` | `neo4j:5.18.0-community` | `7474` / `7687`, plus `9101` (bound `127.0.0.1`, JVM-only Prometheus metrics — Neo4j Community has no native reporter, this is a `jmx_prometheus_javaagent` attached in-process via `NEO4J_server_jvm_additional`) | `NEO4J_AUTH=neo4j/${NEO4J_PASSWORD}` (no fallback — required) | Knowledge Graph database & Bolt driver |
 | `cube_semantic_layer` | `cubejs/cube:v0.35` | `4000` | `CUBEJS_DB_TYPE=postgres`, `CUBEJS_API_SECRET` / `CUBEJS_API_SECRET_RESTRICTED` — [`cube/cube.js`](../cube/cube.js)'s `checkAuth` rejects any request whose `Authorization: Bearer` token doesn't match one of these two secrets. No `CUBEJS_SQL_PORT` — the Postgres-wire SQL API it would open has no equivalent auth check and nothing uses it. | Open-Source Semantic Layer (REST API), production mode, backed by the standalone `cubestore` service |
 | `prometheus_metrics` | `prom/prometheus:v2.51.0` | `9090` | [catalog/prometheus.yml](../catalog/prometheus.yml) | Operational time-series metrics engine |
@@ -363,6 +364,17 @@ Operational quirks worth knowing before you conclude something in your own setup
   manually. Affects `scripts/sync_end_to_end_lineage.py`'s `sync_openmetadata_lineage()` and any MCP
   tool that calls `search_data_catalog`/`check_data_quality` (both degrade to a clean logged error
   string, not a crash, in that case).
+- **`search_data_catalog`/`check_data_quality` can 500 for a second, unrelated reason: a genuinely
+  empty search index, not an auth problem.** `openmetadata_search`'s data directory is a tmpfs mount
+  by design (see its own `docker-compose.yml` comment), so `table_search_index` doesn't exist at all
+  immediately after that container is recreated — `openmetadata_server` returns
+  `HTTP 500 index_not_found_exception`, a different error body than the JWT case above but the same
+  visible symptom in a calling MCP tool. Live-reproduced: token valid, catalog/MySQL/Postgres data
+  fully intact, index simply not yet rebuilt. `openmetadata_search_reindex` (see the service inventory
+  above) closes this automatically on every `docker compose up` — this bullet is what to check if you
+  ever see the symptom with a **verified-valid** token, e.g. after bypassing that container (running
+  `openmetadata_search` standalone, or a manual `docker compose up -d openmetadata_search` without the
+  rest of the stack). Manual fix: `python3 scripts/rebuild_search_index.py`.
 
 Deliberately accepted, out-of-scope limitations of this PoC (cAdvisor per-container discovery, Neo4j
 Community's absent metrics reporter, backup/restore & DR) are tracked in

@@ -75,7 +75,11 @@ PostgreSQL is **not** a `docker-compose.yml` service — it's managed separately
 ```bash
 npm run supabase:start     # starts Postgres, applies migrations (first run only; use supabase:db:reset to re-seed)
 docker compose up -d       # everything else: OpenMetadata, Neo4j, Cube.js, Prometheus, Grafana, Alertmanager,
-                            # node/postgres/mysqld exporters, cAdvisor, MCP sidecar
+                            # node/postgres/mysqld exporters, cAdvisor, MCP sidecar. Also runs
+                            # openmetadata_search_reindex, a one-shot container that rebuilds
+                            # OpenMetadata's tmpfs-backed search index automatically -- see
+                            # scripts/rebuild_search_index.py and docker-compose.yml's comment above
+                            # that service for why the index needs rebuilding on every recreate.
 docker compose ps
 docker compose logs -f <service>
 docker compose restart <service>
