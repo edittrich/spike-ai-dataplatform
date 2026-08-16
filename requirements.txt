@@ -5,6 +5,13 @@ prometheus-client>=0.20.0
 # -- previously referenced by register_openmetadata_data_contracts.py's
 # `"contract_file"` dict value but never actually imported/installed anywhere.
 pyyaml>=6.0
+# Parses ontology/financial_platform_ontology.ttl for scripts/load_ontology_tbox.py,
+# which loads the TBox into Neo4j. It was already present transitively (7.6.0) but
+# undeclared -- relying on another package's dependency for a direct import is
+# exactly how a working checkout breaks on the next unrelated version bump.
+# Deliberately NOT added to catalog/requirements.exporter.txt: the MCP sidecar
+# queries the loaded TBox in Neo4j and never parses Turtle, so the image stays lean.
+rdflib>=7.0.0
 sentence-transformers>=2.2.2
 # NOT torchvision: it's a vision-model dependency that
 # sentence-transformers's text-only models (EMBEDDING_MODEL_NAME defaults to

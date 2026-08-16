@@ -68,3 +68,28 @@ ON EACH [n.first_name, n.last_name, n.legal_name];
 CREATE FULLTEXT INDEX reference_name_fulltext IF NOT EXISTS
 FOR (n:RefCountry|RefCurrency|RefIndustry)
 ON EACH [n.name, n.title];
+
+// ----------------------------------------------------------------------------
+// TBOX / ONTOLOGY LAYER
+// ----------------------------------------------------------------------------
+// The terminological layer loaded by scripts/load_ontology_tbox.py from
+// ontology/financial_platform_ontology.ttl -- classes, properties and their
+// FIBO/BIAN groundings. Deliberately namespaced under :Ontology*/:ExternalConcept
+// labels, distinct from the ABox instance labels above, because Neo4j Community
+// permits exactly one user database (verified: CREATE DATABASE returns
+// Neo.ClientError.Statement.UnsupportedAdministrationCommand), so TBox and ABox
+// necessarily share a graph and are kept apart by label convention instead.
+// build_knowledge_graph.py's reload is scoped to ABOX_LABELS specifically so it
+// cannot delete anything below.
+//
+// These are uniqueness constraints (each backed by an auto range index) rather
+// than plain indexes: `uri` is the identity of an ontology term, and every load
+// MERGEs on it. Without the constraint each MERGE is a full label scan.
+CREATE CONSTRAINT ontology_class_uri_unique IF NOT EXISTS
+FOR (c:OntologyClass) REQUIRE c.uri IS UNIQUE;
+
+CREATE CONSTRAINT ontology_property_uri_unique IF NOT EXISTS
+FOR (p:OntologyProperty) REQUIRE p.uri IS UNIQUE;
+
+CREATE CONSTRAINT external_concept_uri_unique IF NOT EXISTS
+FOR (e:ExternalConcept) REQUIRE e.uri IS UNIQUE;

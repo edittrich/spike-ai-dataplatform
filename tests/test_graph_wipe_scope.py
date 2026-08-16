@@ -45,7 +45,21 @@ FOREIGN_LABELS = {
     # scripts/load_ontology_tbox.py (the TBox layer)
     "OntologyClass",
     "OntologyProperty",
+    "ExternalConcept",
 }
+
+
+def test_foreign_labels_matches_the_tbox_loaders_own_list():
+    """Keeps FOREIGN_LABELS honest: the TBox loader owns the authoritative list
+    of labels it writes, so drift there must surface here rather than silently
+    leaving a new TBox label unprotected from the ABox wipe."""
+    from scripts.load_ontology_tbox import TBOX_LABELS
+
+    missing = set(TBOX_LABELS) - FOREIGN_LABELS
+    assert not missing, (
+        f"load_ontology_tbox.py writes {sorted(missing)}, which this test does not treat as "
+        f"protected. Add them to FOREIGN_LABELS."
+    )
 
 
 def _labels_created_by_the_script() -> set:
