@@ -366,44 +366,79 @@ services:
       start_period: 90s
 
   # `openmetadata_search`'s data directory is a tmpfs mount by design (see its
-  # own service comment above) -- every container recreate starts with an
-  # empty index, and `table_search_index` doesn't exist at all until something
-  # repopulates it. Several pipeline scripts already trigger a reindex as a
-  # side effect of their own work, which is why a full `bootstrap_platform.sh`
-  # run self-heals -- but a bare `docker compose down`/`up`, `restart`, or
-  # crash-recreate with no pipeline re-run previously left the catalog
-  # searchable via direct ID lookup but broken for `search_data_catalog`/
-  # `check_data_quality` (both query via the search index): a real, live-
-  # reproduced `HTTP 500 index_not_found_exception`, distinct from the
-  # OPENMETADATA_JWT_TOKEN-unset 500 documented in the runbook's Known Issues,
-  # with the same visible symptom. This one-shot container closes that gap
-  # unconditionally, on every `docker compose up`, not just a full pipeline
-  # run -- no custom image needed: bind-mounts the real script (no
-  # duplicated logic) and runs it with the stdlib-only interpreter, same
-  # digest pin as mcp_server/Dockerfile.mcp for the same base image.
-  # Idempotent -- safe to run against an already-fully-indexed catalog.
+  # own service comment above) -- every container recreate OR restart starts
+  # with an empty index, and `table_search_index` doesn't exist at all until
+  # something repopulates it. Several pipeline scripts already trigger a
+  # reindex as a side effect of their own work, which is why a full
+  # `bootstrap_platform.sh` run self-heals -- but a bare `docker compose
+  # down`/`up`, `restart`, or crash-recreate with no pipeline re-run leaves
+  # `search_data_catalog`/`check_data_quality` (both query via the search
+  # index) returning a real, live-reproduced `HTTP 500
+  # index_not_found_exception`, distinct from the OPENMETADATA_JWT_TOKEN-unset
+  # 500 documented in the runbook's Known Issues, with the same visible symptom.
+  #
+  # This started as a one-shot `restart: "no"` init container (mirroring
+  # neo4j_jmx_agent_init) that ran once whenever Compose (re)created it --
+  # correct for `docker compose down`/`up`, but verified live to silently
+  # miss a real case: a host reboot / Docker daemon restart. `restart:
+  # always` brings openmetadata_search/openmetadata_server back
+  # automatically (wiping the tmpfs index in the process) without anyone
+  # ever running `docker compose up`, but a one-shot container that already
+  # exited 0 has no process for Docker's restart policy to relaunch -- so
+  # the index stayed empty indefinitely after a reboot, with nothing
+  # watching to notice. Reproduced for real on 2026-08-16 (a genuine host
+  # reboot, not a synthetic test), which is why this is now a small
+  # `restart: always` watch loop (scripts/rebuild_search_index.py's
+  # `watch()`) instead: it re-verifies the index via a real search query
+  # every REINDEX_WATCH_INTERVAL_SECONDS and only triggers a reindex when
+  # the check actually fails, and -- because it's a long-running process,
+  # not an exited one -- Docker's restart policy brings it back after a
+  # daemon restart the same way every other `restart: always` service does,
+  # so it re-verifies and heals within one interval with no human action.
+  # Verified live: force-recreated openmetadata_search (wiping its tmpfs)
+  # while this loop was already running with no other command issued, and
+  # watched it detect and repair the empty index on its own.
+  #
+  # No custom image needed: bind-mounts the real script (no duplicated
+  # logic), same digest pin as mcp_server/Dockerfile.mcp for the same base
+  # image. Idempotent -- a healthy-index check is a single cheap GET.
   openmetadata_search_reindex:
     image: python:3.11-slim@sha256:90744cff8f32887f075c47d747a173ff333e9e98801667af93c357fa9f5e28ff
     container_name: openmetadata_search_reindex
-    restart: "no"
+    restart: always
     networks:
       - platform_network
     depends_on:
       openmetadata_server:
         condition: service_healthy
     read_only: true
+    # Heartbeat file for the healthcheck below -- proves the watch loop is
+    # actually iterating, not just that the python3 process hasn't crashed.
+    # Same octal-vs-decimal tmpfs `mode:` pitfall as every other tmpfs mount
+    # in this file: 1023 decimal == 01777 octal (world rwx + sticky bit).
+    volumes:
+      - ./scripts:/app/scripts:ro
+      - type: tmpfs
+        target: /tmp
+        tmpfs:
+          mode: 1023
+    working_dir: /app
     environment:
       - PYTHONDONTWRITEBYTECODE=1
       - OPENMETADATA_URL=http://openmetadata_server:8585/api/v1
       - OPENMETADATA_JWT_TOKEN=${OPENMETADATA_JWT_TOKEN}
       - REINDEX_TIMEOUT_SECONDS=${REINDEX_TIMEOUT_SECONDS:-300}
-    volumes:
-      - ./scripts:/app/scripts:ro
-    working_dir: /app
+      - REINDEX_WATCH_INTERVAL_SECONDS=${REINDEX_WATCH_INTERVAL_SECONDS:-60}
     security_opt:
       - no-new-privileges:true
     logging: *default-logging
-    command: ["python3", "scripts/rebuild_search_index.py"]
+    command: ["python3", "scripts/rebuild_search_index.py", "--watch"]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import os,sys,time; p='/tmp/reindex_heartbeat'; sys.exit(0 if os.path.exists(p) and time.time()-os.path.getmtime(p) < 150 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 90s
 
   # ===========================================================================
   # 2. Knowledge Graph Database (Neo4j 5 Community Edition)
