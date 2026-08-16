@@ -10,6 +10,8 @@ Sleeps are patched out so the polling-loop tests run in milliseconds, not
 real wall-clock seconds.
 """
 
+import pytest
+
 import scripts.rebuild_search_index as ris
 
 
@@ -115,3 +117,102 @@ def test_idempotent_when_the_app_has_never_run_before(monkeypatch):
     monkeypatch.setattr(ris.time, "sleep", lambda s: None)
 
     assert ris.rebuild_search_index() is True
+
+
+# ---------------------------------------------------------------------------
+# index_has_data() -- the real-query health check the watch loop uses,
+# instead of trusting a cached exit code from a previous run (the exact gap
+# that let the index stay silently empty after a real host reboot: the
+# previous one-shot `restart: "no"` container's success from days earlier
+# meant nothing once openmetadata_search's tmpfs was wiped by a fresh start).
+# ---------------------------------------------------------------------------
+
+
+def test_index_has_data_true_when_search_returns_hits(monkeypatch):
+    calls = []
+
+    def fake_get(endpoint):
+        calls.append(endpoint)
+        return {"hits": {"hits": [{"_source": {"name": "deposit_account"}}]}}
+
+    monkeypatch.setattr(ris, "api_get", fake_get)
+    assert ris.index_has_data() is True
+    assert "index=table_search_index" in calls[0]
+
+
+def test_index_has_data_false_when_no_hits(monkeypatch):
+    monkeypatch.setattr(ris, "api_get", lambda endpoint: {"hits": {"hits": []}})
+    assert ris.index_has_data() is False
+
+
+def test_index_has_data_false_on_missing_index_error(monkeypatch):
+    # api_get returns None on an HTTP error (per _openmetadata_client's
+    # documented contract) -- e.g. the real index_not_found_exception 500.
+    monkeypatch.setattr(ris, "api_get", lambda endpoint: None)
+    assert ris.index_has_data() is False
+
+
+def test_index_has_data_false_on_malformed_response(monkeypatch):
+    monkeypatch.setattr(ris, "api_get", lambda endpoint: {"unexpected": "shape"})
+    assert ris.index_has_data() is False
+
+
+# ---------------------------------------------------------------------------
+# watch() -- the long-running loop that replaced the one-shot container.
+# Runs exactly one iteration per call by making time.sleep raise, so these
+# stay fast and deterministic instead of actually looping.
+# ---------------------------------------------------------------------------
+
+
+class _StopLoop(Exception):
+    pass
+
+
+def test_watch_skips_rebuild_when_index_is_already_healthy(monkeypatch):
+    rebuild_called = []
+    monkeypatch.setattr(ris, "index_has_data", lambda: True)
+    monkeypatch.setattr(ris, "rebuild_search_index", lambda: rebuild_called.append(1) or True)
+    monkeypatch.setattr(ris, "_touch_heartbeat", lambda: None)
+    monkeypatch.setattr(ris.time, "sleep", lambda s: (_ for _ in ()).throw(_StopLoop))
+
+    with pytest.raises(_StopLoop):
+        ris.watch()
+    assert rebuild_called == [], "watch() must not trigger a reindex when the index is already healthy"
+
+
+def test_watch_heals_when_index_is_empty(monkeypatch):
+    rebuild_called = []
+    monkeypatch.setattr(ris, "index_has_data", lambda: False)
+    monkeypatch.setattr(ris, "rebuild_search_index", lambda: rebuild_called.append(1) or True)
+    monkeypatch.setattr(ris, "_touch_heartbeat", lambda: None)
+    monkeypatch.setattr(ris.time, "sleep", lambda s: (_ for _ in ()).throw(_StopLoop))
+
+    with pytest.raises(_StopLoop):
+        ris.watch()
+    assert rebuild_called == [1], "watch() must trigger exactly one reindex when the index check fails"
+
+
+def test_watch_survives_an_exception_in_the_health_check(monkeypatch):
+    # A watch loop that dies on a transient error stops healing forever with
+    # nothing left to notice -- it must log and continue to the next
+    # interval, not propagate.
+    def boom():
+        raise RuntimeError("transient network blip")
+
+    monkeypatch.setattr(ris, "index_has_data", boom)
+    monkeypatch.setattr(ris, "_touch_heartbeat", lambda: None)
+    monkeypatch.setattr(ris.time, "sleep", lambda s: (_ for _ in ()).throw(_StopLoop))
+
+    with pytest.raises(_StopLoop):
+        ris.watch()  # must reach the sleep (and raise _StopLoop), not RuntimeError
+
+
+def test_watch_touches_heartbeat_every_iteration(monkeypatch):
+    heartbeats = []
+    monkeypatch.setattr(ris, "index_has_data", lambda: True)
+    monkeypatch.setattr(ris, "_touch_heartbeat", lambda: heartbeats.append(1))
+    monkeypatch.setattr(ris.time, "sleep", lambda s: (_ for _ in ()).throw(_StopLoop))
+
+    with pytest.raises(_StopLoop):
+        ris.watch()
+    assert heartbeats == [1]

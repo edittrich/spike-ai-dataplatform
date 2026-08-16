@@ -35,6 +35,34 @@ for a larger one -- see POLL_TIMEOUT_SECONDS. Querying status through
 `openmetadata_server`'s own API (not OpenSearch's :9200 directly) also means
 this script never needs OpenSearch network reachability, matching the
 platform's existing pattern (`search_data_catalog` MCP tool does the same).
+
+Two entry points:
+  - `main()` (no args): single check-and-heal-once pass, then exit. What
+    `docker-compose.yml`'s `openmetadata_search_reindex` container ran
+    exclusively until this fix -- correct for a `docker compose down`/`up`
+    cycle (the container gets freshly created, so it runs) or a stopped
+    stack's first `up`, but silently useless for a case verified live to
+    happen for real: a host reboot / Docker daemon restart. `restart:
+    always` brings `openmetadata_search`/`openmetadata_server` back
+    automatically and wipes the tmpfs index in the process, but a one-shot
+    container with `restart: "no"` that already exited 0 is *not*
+    relaunched by Docker's restart policy -- it has no process to restart.
+    The result: the index stays empty indefinitely after a reboot, with
+    nothing to notice or fix it, until someone manually re-runs this script
+    or does a full `docker compose down && up`.
+  - `watch()` (`--watch`, or the container's default command): checks
+    whether the index actually has data via a cheap real search query (not
+    a trust-the-last-exit-code assumption), and only triggers a reindex when
+    it doesn't. Loops forever on WATCH_INTERVAL_SECONDS. Paired with
+    `restart: always` in `docker-compose.yml`, this is what actually
+    survives a host reboot: Docker's restart policy relaunches a
+    *previously-running* container after a daemon restart, which a
+    watch-loop is (unlike an already-exited one-shot), and the loop's first
+    iteration re-verifies and heals the index within one check interval
+    with no human action needed -- verified live by force-recreating
+    `openmetadata_search` (wiping its tmpfs) while the watch loop was
+    already running, with no other command issued, and observing it detect
+    and repair the empty index on its own.
 ===============================================================================
 """
 
@@ -64,6 +92,14 @@ POLL_INTERVAL_SECONDS = 3
 # a larger deployment's reindex genuinely takes longer, and this must not
 # report a false failure just because it ran a normal amount of time.
 POLL_TIMEOUT_SECONDS = int(os.getenv("REINDEX_TIMEOUT_SECONDS", "300"))
+# How often watch() re-checks index health. Cheap (one GET) when the index is
+# already populated, so this can safely be short without hammering the API.
+WATCH_INTERVAL_SECONDS = int(os.getenv("REINDEX_WATCH_INTERVAL_SECONDS", "60"))
+# Heartbeat file for the container's own Docker healthcheck (see
+# docker-compose.yml) -- proves the watch loop is actually iterating, not
+# just that the process hasn't crashed. Path lives on a tmpfs mount, since
+# the container's root filesystem is read_only:true.
+HEARTBEAT_PATH = os.getenv("REINDEX_HEARTBEAT_PATH", "/tmp/reindex_heartbeat")
 
 
 def _latest_run() -> Optional[Dict[str, Any]]:
@@ -74,6 +110,52 @@ def _latest_run() -> Optional[Dict[str, Any]]:
     if not res or not res.get("data"):
         return None
     return res["data"][0]
+
+
+def index_has_data(sample_query: str = "party") -> bool:
+    """Cheap, real proof the search index is actually queryable and
+    populated -- runs the exact search a caller like `search_data_catalog`
+    would, rather than trusting a cached exit code from a previous run.
+    Returns False on any error response, a missing index, or zero hits;
+    never raises, since this is called every WATCH_INTERVAL_SECONDS and
+    a transient network hiccup must not crash the loop."""
+    res = api_get(f"search/query?q={sample_query}&index=table_search_index&size=1")
+    if not res:
+        return False
+    hits = ((res.get("hits") or {}).get("hits")) or []
+    return len(hits) > 0
+
+
+def _touch_heartbeat() -> None:
+    try:
+        with open(HEARTBEAT_PATH, "w") as f:
+            f.write(str(time.time()))
+    except OSError as e:
+        # Never fatal -- the heartbeat only feeds the container healthcheck;
+        # losing it shouldn't stop the loop from doing its actual job.
+        logger.warning(f"Could not write heartbeat file {HEARTBEAT_PATH}: {e}")
+
+
+def watch() -> None:
+    """Runs forever: check real index health, heal if needed, heartbeat,
+    sleep. This is what `docker-compose.yml`'s `openmetadata_search_reindex`
+    container actually runs now (see module docstring for why the one-shot
+    `main()` alone doesn't survive a host reboot)."""
+    logger.info(f"Starting search-index watch loop (checking every {WATCH_INTERVAL_SECONDS}s)...")
+    while True:
+        try:
+            if index_has_data():
+                logger.info("Search index check: OK (populated).")
+            else:
+                logger.warning("Search index check: empty or missing -- rebuilding.")
+                rebuild_search_index()
+        except Exception as e:  # noqa: BLE001 -- a watch loop must never die
+            # on a transient failure; log and retry next interval instead of
+            # exiting, which would silently stop all future healing with no
+            # one watching for the container to have exited.
+            logger.error(f"Unexpected error during watch check: {e}")
+        _touch_heartbeat()
+        time.sleep(WATCH_INTERVAL_SECONDS)
 
 
 def rebuild_search_index() -> bool:
@@ -132,6 +214,10 @@ def rebuild_search_index() -> bool:
 
 
 def main() -> None:
+    if "--watch" in sys.argv:
+        watch()  # never returns
+        return
+
     print("🔄 Rebuilding OpenMetadata's OpenSearch catalog index...")
     print("=========================================================")
     ok = rebuild_search_index()
