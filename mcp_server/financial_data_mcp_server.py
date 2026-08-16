@@ -437,6 +437,151 @@ def query_knowledge_graph(
         logger.error(f"Cypher execution error: {e}")
         return "Cypher Execution Error: the query could not be executed. See server logs for detail."
 
+# Ontology (TBox) queries. Deliberately a fixed, parameterized set rather than
+# a second raw-Cypher tool: an agent already has query_knowledge_graph for
+# arbitrary Cypher, but it has no way to know the TBox label/property shape, so
+# hand-written ontology queries mostly return empty results rather than errors.
+# Exposing named operations means the caller never supplies Cypher at all --
+# which is a stronger control than a keyword scan, since there is no query text
+# to smuggle anything through. `$term` is bound server-side by the driver, never
+# interpolated (the C6 convention).
+#
+# Every query uses pattern comprehensions / COUNT{} rather than chained OPTIONAL
+# MATCH. That is not stylistic: several independent OPTIONAL MATCHes from one
+# anchor produce a Cartesian fan-out, which would silently inflate the collected
+# lists and the instance count. Pattern comprehensions are evaluated
+# independently and cannot.
+_ONTOLOGY_LIST = """
+MATCH (c:OntologyClass)
+RETURN c.curie AS concept,
+       c.label AS label,
+       [(c)-[:DEFINED_BY]->(e) | e.curie] AS grounded_in,
+       head([(c)-[:CLASSIFIES]->(k)<-[:INSTANTIATES_GRAPH]-(cu)<-[:DERIVES_SEMANTICS_TO]-(t) | t.fqn]) AS source_table,
+       COUNT { (c)<-[:INSTANCE_OF]-(n) } AS instances
+ORDER BY concept
+"""
+
+_ONTOLOGY_DESCRIBE = """
+MATCH (c:OntologyClass)
+WHERE toLower(c.curie) = toLower($term)
+   OR toLower(coalesce(c.label, '')) = toLower($term)
+   OR toLower(last(split(c.uri, '#'))) = toLower($term)
+RETURN c.curie AS concept,
+       c.label AS label,
+       c.comment AS definition,
+       [(c)-[:DEFINED_BY]->(e) | e.curie] AS grounded_in,
+       [(c)-[:SUBCLASS_OF*]->(a) | a.curie] AS ancestors,
+       [(s)-[:SUBCLASS_OF*]->(c) | s.curie] AS subclasses,
+       [(p)-[:DOMAIN]->(c) | p.curie] AS properties,
+       head([(c)-[:CLASSIFIES]->(k)<-[:INSTANTIATES_GRAPH]-(cu) | cu.name]) AS semantic_cube,
+       head([(c)-[:CLASSIFIES]->(k2)<-[:INSTANTIATES_GRAPH]-(cu2)<-[:DERIVES_SEMANTICS_TO]-(t) | t.fqn]) AS source_table,
+       COUNT { (c)<-[:INSTANCE_OF]-(n) } AS instances
+"""
+
+_ONTOLOGY_SEARCH = """
+MATCH (c:OntologyClass)
+WHERE toLower(c.curie) CONTAINS toLower($term)
+   OR toLower(coalesce(c.label, '')) CONTAINS toLower($term)
+   OR toLower(coalesce(c.comment, '')) CONTAINS toLower($term)
+RETURN c.curie AS concept,
+       c.label AS label,
+       c.comment AS definition,
+       head([(c)-[:CLASSIFIES]->(k)<-[:INSTANTIATES_GRAPH]-(cu)<-[:DERIVES_SEMANTICS_TO]-(t) | t.fqn]) AS source_table
+ORDER BY concept
+"""
+
+_ONTOLOGY_OPERATIONS = {
+    "list": (_ONTOLOGY_LIST, False),
+    "describe": (_ONTOLOGY_DESCRIBE, True),
+    "search": (_ONTOLOGY_SEARCH, True),
+}
+
+MAX_ONTOLOGY_RESULT_ROWS = 50
+
+
+@mcp.tool()
+@track_tool_call
+def query_ontology(
+    operation: Annotated[
+        str,
+        Field(description=(
+            "'list' for every business concept the platform models; "
+            "'describe' for one concept's full detail (definition, FIBO/BIAN grounding, "
+            "parent/child concepts, properties, source table, semantic cube, instance count); "
+            "'search' to find concepts matching a free-text term."
+        )),
+    ],
+    term: Annotated[
+        str,
+        Field(description=(
+            "The concept for 'describe' (e.g. 'Customer', 'fin:DepositAccount'), or the "
+            "search text for 'search' (e.g. 'loan', 'balance'). Ignored by 'list'."
+        )),
+    ] = "",
+) -> str:
+    """
+    Query the platform's business ontology (TBox) -- the formal W3C OWL model of
+    what a Party, Customer, DepositAccount or LoanAgreement *is*, grounded in
+    FIBO and BIAN, and linked to the PostgreSQL table and Cube.js metric where
+    each concept's data actually lives.
+
+    Use this to discover what the platform models and where a concept's data
+    comes from, before writing a SQL or Cypher query against it. This returns
+    schema-level knowledge only -- never customer records.
+    """
+    logger.info(f"Executing query_ontology tool: operation='{operation}' term='{term}'")
+
+    op = (operation or "").strip().lower()
+    if op not in _ONTOLOGY_OPERATIONS:
+        # Actionable rather than generic: the caller is a model that can retry
+        # correctly if told the valid values.
+        return (
+            f"Unknown operation '{operation}'. Valid operations: "
+            f"{', '.join(sorted(_ONTOLOGY_OPERATIONS))}."
+        )
+
+    cypher, needs_term = _ONTOLOGY_OPERATIONS[op]
+    if needs_term and not (term or "").strip():
+        return f"Operation '{op}' requires a non-empty `term`."
+
+    # Defense in depth. This Cypher is ours and the term is a bound parameter,
+    # so there is nothing for a caller to inject -- but running the same
+    # read-only check the sibling Neo4j tool uses means an unsafe edit to the
+    # queries above cannot ship silently.
+    safe, reason = guardrails.validate_read_only_query(cypher, "Cypher")
+    if not safe:
+        logger.error(f"Ontology query failed its own read-only check: {reason}")
+        return "Ontology Query Error: internal query failed validation. See server logs for detail."
+
+    try:
+        records = query_neo4j(cypher, {"term": term})[:MAX_ONTOLOGY_RESULT_ROWS]
+    except Exception as e:
+        # Same convention as query_knowledge_graph: detail to the log, generic
+        # message to the caller.
+        logger.error(f"Ontology query error: {e}")
+        return "Ontology Query Error: the query could not be executed. See server logs for detail."
+
+    if not records:
+        if op == "describe":
+            return (
+                f"No concept named '{term}' in the ontology. Use operation='list' to see "
+                f"every concept, or operation='search' to find one by keyword."
+            )
+        if op == "search":
+            return f"No concepts match '{term}'. Use operation='list' to see every concept."
+        return (
+            "The ontology is empty. Load it with `python3 scripts/load_ontology_tbox.py`."
+        )
+
+    # Precautionary, not load-bearing: the TBox is terminological by
+    # construction -- the loader refuses to write individuals and
+    # tests/test_ontology_tbox.py asserts the source contains none -- so there
+    # is no instance data here to redact. Applied anyway for consistency with
+    # the sibling tools, so this can never become a leak path if the ontology
+    # ever gains an instance-bearing field.
+    return json.dumps(guardrails.redact_rows(records), indent=2)
+
+
 @mcp.tool()
 @track_tool_call
 def query_financial_database(
