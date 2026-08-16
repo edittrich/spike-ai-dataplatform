@@ -108,6 +108,10 @@ def parse_tbox(path: str = ONTOLOGY_TTL_PATH) -> dict:
         classes.append({
             "uri": str(uri),
             "curie": _curie(graph, uri),
+            # Local name (`Party` from `...v1#Party`) is the join key to both
+            # the ABox node labels and :KnowledgeEntityType.name -- see
+            # build_bridge_statements().
+            "local_name": str(uri).rsplit("#", 1)[-1],
             "label": _lit(uri, RDFS.label),
             "comment": _lit(uri, RDFS.comment),
         })
@@ -200,6 +204,81 @@ def build_statements(tbox: dict) -> list:
     return statements
 
 
+def build_bridge_statements(tbox: dict) -> list:
+    """Connects the TBox to the two layers already in this database.
+
+    Two edge types, not three. The plan originally called for separate
+    `GROUNDED_IN` (-> :PostgreSQLTable) and `EXPOSED_BY` (-> :SemanticCube)
+    edges, but `sync_end_to_end_lineage.py` already writes
+    (:PostgreSQLTable)-[:DERIVES_SEMANTICS_TO]->(:SemanticCube)-[:INSTANTIATES_GRAPH]->
+    (:KnowledgeEntityType), and :KnowledgeEntityType.name is exactly the TBox
+    class local name (verified live: Party, Individual, Customer,
+    DepositAccount, ...). A single `CLASSIFIES` edge onto that node therefore
+    makes both the source table and the Cube.js metric reachable in one more
+    hop, without re-encoding a table<->class association that already exists.
+    Two representations of one fact is how the drift this repo keeps finding
+    gets created.
+
+      (:OntologyClass)-[:CLASSIFIES]->(:KnowledgeEntityType)
+                                       <-[:INSTANTIATES_GRAPH]-(:SemanticCube)
+                                       <-[:DERIVES_SEMANTICS_TO]-(:PostgreSQLTable)
+
+    (:KnowledgeEntityType is itself a proto-class -- an informal entity-type
+    node the lineage sync invented. The TBox formalizes and grounds the same
+    concept, so collapsing the two is plausible future work; keeping them
+    distinct for now avoids changing the lineage layer in this step.)
+
+    `INSTANCE_OF` is genuinely new information, encoded nowhere else: it types
+    the ABox against the ontology. Nodes are linked to their *most specific*
+    class only -- a Party node also labelled :Individual is typed
+    `fin:Individual`, not both -- so a node's full type set is the direct type
+    plus `-[:SUBCLASS_OF*]->`, matching how rdf:type + subsumption compose.
+    Linking to every matching label instead would make the edge count larger
+    than the node count for no added information.
+    """
+    from scripts.build_knowledge_graph import ABOX_LABELS
+
+    by_local = {c["local_name"]: c for c in tbox["classes"]}
+    uri_to_local = {c["uri"]: c["local_name"] for c in tbox["classes"]}
+
+    # parent local name -> its direct subclasses' local names
+    subclasses: dict = {}
+    for rel in tbox["subclass_of"]:
+        parent = uri_to_local.get(rel["parent"])
+        child = uri_to_local.get(rel["child"])
+        if parent and child:
+            subclasses.setdefault(parent, []).append(child)
+
+    statements = [(
+        """UNWIND $rows AS r
+           MATCH (c:OntologyClass {uri: r.uri})
+           MATCH (k:KnowledgeEntityType {name: r.local_name})
+           MERGE (c)-[:CLASSIFIES]->(k)""",
+        {"rows": [{"uri": c["uri"], "local_name": c["local_name"]} for c in tbox["classes"]]},
+    )]
+
+    # INSTANCE_OF, one statement per class that has a matching ABox label.
+    # Cypher cannot parameterize a label, so the label is interpolated -- safe
+    # here because it comes from ABOX_LABELS/the committed TTL, never from user
+    # input, and is filtered through that allowlist before use.
+    for local_name, cls in sorted(by_local.items()):
+        if local_name not in ABOX_LABELS:
+            # e.g. fin:PartyRole -- an abstract superclass with no instances.
+            continue
+        exclusions = "".join(
+            f" AND NOT n:{sub}" for sub in sorted(subclasses.get(local_name, []))
+            if sub in ABOX_LABELS
+        )
+        statements.append((
+            f"""MATCH (n:{local_name}) WHERE true{exclusions}
+                WITH n MATCH (c:OntologyClass {{uri: $uri}})
+                MERGE (n)-[:INSTANCE_OF]->(c)""",
+            {"uri": cls["uri"]},
+        ))
+
+    return statements
+
+
 def main() -> None:
     print("🚀 Loading Ontology TBox (Turtle -> Neo4j)...")
     print("=============================================")
@@ -232,6 +311,8 @@ def main() -> None:
     try:
         print("\n⚡ Writing TBox to Neo4j...")
         run_write(driver, build_statements(tbox))
+        print("🔗 Bridging TBox to the lineage layer and the ABox...")
+        run_write(driver, build_bridge_statements(tbox))
         with driver.session() as session:
             written = {
                 label: session.run(f"MATCH (n:{label}) RETURN count(n) AS c").single()["c"]
@@ -239,18 +320,60 @@ def main() -> None:
             }
             edges = {
                 rel: session.run(f"MATCH ()-[r:{rel}]->() RETURN count(r) AS c").single()["c"]
-                for rel in ("SUBCLASS_OF", "DOMAIN", "RANGE", "DEFINED_BY")
+                for rel in ("SUBCLASS_OF", "DOMAIN", "RANGE", "DEFINED_BY",
+                            "CLASSIFIES", "INSTANCE_OF")
             }
+            # ABox nodes with no ontology class. Expected and non-empty: the
+            # reference data (RefCountry/RefCurrency/RefIndustry) has no TBox
+            # class, so report it rather than let a silent gap look like success.
+            untyped = session.run(
+                """MATCH (n) WHERE any(l IN labels(n) WHERE l IN $abox)
+                   AND NOT (n)-[:INSTANCE_OF]->()
+                   RETURN labels(n) AS labels, count(*) AS c ORDER BY c DESC""",
+                abox=_abox_labels(),
+            ).data()
     finally:
         driver.close()
 
     print("\n📊 In graph:")
     for label, n in written.items():
-        print(f"   • :{label:<18} {n:>3} nodes")
+        print(f"   • :{label:<18} {n:>4} nodes")
     for rel, n in edges.items():
-        print(f"   • :{rel:<18} {n:>3} relationships")
+        print(f"   • :{rel:<18} {n:>4} relationships")
+
+    if edges["CLASSIFIES"] == 0:
+        print(
+            "\n⚠️  No CLASSIFIES edges: :KnowledgeEntityType nodes are absent. "
+            "Run `python3 scripts/sync_end_to_end_lineage.py` to create the lineage "
+            "layer, then re-run this script. The TBox itself is loaded and usable."
+        )
+    # The reference lookups genuinely have no TBox class. Anything else being
+    # untyped means the ABox was rebuilt after the last bridge run, so the
+    # INSTANCE_OF edges pointed at nodes that no longer exist -- the same
+    # ordering hazard that used to erase the lineage layer, in a form a wipe
+    # scope cannot fix (the nodes are legitimately new).
+    expected_untyped = {"RefCountry", "RefCurrency", "RefIndustry"}
+    unexpected = [r for r in untyped if not set(r["labels"]) & expected_untyped]
+    if untyped:
+        print("\n📎 ABox nodes with no ontology class:")
+        for row in untyped:
+            marker = "expected" if set(row["labels"]) & expected_untyped else "UNEXPECTED"
+            print(f"   • {'+'.join(row['labels']):<24} {row['c']:>5}   {marker}")
+    if unexpected:
+        print(
+            "\n⚠️  Some ABox nodes that should be typed are not. This is what a graph "
+            "rebuild leaves behind: build_knowledge_graph.py deletes and recreates the "
+            "instance nodes, so INSTANCE_OF edges into them cannot survive. Re-run this "
+            "script after every graph rebuild -- it is idempotent and takes about a second."
+        )
 
     print("\n✅ Ontology TBox loaded.")
+
+
+def _abox_labels() -> list:
+    from scripts.build_knowledge_graph import ABOX_LABELS
+
+    return list(ABOX_LABELS)
 
 
 if __name__ == "__main__":
