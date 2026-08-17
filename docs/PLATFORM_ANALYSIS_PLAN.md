@@ -59,6 +59,24 @@ document has been revised — treat the evidence as historical, not as a descrip
   guards it.
 - **ISS-21 is fixed.** `bootstrap_platform.sh`'s step counter is now consistently `N/12` throughout
   (12 steps, the new one being the TBox load), rather than the `N/10`/`N/11` split recorded below.
+- **The retriever is now 5-tier, not 4-tier**, which affects every "4-tier" reference below (ISS-12's
+  title among them). `scripts/_ontology_expansion.py` adds a TBox-driven expansion tier: it resolves a
+  prompt to ontology concepts, widens the set along `SUBCLASS_OF`, and probes the tables those concepts
+  are grounded in. It is additive — Tiers 1–4 are unchanged, and the per-intent aggregates remain the
+  better answer wherever one of `classify_intent`'s four intents applies. What it closes is the gap
+  those four intents leave: a prompt about organizations or loan applications previously fell through
+  to `INTENT_DEFAULT`'s generic party count, and now reaches its own grounded tables. This is the
+  clearest concrete answer to date for the "why keep an ontology at all" question the accepted-
+  limitations register raises — the TTL is no longer a write-only artifact, it is a retrieval input.
+- **One security note on that tier, recorded because the pattern is easy to get wrong.** The table
+  names it probes originate in Neo4j, so they are filtered against an `information_schema` allowlist
+  (`_ontology_expansion.select_tables`) and composed via `psycopg2.sql.Identifier` before any SQL runs
+  — a knowledge graph is not a trust boundary. Writing the rejection tests surfaced a real flaw in the
+  first implementation: a naive `rsplit('.', 1)` reduced `financial.party; DROP TABLE x` to `party`,
+  which *is* allowlisted, so a malformed name was silently accepted as `financial.party` rather than
+  rejected. Not exploitable as written — the statement is rebuilt from the allowlisted bare name, so
+  the injected text never reached SQL — but the name-mangling is the kind of latent behaviour that a
+  later refactor turns into a vulnerability, so malformed names are now rejected outright.
 
 ---
 
