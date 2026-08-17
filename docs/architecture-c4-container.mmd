@@ -13,13 +13,13 @@ C4Container
     System_Boundary(platform, "Enterprise AI-Enabled Data Platform") {
 
         Container_Boundary(consumption, "Consumption & Agentic Protocol") {
-            Container(streamlit, "RAG Explorer Dashboard", "Python / Streamlit, :8501", "6-tab UI over the 4-tier RAG payload, guardrails audit and LLMOps telemetry. Drives the retriever and agentic runner in-process.")
+            Container(streamlit, "RAG Explorer Dashboard", "Python / Streamlit, :8501", "7-tab UI over the 5-tier RAG payload, guardrails audit and LLMOps telemetry. Drives the retriever and agentic runner in-process.")
             Container(llmbackend, "LLM Backend", "Python — scripts/_llm_backend.py", "One LLM_PROVIDER switch behind every LLM call. Normalizes tool-call argument encoding, tool-result envelopes, token accounting and temperature limits across the two providers; fails closed on misconfiguration.")
             Container(mcp, "MCP Sidecar", "Python / FastMCP — SSE :8001, metrics :8000", "7 agent tools + 2 resources, incl. query_ontology. Bearer auth, PII redaction, read-only guardrails, real per-call metrics and OTel spans.")
         }
 
         Container_Boundary(retrieval, "Retrieval & Semantic Layer") {
-            Container(retriever, "Hybrid RAG Retriever", "Python library, in-process", "Fuses pgvector HNSW + cross-encoder re-rank, NL-to-Cypher, Cube.js metrics and SQL into one sanitized payload.")
+            Container(retriever, "Hybrid RAG Retriever", "Python library, in-process", "Fuses pgvector HNSW + cross-encoder re-rank, NL-to-Cypher, Cube.js metrics, SQL and TBox-driven query expansion into one sanitized payload.")
             Container(cube, "Cube.js Semantic Layer", "Node / Cube.js v0.35, :4000", "19 cubes + the customer_360 view. Two bearer roles; queryRewrite blocks PII outright and AML members for the restricted role.")
             ContainerDb(cubestore, "Cube Store", "cubejs/cubestore, bridge-internal only", "Pre-aggregation cache and queue driver; its own refresh worker.")
         }
@@ -58,7 +58,7 @@ C4Container
     Rel(operator, dagster, "Materializes pipeline assets", "HTTP :3001")
     Rel(agent_client, mcp, "Calls the 7 MCP tools", "SSE + Bearer, :8001")
 
-    Rel(streamlit, retriever, "4-tier retrieval", "in-process")
+    Rel(streamlit, retriever, "5-tier retrieval", "in-process")
     Rel(streamlit, llmbackend, "Grounded generation + agentic tool loop", "in-process")
     Rel(llmbackend, ollama, "when LLM_PROVIDER=ollama", "HTTP :11434")
     Rel(llmbackend, moonshot, "when LLM_PROVIDER=moonshot", "HTTPS + Bearer")

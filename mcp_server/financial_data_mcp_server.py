@@ -10,9 +10,10 @@ Exposed MCP Tools:
 1. `search_data_catalog`: OpenMetadata catalog & FIBO URI search.
 2. `query_semantic_metrics`: Cube.js open-source semantic metrics query.
 3. `query_knowledge_graph`: Neo4j Cypher Graph-RAG query execution.
-4. `query_financial_database`: Supabase PostgreSQL read-only SQL query.
-5. `check_data_quality`: OpenMetadata real-time assertion scorecards.
-6. `hybrid_rag_search`: 4-Tier Hybrid RAG context search.
+4. `query_ontology`: Neo4j TBox concept lookup, search and query expansion.
+5. `query_financial_database`: Supabase PostgreSQL read-only SQL query.
+6. `check_data_quality`: OpenMetadata real-time assertion scorecards.
+7. `hybrid_rag_search`: 5-Tier Hybrid RAG context search.
 ===============================================================================
 """
 
@@ -63,6 +64,7 @@ from mcp.server.fastmcp import FastMCP
 # scripts/ has no __init__.py (namespace package); make it importable regardless
 # of the working directory this module is launched from.
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from scripts import _ontology_expansion as ontology_expansion
 from scripts._contracts import render_sla_summary
 from scripts._dotenv_boot import load_env
 from scripts._json_safe import json_safe_row
@@ -496,7 +498,61 @@ _ONTOLOGY_OPERATIONS = {
     "search": (_ONTOLOGY_SEARCH, True),
 }
 
+# Handled separately from the three above: it is not a single Cypher query but
+# a fetch-then-reason step (see scripts/_ontology_expansion.py), because the
+# matching runs in Python so that no caller-supplied text is ever bound into a
+# graph query for this path.
+_ONTOLOGY_EXPAND_OP = "expand"
+_ONTOLOGY_VALID_OPS = sorted(set(_ONTOLOGY_OPERATIONS) | {_ONTOLOGY_EXPAND_OP})
+
 MAX_ONTOLOGY_RESULT_ROWS = 50
+
+
+def _ontology_expand(term: str) -> str:
+    """Backs `query_ontology(operation='expand')`.
+
+    Resolves a natural-language question to ontology concepts, widens along
+    `SUBCLASS_OF`, and reports the source tables to query next -- so an agent
+    can go from "which organizations have pending loan applications?" to the
+    two tables that answer it without guessing at schema names.
+
+    Deliberately reports tables rather than querying them: the agent already
+    has `query_financial_database` for that, and keeping this operation
+    read-only-Cypher means it inherits the ontology path's controls unchanged
+    instead of acquiring a second, SQL-shaped one. (The retriever's own
+    Tier 5 does run the counts -- it has an allowlist and a guardrailed SQL
+    path to do it safely; see scripts/_ontology_expansion.select_tables.)
+    """
+    if not (term or "").strip():
+        return (
+            f"Operation '{_ONTOLOGY_EXPAND_OP}' requires a non-empty `term` -- "
+            f"pass the user's question."
+        )
+
+    safe, reason = guardrails.validate_read_only_query(
+        ontology_expansion.TBOX_FETCH_CYPHER, "Cypher"
+    )
+    if not safe:
+        logger.error(f"Ontology expansion query failed its own read-only check: {reason}")
+        return "Ontology Query Error: internal query failed validation. See server logs for detail."
+
+    try:
+        concepts = ontology_expansion.fetch_concepts(lambda cypher: query_neo4j(cypher, {}))
+    except Exception as e:
+        logger.error(f"Ontology expansion error: {e}")
+        return "Ontology Query Error: the query could not be executed. See server logs for detail."
+
+    if not concepts:
+        return "The ontology is empty. Load it with `python3 scripts/load_ontology_tbox.py`."
+
+    # No allowed_tables/context: this operation reports, it does not execute.
+    result = ontology_expansion.expand(term, concepts)
+    if not result["matched_concepts"]:
+        return (
+            f"No ontology concept matches '{term}'. Use operation='list' to see every "
+            f"concept, or operation='search' for a keyword lookup."
+        )
+    return json.dumps(result, indent=2)
 
 
 @mcp.tool()
@@ -508,14 +564,18 @@ def query_ontology(
             "'list' for every business concept the platform models; "
             "'describe' for one concept's full detail (definition, FIBO/BIAN grounding, "
             "parent/child concepts, properties, source table, semantic cube, instance count); "
-            "'search' to find concepts matching a free-text term."
+            "'search' to find concepts matching a free-text term; "
+            "'expand' to resolve a natural-language question into the concepts it "
+            "refers to, widened along the subclass hierarchy, with the source tables "
+            "to query next."
         )),
     ],
     term: Annotated[
         str,
         Field(description=(
-            "The concept for 'describe' (e.g. 'Customer', 'fin:DepositAccount'), or the "
-            "search text for 'search' (e.g. 'loan', 'balance'). Ignored by 'list'."
+            "The concept for 'describe' (e.g. 'Customer', 'fin:DepositAccount'), the "
+            "search text for 'search' (e.g. 'loan', 'balance'), or the full "
+            "natural-language question for 'expand'. Ignored by 'list'."
         )),
     ] = "",
 ) -> str:
@@ -532,13 +592,16 @@ def query_ontology(
     logger.info(f"Executing query_ontology tool: operation='{operation}' term='{term}'")
 
     op = (operation or "").strip().lower()
-    if op not in _ONTOLOGY_OPERATIONS:
+    if op not in _ONTOLOGY_OPERATIONS and op != _ONTOLOGY_EXPAND_OP:
         # Actionable rather than generic: the caller is a model that can retry
         # correctly if told the valid values.
         return (
             f"Unknown operation '{operation}'. Valid operations: "
-            f"{', '.join(sorted(_ONTOLOGY_OPERATIONS))}."
+            f"{', '.join(_ONTOLOGY_VALID_OPS)}."
         )
+
+    if op == _ONTOLOGY_EXPAND_OP:
+        return _ontology_expand(term)
 
     cypher, needs_term = _ONTOLOGY_OPERATIONS[op]
     if needs_term and not (term or "").strip():
@@ -700,7 +763,7 @@ def hybrid_rag_search(
     prompt: Annotated[str, Field(description="Natural language prompt")],
 ) -> str:
     """
-    Execute full 4-tier Hybrid RAG context search (Vector Search + Cypher + Cube.js Metrics + SQL)
+    Execute full 5-tier Hybrid RAG context search (Vector Search + Cypher + Cube.js Metrics + SQL + Ontology Expansion)
     for complex natural language questions.
     """
     logger.info(f"Executing hybrid_rag_search tool for prompt: '{prompt}'")

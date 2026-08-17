@@ -302,20 +302,21 @@ def main():
 
         st.markdown("---")
 
-        # 4-Tier Interactive Context Tabs -- only meaningful in RAG Pipeline
+        # 5-Tier Interactive Context Tabs -- only meaningful in RAG Pipeline
         # mode, which is the only branch above that populates rag_payload/
         # ollama_res/guardrails. Autonomous mode drives MCP tools directly via
         # AgenticToolRunner (its own tool-call log is rendered above) and
-        # has no equivalent 4-tier payload -- rendering this section
+        # has no equivalent 5-tier payload -- rendering this section
         # unconditionally previously raised NameError the first time anyone
         # ran Autonomous mode and clicked through to these tabs.
         if "Autonomous" not in execution_mode:
-            st.markdown("### 🔍 Multi-Modal 4-Tier RAG Context Breakdown")
-            tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+            st.markdown("### 🔍 Multi-Modal 5-Tier RAG Context Breakdown")
+            tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
                 "🧠 Tier 1: Vector Search",
                 "🕸️ Tier 2: Knowledge Graph",
                 "📊 Tier 3: Semantic Metrics",
                 "🗄️ Tier 4: Relational SQL",
+                "🧭 Tier 5: Ontology Expansion",
                 "🛡️ Guardrails Audit",
                 "📈 LLMOps Telemetry"
             ])
@@ -356,6 +357,34 @@ def main():
                 st.json(sql_data) if sql_data else st.write("No SQL records returned.")
 
             with tab5:
+                st.subheader("TBox-Driven Query Expansion (Neo4j Ontology → PostgreSQL)")
+                ontology_data = rag_payload.get("ontology_expansion_context", {})
+                expanded = ontology_data.get("expanded_concepts", [])
+                if expanded:
+                    st.markdown(
+                        "**Concepts the prompt resolved to**, widened along the ontology's "
+                        "`SUBCLASS_OF` hierarchy. A `subclass_of:` reason means the concept was "
+                        "reached through the TBox rather than matched in the prompt directly."
+                    )
+                    for concept in expanded:
+                        st.markdown(
+                            f"**`{concept.get('concept')}`** ({concept.get('match_reason')}) → "
+                            f"`{concept.get('source_table') or 'not grounded'}`"
+                        )
+                        grounding = concept.get("grounded_in") or []
+                        if grounding:
+                            st.caption(f"FIBO/BIAN: {', '.join(grounding)}")
+                    counts = ontology_data.get("grounded_row_counts", [])
+                    if counts:
+                        st.markdown("**Rows behind those concepts:**")
+                        st.json(counts)
+                else:
+                    st.write(
+                        "No ontology concept matched this prompt. Tiers 1-4 are unaffected -- "
+                        "this tier is additive."
+                    )
+
+            with tab6:
                 st.subheader("AI Safety, PII Masking & Prompt Guardrails Audit")
                 # Reflects the actual check run earlier in this branch
                 # (is_safe/msg) rather than a hardcoded "clean" message --
@@ -368,7 +397,7 @@ def main():
                 st.markdown("**Sample Real-Time PII Masking Test:**")
                 st.text(f"Original: {sample_pii}\nMasked:   {redacted}")
 
-            with tab6:
+            with tab7:
                 st.subheader("LLMOps Telemetry, Token Accounting & Cost Breakdown")
                 m_col1, m_col2, m_col3, m_col4 = st.columns(4)
                 p_tokens = ollama_res.get("prompt_eval_count", 0)

@@ -33,6 +33,7 @@ logger = logging.getLogger("HybridRAGRetriever")
 
 from scripts._dotenv_boot import load_env
 from scripts._json_safe import json_safe_row
+from scripts import _ontology_expansion as ontology_expansion
 from scripts.ai_safety_guardrails import AISafetyGuardrails
 
 # Loads .env when this module runs on the host (both directly, per CLAUDE.md's
@@ -150,6 +151,11 @@ class HybridRAGRetriever:
         # get_neo4j_driver() below and mcp_server's module-level singleton.
         self._pg_conn = None
         self._neo4j_driver = None
+        # Cached for the life of this instance: the set of real financial.*
+        # tables, read from information_schema, that ontology expansion is
+        # allowed to probe. Re-reading it per call would add a round trip to
+        # every retrieval to re-learn something that changes only on migration.
+        self._allowed_tables: Optional[Dict[str, bool]] = None
 
     def _get_pg_conn(self) -> "psycopg2.extensions.connection":
         if self._pg_conn is None or self._pg_conn.closed:
@@ -303,6 +309,46 @@ class HybridRAGRetriever:
         See graph_rag_search's docstring -- same Q4 fix, same reasoning."""
         return self.query_pg(sql_query)[:10]
 
+    def _get_allowed_tables(self) -> Dict[str, bool]:
+        """Bare table name -> carries `md_is_active`, for every real
+        `financial.*` table. The allowlist ontology expansion filters against;
+        see scripts/_ontology_expansion.select_tables for why it exists."""
+        if self._allowed_tables is None:
+            rows = self.query_pg(ontology_expansion.ALLOWED_TABLES_SQL)
+            self._allowed_tables = {
+                row["table_name"]: bool(row["has_active_flag"]) for row in rows
+            }
+        return self._allowed_tables
+
+    def ontology_expansion_search(self, prompt: str) -> Dict[str, Any]:
+        """Tier 5: TBox-Driven Query Expansion (Neo4j ontology -> PostgreSQL).
+
+        Resolves the prompt to business concepts in the ontology, widens the
+        set along `SUBCLASS_OF`, and probes the tables those concepts are
+        grounded in. This is what the TBox is *for*: Tiers 2-4 route on
+        `classify_intent`'s four hardcoded intents, so a prompt about
+        organizations or loan applications falls through to a generic default;
+        this tier reaches all ten modelled concepts, and gains any concept
+        later added to the TTL with no code change.
+
+        See graph_rag_search's docstring -- same Q4 reasoning, exceptions
+        propagate to hybrid_retrieve's per-tier handler rather than becoming
+        result-shaped rows."""
+        concepts = ontology_expansion.fetch_concepts(self.query_neo4j)
+        result = ontology_expansion.expand(
+            prompt,
+            concepts,
+            allowed_tables=self._get_allowed_tables(),
+            context=self._get_pg_conn(),
+        )
+        expansion_sql = result.get("expansion_sql")
+        if expansion_sql:
+            # Through query_pg, so the composed statement passes the same
+            # read-only guardrail as every other SQL path rather than getting
+            # a private exemption for having been generated internally.
+            result["grounded_row_counts"] = self.query_pg(expansion_sql)
+        return result
+
     def hybrid_retrieve(
         self,
         prompt: str,
@@ -405,13 +451,35 @@ class HybridRAGRetriever:
         for s in sql_results:
             logger.info(f"  {s}")
 
+        # 5. TBox-Driven Query Expansion
+        # Additive on purpose: Tier 4's per-intent aggregates above are better
+        # answers wherever one of the four intents applies, so this does not
+        # replace them. It covers the gap they cannot -- the six modelled
+        # concepts with no intent branch -- by resolving the prompt through the
+        # ontology instead of a hardcoded map.
+        t5_start = time.time()
+        try:
+            ontology_results = self.ontology_expansion_search(prompt)
+        except Exception as e:
+            logger.error(f"Tier 5 (Ontology_Expansion_TBox) failed: {e}")
+            tier_errors["Ontology_Expansion_TBox"] = str(e)
+            ontology_results = {}
+        self.telemetry.record_tier_latency(trace, "Ontology_Expansion_TBox", (time.time() - t5_start) * 1000)
+        logger.info("Tier 5: TBox-Driven Query Expansion (Neo4j ontology -> PostgreSQL):")
+        for concept in ontology_results.get("expanded_concepts", []):
+            logger.info(
+                f"  {concept.get('concept')} ({concept.get('match_reason')})"
+                f" -> {concept.get('source_table')}"
+            )
+
         # Construct Combined RAG Context Payload
         raw_payload = {
             "prompt": prompt,
             "vector_schema_context": vector_results,
             "knowledge_graph_context": graph_results,
             "semantic_metrics_context": semantic_results,
-            "relational_sql_context": sql_results
+            "relational_sql_context": sql_results,
+            "ontology_expansion_context": ontology_results
         }
 
         # 5. Sanitize & Redact PII in Context Payload before returning
