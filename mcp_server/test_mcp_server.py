@@ -40,6 +40,7 @@ EXPECTED_TOOLS = {
     "search_data_catalog",
     "query_semantic_metrics",
     "query_knowledge_graph",
+    "query_ontology",
     "query_financial_database",
     "check_data_quality",
     "hybrid_rag_search",
@@ -96,7 +97,7 @@ async def test_mcp_server():
     tools = await mcp.list_tools()
     tool_names = {t.name for t in tools}
     print(f"📦 Discovered {len(tools)} Registered FastMCP Tools: {sorted(tool_names)}")
-    check(tool_names == EXPECTED_TOOLS, f"exactly the 6 documented tools are registered (got {sorted(tool_names)})")
+    check(tool_names == EXPECTED_TOOLS, f"exactly the 7 documented tools are registered (got {sorted(tool_names)})")
 
     resources = await mcp.list_resources()
     resource_uris = {str(r.uri) for r in resources}
@@ -120,11 +121,14 @@ async def test_mcp_server():
     cypher = "MATCH (l:LoanAgreement)-[:SECURED_BY]->(c:LoanCollateral) RETURN l.agreement_number, c.collateral_type LIMIT 2;"
     await call_and_check("query_knowledge_graph", {"cypher_query": cypher}, "query_knowledge_graph")
 
-    print("\n4. `query_financial_database(...)`:")
+    print("\n4. `query_ontology('describe', 'Customer')`:")
+    await call_and_check("query_ontology", {"operation": "describe", "term": "Customer"}, "query_ontology")
+
+    print("\n5. `query_financial_database(...)`:")
     sql = "SELECT party_type, COUNT(*) FROM financial.party GROUP BY party_type;"
     await call_and_check("query_financial_database", {"sql_query": sql}, "query_financial_database")
 
-    print("\n5. `check_data_quality('deposit_account')`:")
+    print("\n6. `check_data_quality('deposit_account')`:")
     await call_and_check("check_data_quality", {"table_name": "deposit_account"}, "check_data_quality")
 
     # Q9 in the hardening plan: "hybrid_rag_search is registration-checked but
@@ -133,7 +137,7 @@ async def test_mcp_server():
     # error string rather than raising when the embedding model isn't
     # installed (as in CI) -- so it's safe to actually call here like every
     # other tool, instead of only checking its registration.
-    print("\n6. `hybrid_rag_search('What is the AML risk rating for high-value customers?')`:")
+    print("\n7. `hybrid_rag_search('What is the AML risk rating for high-value customers?')`:")
     await call_and_check(
         "hybrid_rag_search",
         {"prompt": "What is the AML risk rating for high-value customers?"},

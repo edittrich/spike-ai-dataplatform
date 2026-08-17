@@ -15,7 +15,7 @@ C4Container
         Container_Boundary(consumption, "Consumption & Agentic Protocol") {
             Container(streamlit, "RAG Explorer Dashboard", "Python / Streamlit, :8501", "6-tab UI over the 4-tier RAG payload, guardrails audit and LLMOps telemetry. Drives the retriever and agentic runner in-process.")
             Container(llmbackend, "LLM Backend", "Python — scripts/_llm_backend.py", "One LLM_PROVIDER switch behind every LLM call. Normalizes tool-call argument encoding, tool-result envelopes, token accounting and temperature limits across the two providers; fails closed on misconfiguration.")
-            Container(mcp, "MCP Sidecar", "Python / FastMCP — SSE :8001, metrics :8000", "6 agent tools + 2 resources. Bearer auth, PII redaction, read-only guardrails, real per-call metrics and OTel spans.")
+            Container(mcp, "MCP Sidecar", "Python / FastMCP — SSE :8001, metrics :8000", "7 agent tools + 2 resources, incl. query_ontology. Bearer auth, PII redaction, read-only guardrails, real per-call metrics and OTel spans.")
         }
 
         Container_Boundary(retrieval, "Retrieval & Semantic Layer") {
@@ -26,7 +26,7 @@ C4Container
 
         Container_Boundary(dataplane, "Multi-Model Data Plane") {
             ContainerDb(pg, "PostgreSQL + pgvector", "Supabase Postgres 15, :54322", "3NF BIAN/FIBO core: 19 tables (16 with SCD2 headers) + the entity_embeddings HNSW index. RLS deny-by-default; mcp_readonly / cube_readonly roles.")
-            ContainerDb(neo4j, "Neo4j Knowledge Graph", "Neo4j 5.18 Community, :7687", "Party/account/loan instance graph, full-text name indexes. READ_ACCESS sessions; no APOC plugin.")
+            ContainerDb(neo4j, "Neo4j Knowledge Graph", "Neo4j 5.18 Community, :7687", "Two layers in one database (Community allows only one): the ABox instance graph and the OWL/FIBO TBox, kept apart by label convention. READ_ACCESS sessions; no APOC plugin.")
         }
 
         Container_Boundary(governance, "Catalog & Governance") {
@@ -36,8 +36,8 @@ C4Container
         }
 
         Container_Boundary(orchestration, "Ingestion & Orchestration") {
-            Container(dagster, "Dagster Orchestrator", "Python / Dagster, UI :3001", "13-asset graph with declared deps, retries, backfill and a daily bot-token rotation schedule.")
-            Container(pipeline, "Pipeline Scripts", "Python, run on the host", "Seed generation, graph build, catalog registration, FIBO grounding, contracts, quality tests, lineage, embeddings.")
+            Container(dagster, "Dagster Orchestrator", "Python / Dagster, UI :3001", "14-asset graph with declared deps, retries, backfill and a daily bot-token rotation schedule.")
+            Container(pipeline, "Pipeline Scripts", "Python, run on the host", "Seed generation, graph build, catalog registration, FIBO grounding, contracts, quality tests, lineage, ontology TBox, embeddings.")
         }
 
         Container_Boundary(metrics, "Metrics & Alerting") {
@@ -56,7 +56,7 @@ C4Container
     Rel(analyst, streamlit, "Explores data, submits prompts", "HTTP :8501")
     Rel(analyst, graf, "Views dashboards and alerts", "HTTP :3000")
     Rel(operator, dagster, "Materializes pipeline assets", "HTTP :3001")
-    Rel(agent_client, mcp, "Calls the 6 MCP tools", "SSE + Bearer, :8001")
+    Rel(agent_client, mcp, "Calls the 7 MCP tools", "SSE + Bearer, :8001")
 
     Rel(streamlit, retriever, "4-tier retrieval", "in-process")
     Rel(streamlit, llmbackend, "Grounded generation + agentic tool loop", "in-process")

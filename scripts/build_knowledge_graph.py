@@ -34,6 +34,42 @@ from scripts._neo4j_conn import get_driver  # noqa: E402
 # see the Cypher-writing functions below, and generate_vector_embeddings.py).
 PG_CONTAINER = "supabase_db_ai-dataplatform"
 
+# Every node label this script creates -- i.e. the ABox (instance data)
+# projected from PostgreSQL. The reload below deletes exactly these and
+# nothing else.
+#
+# This used to be an unconditional `MATCH (n) DETACH DELETE n`, which also
+# destroyed nodes this script never created and cannot recreate:
+# `sync_end_to_end_lineage.py`'s (:PostgreSQLTable)-[:DERIVES_SEMANTICS_TO]->
+# (:SemanticCube)-[:INSTANTIATES_GRAPH]->(:KnowledgeEntityType) lineage
+# sub-graph. Re-running this script alone silently removed the lineage layer;
+# it only ever came back because bootstrap_platform.sh happens to run the
+# lineage sync afterwards. Neo4j Community allows exactly one user database
+# (verified live: `CREATE DATABASE` returns
+# Neo.ClientError.Statement.UnsupportedAdministrationCommand), so separating
+# the two by database is not available -- scoping the wipe by label is the
+# mechanism that keeps them independent.
+#
+# An allowlist, deliberately, rather than "delete everything except X": a
+# label accidentally missing here leaves stale nodes behind (visible, and
+# caught by tests/test_graph_wipe_scope.py), whereas the inverse would
+# silently delete a layer this script has no way to rebuild.
+ABOX_LABELS = [
+    "Party",
+    "Individual",
+    "Organization",
+    "Customer",
+    "DepositAccount",
+    "DepositBalance",
+    "LoanApplication",
+    "LoanAgreement",
+    "LoanCollateral",
+    "RefCountry",
+    "RefCurrency",
+    "RefIndustry",
+]
+
+
 def run_psql_json(sql_query):
     """Executes SQL against PostgreSQL container and returns parsed JSON array.
 
@@ -118,17 +154,19 @@ def main():
 
     driver = get_driver()
 
-    # 1. Clear existing database for clean reload -- this is a full, unconditional
-    # wipe (MATCH (n) DETACH DELETE n), so it requires either an interactive "yes"
-    # or an explicit --yes/-y flag (for non-interactive automation, e.g.
-    # bootstrap_platform.sh, which passes --yes deliberately).
-    print("🧹 Cleaning existing Neo4j graph...")
+    # 1. Clear this script's own nodes for a clean reload. Scoped to
+    # ABOX_LABELS (see its comment above for why it is not a whole-graph
+    # wipe), but still destructive enough to require either an interactive
+    # "yes" or an explicit --yes/-y flag (for non-interactive automation,
+    # e.g. bootstrap_platform.sh, which passes --yes deliberately).
+    print("🧹 Cleaning existing Neo4j instance data (ABox)...")
     if not args.yes:
         confirmed = os.getenv("CONFIRM_GRAPH_WIPE", "") == "1"
         if not confirmed and sys.stdin.isatty():
             answer = input(
-                "⚠️  This will DELETE ALL nodes and relationships in the Neo4j graph "
-                "at the configured NEO4J_URI. Type 'yes' to continue: "
+                "⚠️  This will DELETE all instance-data nodes and their relationships "
+                f"({', '.join(ABOX_LABELS)}) in the Neo4j graph at the configured "
+                "NEO4J_URI. Type 'yes' to continue: "
             )
             confirmed = answer.strip().lower() == "yes"
         if not confirmed:
@@ -138,7 +176,14 @@ def main():
             )
             driver.close()
             sys.exit(1)
-    execute_cypher_batch(driver, [("MATCH (n) DETACH DELETE n", {})])
+    # One statement per label rather than a single `MATCH (n) WHERE n:A OR n:B ...`:
+    # keeps each delete backed by the label index instead of a full node scan.
+    # Nodes carrying two ABox labels (Party+Individual, Party+Organization) are
+    # removed by the first matching statement; the later one then matches nothing,
+    # which is harmless.
+    execute_cypher_batch(
+        driver, [(f"MATCH (n:{label}) DETACH DELETE n", {}) for label in ABOX_LABELS]
+    )
 
     # 2. Setup Constraints & Indexes -- read from the committed DDL file
     # (neo4j/schema/constraints_and_indexes.cypher) rather than hardcoding

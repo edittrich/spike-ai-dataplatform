@@ -180,6 +180,12 @@ def lineage_dag(context: AssetExecutionContext) -> MaterializeResult:
     return _run_script(context, "sync_end_to_end_lineage.py")
 
 
+@asset(group_name="graph", deps=[knowledge_graph, lineage_dag], retry_policy=_SERVICE_RETRY_POLICY,
+       description="Loads the ontology TBox (ontology/financial_platform_ontology.ttl) into Neo4j as :OntologyClass/:OntologyProperty/:ExternalConcept, and bridges it to the layers already in that database. Both dependencies are load-bearing rather than ordering preferences: CLASSIFIES edges attach to the :KnowledgeEntityType nodes lineage_dag creates, so running earlier yields zero of them; and INSTANCE_OF edges point at ABox nodes that knowledge_graph deletes and recreates on every run, so a rebuild always leaves the ABox untyped until this re-materializes. Scoping that wipe to ABOX_LABELS protects the TBox itself, but no wipe scope can protect edges into nodes that are legitimately new -- which is exactly the ordering hazard lineage_dag already documents for its own nodes. Idempotent and about a second.")
+def ontology_tbox(context: AssetExecutionContext) -> MaterializeResult:
+    return _run_script(context, "load_ontology_tbox.py")
+
+
 # ----------------------------------------------------------------------------
 # D. Retrieval Index (genuinely last)
 # ----------------------------------------------------------------------------
@@ -239,6 +245,7 @@ defs = Definitions(
         data_contracts,
         data_quality_results,
         lineage_dag,
+        ontology_tbox,
         vector_embeddings,
     ],
     jobs=[full_pipeline_job, bot_token_rotation_job],

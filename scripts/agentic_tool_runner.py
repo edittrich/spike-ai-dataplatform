@@ -38,6 +38,7 @@ from mcp_server.financial_data_mcp_server import (
     search_data_catalog,
     query_semantic_metrics,
     query_knowledge_graph,
+    query_ontology,
     query_financial_database,
     check_data_quality,
     hybrid_rag_search
@@ -113,6 +114,8 @@ class AgenticToolRunner:
             elif tool_name == "query_knowledge_graph":
                 cypher = args.get("cypher_query", "MATCH (l:LoanAgreement) RETURN l LIMIT 5;")
                 return query_knowledge_graph(cypher)
+            elif tool_name == "query_ontology":
+                return query_ontology(args.get("operation", "list"), args.get("term", ""))
             elif tool_name == "query_financial_database":
                 sql = args.get("sql_query", "SELECT count(*) FROM financial.party;")
                 return query_financial_database(sql)
