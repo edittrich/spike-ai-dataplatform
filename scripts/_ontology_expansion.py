@@ -38,6 +38,8 @@ from __future__ import annotations
 import re
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
+from scripts._sql_identifier import validate_identifier
+
 try:  # psycopg2 is absent in the syntax-only CI job; the pure helpers still import.
     from psycopg2 import sql as _pgsql
 except ImportError:  # pragma: no cover - exercised only where psycopg2 is missing
@@ -217,14 +219,14 @@ def grounded_tables(expanded: Iterable[Dict[str, Any]]) -> List[str]:
     return tables
 
 
-# A bare PostgreSQL identifier as this platform writes them: lower snake_case.
-# Deliberately narrower than what PostgreSQL would accept -- every table in
-# `financial` matches it, and anything that does not is not a name we wrote.
-_IDENT_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
-
-
 def _bare_name(table: str) -> Optional[str]:
     """`financial.deposit_account` -> `deposit_account`; `None` if malformed.
+
+    The syntactic half is `_sql_identifier.validate_identifier`, the same check
+    the catalog-driven pipeline scripts use before interpolating a name they
+    got from OpenMetadata; `select_tables`' allowlist is the semantic half.
+    That is the two-layer split `_sql_identifier`'s own module docstring
+    prescribes, not a second scheme invented here.
 
     Returns `None` rather than a best-effort substring for anything that is not
     cleanly `name` or `financial.name`. That distinction found a real bug: a
@@ -247,7 +249,10 @@ def _bare_name(table: str) -> Optional[str]:
         name = parts[0]
     else:
         return None
-    return name if _IDENT_RE.match(name) else None
+    try:
+        return validate_identifier(name, "table")
+    except ValueError:
+        return None
 
 
 def select_tables(tables: Sequence[str], allowed_tables: Dict[str, bool]) -> List[str]:

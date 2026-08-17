@@ -33,7 +33,7 @@ cutting across every layer.
                                                   |
 +---------------------------------------------------------------------------------------------------+
 |                        TIER 4: AI CONTEXT & RETRIEVAL INFRASTRUCTURE                              |
-|  [2-Stage Neural Cross-Encoder Re-Ranker]   [Dynamic Text-to-Cypher Builder]   [Hybrid RAG]        |
+|  [2-Stage Re-Ranker]  [Text-to-Cypher Builder]  [TBox Query Expansion]  [5-Tier Hybrid RAG]        |
 +---------------------------------------------------------------------------------------------------+
                                                   ^
                                                   |
@@ -66,7 +66,7 @@ cutting across every layer.
 | 1. Ingestion | Populate the relational core from a synthetic BIAN/FIBO dataset | `scripts/generate_synthetic_data.py`, `scripts/build_knowledge_graph.py`, `scripts/sync_end_to_end_lineage.py` |
 | 2. Storage | Multi-model data plane | Supabase PostgreSQL + pgvector, Neo4j 5 Community, MySQL (OpenMetadata's own backing store) |
 | 3. Semantic & governance | Business metrics, catalog, ontology grounding | Cube.js, OpenMetadata, `ontology/*.ttl` loaded into Neo4j as a TBox by `scripts/load_ontology_tbox.py` |
-| 4. Retrieval | Turns tiers 2–3 into LLM-ready context | `scripts/hybrid_rag_retriever.py` (vector + graph + metrics + SQL), `scripts/neural_reranker.py`, `scripts/text_to_cypher_builder.py` |
+| 4. Retrieval | Turns tiers 2–3 into LLM-ready context | `scripts/hybrid_rag_retriever.py` (vector + graph + metrics + SQL + ontology expansion), `scripts/neural_reranker.py`, `scripts/text_to_cypher_builder.py`, `scripts/_ontology_expansion.py` |
 | 5. Agentic protocol | Standardized tool interface for AI agents | `mcp_server/financial_data_mcp_server.py` (FastMCP, stdio or SSE); `scripts/_llm_backend.py` selects the driving model via `LLM_PROVIDER` (Ollama or Moonshot Kimi-K2.6) |
 | 6. Consumption | Human and agent-facing surfaces | Streamlit dashboard, Grafana |
 | Cross-cutting | Security and operational visibility | `scripts/ai_safety_guardrails.py`, `scripts/llmops_telemetry.py`, Prometheus (+ `node_exporter`/`postgres_exporter`/`mysqld_exporter`/`cadvisor`/Neo4j JVM exporter, `catalog/prometheus_rules.yml`, `alertmanager`), real OTel distributed tracing (`scripts/_otel_tracing.py` -> `otel_collector` -> `tempo`) |
@@ -137,6 +137,22 @@ offline and materialize the inferred axioms as ordinary edges.
 
 `scripts/hybrid_rag_retriever.py` is the component that draws on all four at once, alongside a
 pgvector similarity search, to assemble context for an LLM in a single call.
+
+The ontology is not only *described* by that traversal — it is *used* by it. The retriever's fifth
+tier ([`scripts/_ontology_expansion.py`](../scripts/_ontology_expansion.py)) resolves the prompt to
+TBox concepts, widens the set along `SUBCLASS_OF`, and probes the tables those concepts are grounded
+in. This is what makes the TBox load-bearing rather than decorative: Tiers 2–4 all route on
+`text_to_cypher_builder.classify_intent`, which recognizes four intents, while the ontology models
+ten concepts — so a question about organizations or loan applications previously fell through to a
+generic default and now reaches its own grounded tables. Because the widening follows asserted
+`SUBCLASS_OF` edges, a question about parties also reaches individuals and organizations, and a
+concept added to the TTL extends retrieval with no code change.
+
+Two constraints shape that tier. Concept matching runs in Python over a single parameterless fetch of
+the whole TBox — ten rows, since it is a schema and not data — so no user text is ever bound into a
+graph query on this path. And the table names it yields originate in Neo4j, so they are filtered
+against an `information_schema` allowlist and composed with `psycopg2.sql.Identifier` before any SQL
+executes: the knowledge graph is an input to this platform, not a trust boundary within it.
 
 ---
 
@@ -290,6 +306,16 @@ WHERE p.md_is_active = TRUE;
   machine. Embeddings and cross-encoder re-ranking always run locally regardless. The switch fails
   closed: an unknown provider, or `moonshot` with no `MOONSHOT_API_KEY`, refuses to start rather
   than silently answering with the other model.
+- **The knowledge graph is an input, not a trust boundary.** The retriever's ontology-expansion tier
+  derives PostgreSQL table names from Neo4j node properties, which means a graph write would
+  otherwise be a path to shaping SQL. Two layers prevent that, matching the split
+  `scripts/_sql_identifier.py` already prescribes for the catalog-driven pipeline scripts: a
+  syntactic check (`validate_identifier`, rejecting anything that is not a bare identifier token) and
+  a semantic allowlist (`_ontology_expansion.select_tables`, which drops any name absent from
+  `information_schema`). Only names surviving both are composed — via `psycopg2.sql.Identifier`,
+  never string formatting — and the resulting statement still passes the same read-only guardrail as
+  every other SQL path. The allowlist is read from the live catalog rather than a checked-in
+  constant, so a dropped table stops being reachable without anyone remembering to update a list.
 - **Retrieval honesty:** `scripts/hybrid_rag_retriever.py` and `scripts/neural_reranker.py` fail
   closed (raise, don't silently substitute) if the real embedding/cross-encoder models can't load,
   via `scripts/_embedding_backend.py` — set `ALLOW_DEGRADED_EMBEDDINGS=1` to explicitly opt into a
