@@ -138,3 +138,4 @@ tools/*.tar.gz
 # Project notes (personal, not part of the project)
 # ===============================================================================
 NOTES.md
+docs-db/
