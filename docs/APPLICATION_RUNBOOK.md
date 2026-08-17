@@ -42,7 +42,7 @@ the `ports:` mapping's host-side address.
 | `openmetadata_mysql` | `mysql:8.0.35` | `3306` (published loopback-only as `127.0.0.1:33060`) | `MYSQL_ROOT_PASSWORD`, `MYSQL_PASSWORD` (both `${OPENMETADATA_MYSQL_PASSWORD}`, no fallback — required) | OpenMetadata catalog backend database |
 | `openmetadata_search` | `opensearchproject/opensearch:2.11.0` | `9200` (published loopback-only as `127.0.0.1:9200`) | `DISABLE_SECURITY_PLUGIN=true` | Catalog search index (security plugin off; only reachable from the host or the internal Docker network, never externally) |
 | `openmetadata_server` | `openmetadata/server:1.3.1` | `8585` (published loopback-only as `127.0.0.1:8585` unless `OPENMETADATA_HOST` overrides it) | `OPENMETADATA_URL`, `OPENMETADATA_JWT_TOKEN`, `DB_USER_PASSWORD` (⚠️ not `DB_PASSWORD` — see Troubleshooting) | Enterprise Data Catalog UI & REST API |
-| `openmetadata_search_reindex` | `python:3.11-slim` (same digest pin as [`mcp_server/Dockerfile.mcp`](../mcp_server/Dockerfile.mcp)) | n/a (one-shot, `restart: "no"`) | bind-mounts `scripts/` read-only and runs [`scripts/rebuild_search_index.py`](../scripts/rebuild_search_index.py); `depends_on: openmetadata_server: condition: service_healthy` | Init container — rebuilds `openmetadata_search`'s tmpfs-backed index (see that service's row and its own comment in `docker-compose.yml`) on every `docker compose up`, not just a full pipeline run. Idempotent; not a long-running service. |
+| `openmetadata_search_reindex` | `python:3.11-slim` (same digest pin as [`mcp_server/Dockerfile.mcp`](../mcp_server/Dockerfile.mcp)) | n/a (long-running watcher, `restart: always`, heartbeat healthcheck) | bind-mounts `scripts/` read-only and runs [`scripts/rebuild_search_index.py`](../scripts/rebuild_search_index.py) `--watch`; `depends_on: openmetadata_server: condition: service_healthy` | Rebuilds `openmetadata_search`'s tmpfs-backed index (see that service's row and its own comment in `docker-compose.yml`) whenever it finds it empty. Deliberately **not** a one-shot init container: `restart: "no"` containers are not relaunched after a host reboot, which live-reproduced as the index staying empty and `search_data_catalog` returning `HTTP 500 index_not_found_exception` again. The `--watch` loop plus `restart: always` is what makes it survive a reboot; the healthcheck is a liveness heartbeat, since a watcher that has exited is indistinguishable from one that is idle. Idempotent. |
 | `neo4j_knowledge_graph` | `neo4j:5.18.0-community` | `7474` / `7687`, plus `9101` (bound `127.0.0.1`, JVM-only Prometheus metrics — Neo4j Community has no native reporter, this is a `jmx_prometheus_javaagent` attached in-process via `NEO4J_server_jvm_additional`) | `NEO4J_AUTH=neo4j/${NEO4J_PASSWORD}` (no fallback — required) | Knowledge Graph database & Bolt driver |
 | `cube_semantic_layer` | `cubejs/cube:v0.35` | `4000` | `CUBEJS_DB_TYPE=postgres`, `CUBEJS_API_SECRET` / `CUBEJS_API_SECRET_RESTRICTED` — [`cube/cube.js`](../cube/cube.js)'s `checkAuth` rejects any request whose `Authorization: Bearer` token doesn't match one of these two secrets. No `CUBEJS_SQL_PORT` — the Postgres-wire SQL API it would open has no equivalent auth check and nothing uses it. | Open-Source Semantic Layer (REST API), production mode, backed by the standalone `cubestore` service |
 | `prometheus_metrics` | `prom/prometheus:v2.51.0` | `9090` | [catalog/prometheus.yml](../catalog/prometheus.yml) | Operational time-series metrics engine |
@@ -68,8 +68,11 @@ Every long-running service except `otel_collector`/`tempo` declares a `healthche
 `docker-compose.yml` -- both of those images are deliberately minimal/distroless (no shell, wget,
 curl, or nc) with no way to express one; `restart: always` is their resilience mechanism instead, and
 anything depending on them uses `condition: service_started` rather than `service_healthy`.
-`neo4j_jmx_agent_init` is a one-shot init container (`restart: "no"`), not a long-running service, so
-it has no healthcheck either -- `neo4j` gates on it via `condition: service_completed_successfully`.
+`neo4j_jmx_agent_init` is the only one-shot init container (`restart: "no"`), not a long-running
+service, so it has no healthcheck either -- `neo4j` gates on it via `condition:
+service_completed_successfully`. `openmetadata_search_reindex` looks like a second one but is not: it
+runs a `--watch` loop under `restart: always` precisely so a host reboot cannot leave the tmpfs-backed
+search index unrebuilt.
 `openmetadata_server` gates on `openmetadata_db`/`openmetadata_search`, `mcp_sidecar` gates on
 `neo4j`/`cube`, `cube` itself gates on `cubestore`, `grafana` gates on `prometheus` (healthy) and
 `tempo` (started), `otel_collector` gates on `tempo` (started), and `mysqld_exporter` gates on
@@ -175,7 +178,7 @@ re-run; `tests/test_ontology_tbox.py::test_only_reference_data_is_untyped` fails
 17. **[`scripts/rag_triad_evaluator.py`](../scripts/rag_triad_evaluator.py):** Heuristic (token-overlap) scorer for Context Relevance, Faithfulness, and Answer Relevance. The fallback scorer, used only when the LLM judge (below) is unavailable — on its own, treat its scores as pass/fail sanity checks, not as accuracy or hallucination measurements, since it has no model in the loop.
 17b. **[`scripts/llm_judge_evaluator.py`](../scripts/llm_judge_evaluator.py):** Real semantic RAG-Triad scoring via whichever model `LLM_PROVIDER` selects, the primary scorer whenever that provider is reachable and the model is available (checked once via `is_available()`). Its result carries `deterministic: false` when the provider refused the `temperature=0.0` it asks for -- `kimi-k2.6` does, so Kimi-scored runs are not reproducible or comparable to Ollama-scored ones. Fails open, not closed — an unavailable judge falls back to #17 rather than aborting the benchmark. Empty responses are scored 0 via a deterministic code-level short-circuit rather than a prompt instruction, since the judge model does not reliably self-correct on that degenerate case when merely asked to.
 18. **[`scripts/evaluate_agentic_retrieval.py`](../scripts/evaluate_agentic_retrieval.py):** 5-scenario smoke-test suite that checks each subsystem responds without error, plus the RAG Triad scores above (LLM judge first, substring fallback second, via its own `score_triad()` method). Not an accuracy benchmark for the same reason as #17.
-19. **[`scripts/rag_explorer_dashboard.py`](../scripts/rag_explorer_dashboard.py):** Interactive 6-Tab Streamlit Web Dashboard (`http://localhost:8501`).
+19. **[`scripts/rag_explorer_dashboard.py`](../scripts/rag_explorer_dashboard.py):** Interactive 7-tab Streamlit Web Dashboard (`http://localhost:8501`) — one tab per RAG tier (including Tier 5's ontology expansion, which shows whether a concept was matched in the prompt or reached through `SUBCLASS_OF`), plus a guardrails audit and an LLMOps telemetry tab. The tier tabs render only in RAG Pipeline mode; Autonomous mode drives MCP tools directly and has no equivalent payload.
 
 ---
 
@@ -185,6 +188,8 @@ re-run; `tests/test_ontology_tbox.py::test_only_reference_data_is_untyped` fails
 - **EDM Council FIBO (Financial Industry Business Ontology):** [https://spec.edmcouncil.org/fibo/](https://spec.edmcouncil.org/fibo/)
 - **pgvector (PostgreSQL Vector Similarity Search):** [https://github.com/pgvector/pgvector](https://github.com/pgvector/pgvector)
 - **Neo4j Cypher Manual:** [https://neo4j.com/docs/cypher-manual/current/](https://neo4j.com/docs/cypher-manual/current/)
+- **RDFLib** (parses `ontology/*.ttl` in [`scripts/load_ontology_tbox.py`](../scripts/load_ontology_tbox.py); declared in `requirements.txt`, deliberately *not* in `catalog/requirements.exporter.txt` — the MCP sidecar queries the loaded TBox in Neo4j rather than parsing Turtle): [https://rdflib.readthedocs.io/](https://rdflib.readthedocs.io/)
+- **W3C RDF Schema 1.1** (the only vocabulary level this TBox uses — `rdfs:subClassOf`/`domain`/`range`, no OWL construct that would need a reasoner): [https://www.w3.org/TR/rdf-schema/](https://www.w3.org/TR/rdf-schema/)
 - **Cube.js Open-Source Semantic Layer:** [https://cube.dev/docs/](https://cube.dev/docs/)
 - **OpenMetadata Enterprise Catalog (1.3.x):** [https://docs.open-metadata.org/](https://docs.open-metadata.org/)
 - **Model Context Protocol Python SDK** (provides `mcp.server.fastmcp.FastMCP`, used throughout `mcp_server/`; pinned `mcp>=1.0.0,<2.0.0` — see `CLAUDE.md`): [https://github.com/modelcontextprotocol/python-sdk](https://github.com/modelcontextprotocol/python-sdk)
@@ -225,10 +230,14 @@ re-run; `tests/test_ontology_tbox.py::test_only_reference_data_is_untyped` fails
    ```bash
    python3 -m pytest tests/ -v
    ```
-   Most tests are self-contained (no live stack needed — this is what CI runs). Two files
-   (`test_postgres_readonly_role.py`, `test_schema_dbml_drift.py`) additionally run live checks
-   against the `mcp_readonly` role / the DB-introspected schema when a database is reachable, and
-   skip cleanly (not fail) otherwise.
+   Most tests are self-contained (no live stack needed — this is what CI runs). Five files
+   additionally run live checks when a database is reachable and skip cleanly (not fail) otherwise:
+   `test_postgres_readonly_role.py` and `test_schema_dbml_drift.py` (the `mcp_readonly` role / the
+   DB-introspected schema), and `test_graph_wipe_scope.py`, `test_ontology_tbox.py` and
+   `test_ontology_expansion.py` (the Neo4j TBox, its bridges, and the retriever's expansion tier).
+   A skipped live test is not a passing one — if you are validating a real deployment rather than a
+   diff, run these against the running stack and check the summary reports no skips you did not
+   expect.
 
 6. **Test Autonomous Function Calling** (against whichever provider `LLM_PROVIDER` selects):
    ```bash
@@ -375,6 +384,24 @@ Operational quirks worth knowing before you conclude something in your own setup
   `0.0` for reproducible scores and cannot get it under Kimi, so its output carries
   `deterministic: false` and its scores vary between runs. Scores from the two providers are
   therefore not directly comparable. Ollama honors any temperature.
+- **A Neo4j graph rebuild leaves the ABox untyped until the TBox loader re-runs.** This is a real
+  coupling, not a bug to work around. `scripts/build_knowledge_graph.py` deletes and recreates every
+  ABox node on each run; `INSTANCE_OF` edges point *at* those nodes, so they cannot survive — an edge
+  into a deleted node is gone by definition. Scoping the wipe to `ABOX_LABELS` protects the TBox nodes
+  and the lineage sub-graph beside them, but no wipe scope can protect edges into nodes that are
+  legitimately new. Symptom: `query_ontology` still lists every concept, but instance counts read 0
+  and the retriever's Tier 5 expansion returns concepts with no rows behind them. Fix: re-run
+  `python3 scripts/load_ontology_tbox.py` (idempotent, about a second). Dagster does this
+  automatically — `ontology_tbox` declares `deps=[knowledge_graph, lineage_dag]` — so this only bites
+  a hand-run rebuild. `tests/test_ontology_tbox.py::test_only_reference_data_is_untyped` fails loudly
+  in that state rather than letting it pass silently.
+- **Tier 5 ontology expansion is deliberately conservative about what it matches**, so a prompt using
+  wording the ontology doesn't model expands to nothing and contributes no context. That is the
+  intended failure mode: a concept matches only when *every* token of its name is present, because
+  matching on any single token ("account") would fire `DepositAccount`, `DepositBalance` and
+  `LoanAgreement` on equally weak evidence and degrade the tier into "probe all tables". Tiers 1-4 are
+  unaffected — the tier is additive. Use `query_ontology` with `operation='list'` to see the exact
+  vocabulary it matches against.
 - **`schema.dbml` is a generated file** (`python3 scripts/generate_schema_dbml.py`) — do not hand-edit
   it; a migration that changes the schema without regenerating it will show up as drift under
   `--check` (and in `tests/test_schema_dbml_drift.py`, when a live database is reachable).

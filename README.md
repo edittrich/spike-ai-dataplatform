@@ -187,6 +187,12 @@ python3 scripts/execute_openmetadata_data_quality_tests.py  # Register and Execu
 
 # Synchronize 3-Tier Lineage DAGs (PostgreSQL -> Cube.js -> Neo4j)
 python3 scripts/sync_end_to_end_lineage.py
+
+# Load the OWL/FIBO ontology into Neo4j as a queryable TBox, bridged to the lineage layer and the
+# instance graph. Must run after BOTH build_knowledge_graph.py and sync_end_to_end_lineage.py:
+# its CLASSIFIES edges attach to nodes the lineage sync creates, and its INSTANCE_OF edges point at
+# ABox nodes the graph build recreates on every run -- so re-run this after any graph rebuild.
+python3 scripts/load_ontology_tbox.py
 ```
 
 ### 4. Execute Cluster 2: Search, Retrieval, Guardrails & Agentic Tools

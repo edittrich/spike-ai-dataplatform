@@ -44,7 +44,11 @@ document has been revised — treat the evidence as historical, not as a descrip
   every `docker compose up` — verified live: forced the empty-index state, ran a bare
   `docker compose up -d` with no other manual step, and confirmed both tools work again. Not filed
   as an `ISS-*` since it was found and closed in the same session, after this document's ranked list
-  was written.
+  was written. **That first fix was itself incomplete** and has since been superseded: a `restart:
+  "no"` one-shot container is not relaunched by Docker's restart policy after a host reboot, so the
+  same empty-index 500 returned on the next boot. The service is now a `restart: always` watcher
+  running `rebuild_search_index.py --watch` with a liveness heartbeat healthcheck — a watcher that
+  has exited is otherwise indistinguishable from one that is idle.
 - **Neo4j now holds an ontology TBox alongside the existing ABox**, which changes two things this
   document describes. First, `ontology/*.ttl` is no longer the write-only artifact recorded here —
   `scripts/load_ontology_tbox.py` loads it into Neo4j as `:OntologyClass`/`:OntologyProperty`/
