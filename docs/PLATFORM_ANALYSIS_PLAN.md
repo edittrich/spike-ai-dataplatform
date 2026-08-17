@@ -45,6 +45,20 @@ document has been revised — treat the evidence as historical, not as a descrip
   `docker compose up -d` with no other manual step, and confirmed both tools work again. Not filed
   as an `ISS-*` since it was found and closed in the same session, after this document's ranked list
   was written.
+- **Neo4j now holds an ontology TBox alongside the existing ABox**, which changes two things this
+  document describes. First, `ontology/*.ttl` is no longer the write-only artifact recorded here —
+  `scripts/load_ontology_tbox.py` loads it into Neo4j as `:OntologyClass`/`:OntologyProperty`/
+  `:ExternalConcept` nodes, bridged to the lineage layer (`CLASSIFIES`) and the instance graph
+  (`INSTANCE_OF`), and reachable to agents through a **7th MCP tool, `query_ontology`** — every "6
+  tools" count in this document is now one short. Second, and more consequential for the evidence
+  below: `build_knowledge_graph.py`'s unconditional `MATCH (n) DETACH DELETE n` is **gone**, replaced
+  by a wipe scoped to `ABOX_LABELS`. That wipe was deleting the lineage sub-graph
+  (`:PostgreSQLTable`/`:SemanticCube`/`:KnowledgeEntityType`) written by `sync_end_to_end_lineage.py`
+  on every rebuild — a real pre-existing data-loss bug that this document did not identify, found
+  only because the TBox would have been destroyed the same way. `tests/test_graph_wipe_scope.py`
+  guards it.
+- **ISS-21 is fixed.** `bootstrap_platform.sh`'s step counter is now consistently `N/12` throughout
+  (12 steps, the new one being the TBox load), rather than the `N/10`/`N/11` split recorded below.
 
 ---
 

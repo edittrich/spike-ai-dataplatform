@@ -30,16 +30,16 @@ fail() { printf '\033[1;31mERROR:\033[0m %s\n' "$1" >&2; exit 1; }
 
 [ -f .env ] || fail ".env not found. Run 'cp .env.example .env' and fill in the required values first."
 
-step "1/10  Starting PostgreSQL (Supabase CLI) and applying migrations"
+step "1/12  Starting PostgreSQL (Supabase CLI) and applying migrations"
 npm run supabase:start
 
-step "2/10  Generating synthetic BIAN/FIBO data (writes supabase/seed.sql)"
+step "2/12  Generating synthetic BIAN/FIBO data (writes supabase/seed.sql)"
 python3 scripts/generate_synthetic_data.py
 
-step "3/10  Loading seed data into PostgreSQL (supabase db reset)"
+step "3/12  Loading seed data into PostgreSQL (supabase db reset)"
 npm run supabase:db:reset
 
-step "4/10  Syncing the postgres superuser's password after the reset"
+step "4/12  Syncing the postgres superuser's password after the reset"
 # Real bug, found live while building orchestration/definitions.py's Dagster
 # asset graph: `supabase db reset` always resets the postgres role's TCP
 # password back to the Supabase CLI's fixed local-dev default, silently
@@ -51,7 +51,7 @@ step "4/10  Syncing the postgres superuser's password after the reset"
 # full story. Idempotent -- safe even if nothing needs syncing.
 python3 scripts/sync_postgres_superuser_password.py
 
-step "5/10  Starting the Docker Compose stack (OpenMetadata, Neo4j, Cube.js, Prometheus, Grafana, OTel Collector + Tempo, MCP sidecar)"
+step "5/12  Starting the Docker Compose stack (OpenMetadata, Neo4j, Cube.js, Prometheus, Grafana, OTel Collector + Tempo, MCP sidecar)"
 # openmetadata_search's data dir is a tmpfs mount by design (see its own
 # docker-compose.yml comment) -- the openmetadata_search_reindex one-shot
 # container this starts rebuilds the search index automatically once
@@ -60,7 +60,7 @@ step "5/10  Starting the Docker Compose stack (OpenMetadata, Neo4j, Cube.js, Pro
 # not just after the catalog pipeline runs later in this script.
 docker compose up -d
 
-step "6/11  Waiting for openmetadata_server to report healthy (this is the slowest starter)"
+step "6/12  Waiting for openmetadata_server to report healthy (this is the slowest starter)"
 tries=0
 until [ "$(docker inspect -f '{{.State.Health.Status}}' openmetadata_server 2>/dev/null || echo starting)" = "healthy" ]; do
     tries=$((tries + 1))
@@ -70,7 +70,7 @@ until [ "$(docker inspect -f '{{.State.Health.Status}}' openmetadata_server 2>/d
     sleep 5
 done
 
-step "7/11  Rotating the OpenMetadata ingestion-bot token if it's missing/expiring soon"
+step "7/12  Rotating the OpenMetadata ingestion-bot token if it's missing/expiring soon"
 # H10 (hardening plan) residual gap, closed 2026-08-08: idempotent -- a
 # no-op if OPENMETADATA_JWT_TOKEN in .env is still valid for >14 days, so
 # this is safe to run on every bootstrap, not just the first one. Needs
@@ -78,31 +78,48 @@ step "7/11  Rotating the OpenMetadata ingestion-bot token if it's missing/expiri
 # PASSWORD set in .env -- see .env.example's comment on those two vars.
 python3 scripts/rotate_openmetadata_bot_token.py
 
-step "8/11  Configuring the least-privilege mcp_readonly Postgres role"
+step "8/12  Configuring the least-privilege mcp_readonly Postgres role"
 python3 scripts/configure_readonly_role.py
 
-step "9/11  Building the Neo4j knowledge graph from PostgreSQL"
-# --yes: this script now confirms before its unconditional `MATCH (n) DETACH
-# DELETE n` graph wipe (C6 in the hardening plan) -- safe and expected to
-# skip non-interactively here, since bootstrap_platform.sh is meant to run
-# unattended from an empty checkout, where there's no existing graph to lose.
+step "9/12  Building the Neo4j knowledge graph from PostgreSQL"
+# --yes: this script confirms before clearing the instance data it reloads
+# (C6 in the hardening plan) -- safe and expected to skip non-interactively
+# here, since bootstrap_platform.sh runs unattended from an empty checkout
+# where there is no existing graph to lose. The wipe is scoped to
+# build_knowledge_graph.ABOX_LABELS, so it leaves the lineage sub-graph and
+# the ontology TBox (step 11) in the same database untouched.
 python3 scripts/build_knowledge_graph.py --yes
 
-step "10/11  Registering table metadata into OpenMetadata (required by the next 4 steps)"
+step "10/12  Registering table metadata into OpenMetadata (required by the next 4 steps)"
 python3 scripts/populate_openmetadata_tables.py
 
 # These four are mutually independent -- each depends only on step 10 above,
 # not on each other -- run sequentially here for simplicity and clearer
 # failure output; feel free to background/parallelize them if pipeline
 # runtime matters more than that (or use orchestration/definitions.py's
-# Dagster asset graph, which does exactly that -- see orchestration/README.md).
+# Dagster asset graph, which does exactly that -- see docs/APPLICATION_RUNBOOK.md's
+# Dagster section).
 python3 scripts/automate_openmetadata_pii_and_profiling.py
 python3 scripts/ground_fibo_ontology_uris.py
 python3 scripts/register_openmetadata_data_contracts.py
 python3 scripts/execute_openmetadata_data_quality_tests.py
 python3 scripts/sync_end_to_end_lineage.py
 
-step "11/11  Generating and indexing vector embeddings (genuinely the last step -- reads catalog + FIBO tags + data products from the steps above)"
+step "11/12  Loading the ontology TBox into Neo4j"
+# Deliberately after BOTH the graph build and the lineage sync, and this ordering
+# is load-bearing rather than cosmetic:
+#   - CLASSIFIES edges attach to the :KnowledgeEntityType nodes the lineage sync
+#     creates, so running this first would produce zero of them.
+#   - INSTANCE_OF edges point at ABox nodes, which build_knowledge_graph.py
+#     deletes and recreates on every run. Edges into deleted nodes cannot
+#     survive, so a rebuild always leaves the ABox untyped until this re-runs.
+#     Scoping that wipe (see ABOX_LABELS) protects the TBox itself but cannot
+#     protect edges into nodes that are legitimately new.
+# Idempotent and roughly a second, so re-running it after any graph rebuild is
+# the intended fix, not a workaround.
+python3 scripts/load_ontology_tbox.py
+
+step "12/12  Generating and indexing vector embeddings (genuinely the last step -- reads catalog + FIBO tags + data products from the steps above)"
 python3 scripts/generate_vector_embeddings.py
 
 step "Done"

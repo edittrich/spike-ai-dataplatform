@@ -134,6 +134,29 @@ or on step 3 — and can run in any order or in parallel.
 7. **[`scripts/execute_openmetadata_data_quality_tests.py`](../scripts/execute_openmetadata_data_quality_tests.py):** Runs 59 automated data quality assertions across 12 of the platform's 19 tables.
 8. **[`scripts/sync_end_to_end_lineage.py`](../scripts/sync_end_to_end_lineage.py):** Syncs table-to-cube and table-to-graph lineage nodes in OpenMetadata. Depends on step 2 (table entities to attach lineage to). Parses the real `cube/model/cubes/*.yml` definitions for each `Cube_*` entity's measures/dimensions, and emits real `columnsLineage` (table.column → cube.measure/dimension) wherever a dimension/measure's `sql:` is a bare source-table column reference.
 
+8b. **[`scripts/load_ontology_tbox.py`](../scripts/load_ontology_tbox.py):** Loads
+`ontology/financial_platform_ontology.ttl` into Neo4j as a queryable TBox — 10 `owl:Class`,
+10 properties and 9 FIBO/BIAN groundings become `:OntologyClass`/`:OntologyProperty`/
+`:ExternalConcept` nodes with `SUBCLASS_OF`/`DOMAIN`/`RANGE`/`DEFINED_BY` edges. Bridges to the
+layers already in that database: `CLASSIFIES` onto the `:KnowledgeEntityType` nodes step 8 creates
+— which reuses that step's existing edges rather than re-encoding the same associations, so the full
+path is `(:OntologyClass)-[:CLASSIFIES]->(:KnowledgeEntityType)<-[:INSTANTIATES_GRAPH]-(:SemanticCube)
+<-[:DERIVES_SEMANTICS_TO]-(:PostgreSQLTable)` — and `INSTANCE_OF` from the ABox to its **most
+specific** class. That last word matters when querying: `fin:Party` has *zero* direct `INSTANCE_OF`
+edges, because all 1,000 parties are typed as `fin:Individual` (800) or `fin:Organization` (200).
+Counting a superclass's instances therefore requires the transitive form —
+`(i)-[:INSTANCE_OF]->(:OntologyClass)-[:SUBCLASS_OF*0..]->(c)`, note the `*0..` — which returns the
+expected 1,000. This is subsumption as graph reachability, not entailment; nothing infers the edges. Idempotent, about a
+second, parsed with `rdflib`.
+
+**Ordering is load-bearing, not a preference.** It must run after *both* step 3
+(`build_knowledge_graph.py`) and step 8: `CLASSIFIES` needs step 8's nodes, and `INSTANCE_OF` points
+at ABox nodes that step 3 deletes and recreates on every run — so **any graph rebuild leaves the ABox
+untyped until this is re-run**. Scoping the reload to `ABOX_LABELS` protects the TBox itself, but no
+wipe scope can protect edges into nodes that are legitimately new. The script distinguishes the
+expected gap (the `ref_*` lookups have no TBox class) from unexpected untyped nodes and tells you to
+re-run; `tests/test_ontology_tbox.py::test_only_reference_data_is_untyped` fails loudly in that state.
+
 ### C. Context, Search & Hybrid RAG Retrieval
 
 9. **[`scripts/generate_vector_embeddings.py`](../scripts/generate_vector_embeddings.py):** Generates 384-dimensional dense vectors using `sentence-transformers/all-MiniLM-L6-v2` and indexes them in `pgvector 0.8.0` HNSW. This is genuinely the last step to run — it reads catalog tables (step 2), data products (step 6), and FIBO tags (step 5).
@@ -146,7 +169,7 @@ or on step 3 — and can run in any order or in parallel.
 13b. **[`scripts/_pii_classification.py`](../scripts/_pii_classification.py):** Single shared source of truth for "what counts as PII" (`PII_PERSONAL_PATTERNS`/`PII_SPECIAL_PATTERNS`/`PII_CUBEJS_MASK_PATTERNS`), consumed by the catalog auto-tagger, the guardrails module above, and Cube.js's dimension masking (`cube/cube.js`'s `queryRewrite`).
 14. **[`scripts/llmops_telemetry.py`](../scripts/llmops_telemetry.py):** Tracks per-call latencies, token accounting, and model cost estimates as structured JSON trace spans, as real `prometheus_client` Counters/Histograms served by `mcp_sidecar` itself, and as real OTel spans (one per RAG tier, nested under the calling tool's span) exported via [`scripts/_otel_tracing.py`](../scripts/_otel_tracing.py) to `otel_collector` -> `tempo`.
 15. **[`scripts/agentic_tool_runner.py`](../scripts/agentic_tool_runner.py):** Native tool-calling runner letting the configured LLM execute FastMCP tools autonomously. The provider comes from `LLM_PROVIDER` in `.env` (`ollama` -> local `gemma4:latest`, `moonshot` -> `moonshotai/Kimi-K2.6`) via [`scripts/_llm_backend.py`](../scripts/_llm_backend.py); nothing in this file branches on provider.
-16. **[`mcp_server/financial_data_mcp_server.py`](../mcp_server/financial_data_mcp_server.py):** FastMCP server exposing 6 tools (`search_data_catalog`, `query_semantic_metrics`, `query_knowledge_graph`, `query_financial_database`, `check_data_quality`, `hybrid_rag_search`).
+16. **[`mcp_server/financial_data_mcp_server.py`](../mcp_server/financial_data_mcp_server.py):** FastMCP server exposing 7 tools (`search_data_catalog`, `query_semantic_metrics`, `query_knowledge_graph`, `query_ontology`, `query_financial_database`, `check_data_quality`, `hybrid_rag_search`).
 
 ### E. Evaluation, Web UI & Benchmarks
 17. **[`scripts/rag_triad_evaluator.py`](../scripts/rag_triad_evaluator.py):** Heuristic (token-overlap) scorer for Context Relevance, Faithfulness, and Answer Relevance. The fallback scorer, used only when the LLM judge (below) is unavailable — on its own, treat its scores as pass/fail sanity checks, not as accuracy or hallucination measurements, since it has no model in the loop.
@@ -224,9 +247,13 @@ or on step 3 — and can run in any order or in parallel.
 
 8. **Run the Data Pipeline via Dagster** — [`orchestration/definitions.py`](../orchestration/definitions.py)
    encodes the same pipeline documented in section 2 above as a real Dagster asset graph, with
-   declared dependencies (including the one non-obvious edge the hand-run sequence's own ordering
-   never makes explicit: `lineage_dag` must run *after* `knowledge_graph`'s graph wipe, not before, or
-   its writes get lost on the next rebuild), automatic retries, backfill, and persisted run history.
+   declared dependencies (including the one edge the hand-run sequence's own ordering never makes
+   explicit: `ontology_tbox` depends on *both* `knowledge_graph` and `lineage_dag`, because its
+   `INSTANCE_OF` edges point at ABox nodes the former recreates and its `CLASSIFIES` edges attach to
+   nodes the latter writes — so a `knowledge_graph` rebuild must re-materialize `ontology_tbox` after
+   it, which the declared dependency makes automatic), automatic retries, backfill, and persisted run
+   history. `knowledge_graph`'s wipe is scoped to `ABOX_LABELS`, so `lineage_dag`'s nodes and the TBox
+   are no longer destroyed by a rebuild — only edges *into* the recreated ABox nodes are.
    It runs on the **host**, alongside the other standalone pipeline scripts it orchestrates (not
    containerized) — it reaches Postgres/Neo4j/OpenMetadata/Cube.js at their host-published
    `127.0.0.1:<port>` addresses exactly the way a human running these scripts by hand already does.

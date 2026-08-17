@@ -65,7 +65,7 @@ cutting across every layer.
 |---|---|---|
 | 1. Ingestion | Populate the relational core from a synthetic BIAN/FIBO dataset | `scripts/generate_synthetic_data.py`, `scripts/build_knowledge_graph.py`, `scripts/sync_end_to_end_lineage.py` |
 | 2. Storage | Multi-model data plane | Supabase PostgreSQL + pgvector, Neo4j 5 Community, MySQL (OpenMetadata's own backing store) |
-| 3. Semantic & governance | Business metrics, catalog, ontology grounding | Cube.js, OpenMetadata, `ontology/*.ttl` |
+| 3. Semantic & governance | Business metrics, catalog, ontology grounding | Cube.js, OpenMetadata, `ontology/*.ttl` loaded into Neo4j as a TBox by `scripts/load_ontology_tbox.py` |
 | 4. Retrieval | Turns tiers 2–3 into LLM-ready context | `scripts/hybrid_rag_retriever.py` (vector + graph + metrics + SQL), `scripts/neural_reranker.py`, `scripts/text_to_cypher_builder.py` |
 | 5. Agentic protocol | Standardized tool interface for AI agents | `mcp_server/financial_data_mcp_server.py` (FastMCP, stdio or SSE); `scripts/_llm_backend.py` selects the driving model via `LLM_PROVIDER` (Ollama or Moonshot Kimi-K2.6) |
 | 6. Consumption | Human and agent-facing surfaces | Streamlit dashboard, Grafana |
@@ -98,10 +98,42 @@ These four concepts sound similar and are easy to conflate — each plays a dist
   assertions, lineage, PII tags — about the data assets themselves.
 - **Semantic layer (Cube.js):** business-friendly metrics and dimensions over the relational tables
   (e.g. `total_available_balance`), for deterministic aggregate queries.
-- **Ontology (`ontology/*.ttl`):** the formal class/property vocabulary — what a `Party` or a
-  `DepositAccount` *is* — grounded against W3C FIBO and BIAN, independent of any physical storage.
-- **Knowledge graph (Neo4j):** concrete instance data — actual customers and accounts as nodes and
-  edges — loaded according to that vocabulary, used for multi-hop traversal.
+- **Ontology / TBox (`ontology/*.ttl` → Neo4j):** the formal class/property vocabulary — what a
+  `Party` or a `DepositAccount` *is* — grounded against W3C FIBO and BIAN, independent of any
+  physical storage.
+- **Knowledge graph / ABox (Neo4j):** concrete instance data — actual customers and accounts as nodes
+  and edges — loaded according to that vocabulary, used for multi-hop traversal.
+
+**The last two live in the same Neo4j database, and that is a constraint rather than a choice.**
+Neo4j Community permits exactly one user database, so the terminological layer (TBox) and the
+instance layer (ABox) cannot be separated by database and are kept apart by label convention instead:
+`:OntologyClass`/`:OntologyProperty`/`:ExternalConcept` versus `:Party`/`:Customer`/`:DepositAccount`
+and the rest of `build_knowledge_graph.ABOX_LABELS`. The graph reload is scoped to those ABox labels
+specifically so it cannot delete the ontology, or the lineage sub-graph, sharing the database with it.
+
+The two layers are connected rather than merely co-resident:
+
+```
+(:OntologyClass)-[:CLASSIFIES]->(:KnowledgeEntityType)<-[:INSTANTIATES_GRAPH]-(:SemanticCube)
+                                                      <-[:DERIVES_SEMANTICS_TO]-(:PostgreSQLTable)
+(:Customer)-[:INSTANCE_OF]->(:OntologyClass)
+```
+
+so one traversal answers what a concept means, what it is grounded in, which Cube.js metric exposes
+it and which PostgreSQL table it comes from. Instances are typed to their *most specific* class —
+a `:Party` node also labelled `:Individual` is typed `fin:Individual`, with `fin:Party` reached
+through `-[:SUBCLASS_OF*]->` — so a node's full type set is its direct type plus subsumption, the way
+`rdf:type` and a class hierarchy compose.
+
+**No reasoning is performed.** Neo4j is a labeled property graph, not an RDF/OWL store: it stores what
+is written and derives nothing. Transitive subsumption is answered operationally by graph
+reachability, not by logical entailment. That is sufficient here because this TBox uses only
+RDFS-level constructs — there is no `owl:disjointWith`, no cardinality restriction and no property
+characteristic anywhere in it, so nothing present requires a reasoner. The usual bridge for real OWL
+semantics, the neosemantics plugin, is deliberately unavailable: this platform installs no Neo4j
+plugins, and the Cypher guardrail blocks `CALL`, which is how its procedures are invoked. If
+entailment is ever needed, the path that preserves both decisions is to run a reasoner over the TTL
+offline and materialize the inferred axioms as ordinary edges.
 
 `scripts/hybrid_rag_retriever.py` is the component that draws on all four at once, alongside a
 pgvector similarity search, to assemble context for an LLM in a single call.
