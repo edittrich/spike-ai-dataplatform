@@ -44,7 +44,7 @@ the `ports:` mapping's host-side address.
 | `openmetadata_server` | `openmetadata/server:1.3.1` | `8585` (published loopback-only as `127.0.0.1:8585` unless `OPENMETADATA_HOST` overrides it) | `OPENMETADATA_URL`, `OPENMETADATA_JWT_TOKEN`, `DB_USER_PASSWORD` (⚠️ not `DB_PASSWORD` — see Troubleshooting) | Enterprise Data Catalog UI & REST API |
 | `openmetadata_search_reindex` | `python:3.11-slim` (same digest pin as [`mcp_server/Dockerfile.mcp`](../mcp_server/Dockerfile.mcp)) | n/a (long-running watcher, `restart: always`, heartbeat healthcheck) | bind-mounts `scripts/` read-only and runs [`scripts/rebuild_search_index.py`](../scripts/rebuild_search_index.py) `--watch`; `depends_on: openmetadata_server: condition: service_healthy` | Rebuilds `openmetadata_search`'s tmpfs-backed index (see that service's row and its own comment in `docker-compose.yml`) whenever it finds it empty. Deliberately **not** a one-shot init container: `restart: "no"` containers are not relaunched after a host reboot, which live-reproduced as the index staying empty and `search_data_catalog` returning `HTTP 500 index_not_found_exception` again. The `--watch` loop plus `restart: always` is what makes it survive a reboot; the healthcheck is a liveness heartbeat, since a watcher that has exited is indistinguishable from one that is idle. Idempotent. |
 | `neo4j_knowledge_graph` | `neo4j:5.18.0-community` | `7474` / `7687`, plus `9101` (bound `127.0.0.1`, JVM-only Prometheus metrics — Neo4j Community has no native reporter, this is a `jmx_prometheus_javaagent` attached in-process via `NEO4J_server_jvm_additional`) | `NEO4J_AUTH=neo4j/${NEO4J_PASSWORD}` (no fallback — required) | Knowledge Graph database & Bolt driver |
-| `cube_semantic_layer` | `cubejs/cube:v0.35` | `4000` | `CUBEJS_DB_TYPE=postgres`, `CUBEJS_API_SECRET` / `CUBEJS_API_SECRET_RESTRICTED` — [`cube/cube.js`](../cube/cube.js)'s `checkAuth` rejects any request whose `Authorization: Bearer` token doesn't match one of these two secrets. No `CUBEJS_SQL_PORT` — the Postgres-wire SQL API it would open has no equivalent auth check and nothing uses it. | Open-Source Semantic Layer (REST API), production mode, backed by the standalone `cubestore` service |
+| `cube_semantic_layer` | `cubejs/cube:v0.35` | `4000` (REST API + Developer Playground), plus `15432` (Cube SQL, bridge-internal only — not published to the host) | `CUBEJS_DB_TYPE=postgres`, `CUBEJS_API_SECRET` / `CUBEJS_API_SECRET_RESTRICTED` — [`cube/cube.js`](../cube/cube.js)'s `checkAuth` rejects any REST/GraphQL request whose `Authorization: Bearer` token doesn't match one of these two secrets, unaffected by dev vs. production mode. `CUBEJS_DEV_MODE=true` — verified live that dev mode unconditionally opens Cube SQL (Postgres wire protocol) on `:15432` regardless of `CUBEJS_SQL_PORT` being unset, and that without `CUBEJS_SQL_USER`/`CUBEJS_SQL_PASSWORD` set, it accepts *any* username/password and serves real (non-PII/non-AML) financial rows with zero credentials to any container on `platform_network`; both are now set, closing that gap — `queryRewrite`'s PII/AML-restricted-member checks apply on this path either way. | Open-Source Semantic Layer, development mode (Playground UI enabled), backed by the standalone `cubestore` service |
 | `prometheus_metrics` | `prom/prometheus:v2.51.0` | `9090` | [catalog/prometheus.yml](../catalog/prometheus.yml) | Operational time-series metrics engine |
 | `grafana_observability_dashboard` | `grafana/grafana:13.1.3` | `3000` | `GF_SECURITY_ADMIN_PASSWORD` | Visual monitoring dashboard portal |
 | `mcp_agentic_sidecar` | [`mcp_server/Dockerfile.mcp`](../mcp_server/Dockerfile.mcp) | `8001` (SSE, bound to `127.0.0.1` unless `MCP_HOST` overrides it) and `8000` (`/metrics`) | `MCP_TRANSPORT=sse`, `MCP_PORT=8001`, `MCP_METRICS_PORT=8000`, `MCP_HOST`, `MCP_API_KEY` — required; the SSE endpoint refuses to start without it, rather than falling back to unauthenticated. Connects to Postgres as `MCP_PG_READONLY_USER`/`MCP_PG_READONLY_PASSWORD` (the `mcp_readonly` role), not the superuser. | FastMCP Server SSE HTTP agent daemon **and** the platform's real Prometheus metrics source (`prometheus_client.start_http_server()`); runs as non-root `appuser` |
@@ -84,6 +84,37 @@ the Neo4j JMX agent's jar persist to named volumes
 re-download/rebuild) on every recreate; config bind mounts (Cube.js's model/`cube.js`, Prometheus's
 config + rules, Grafana's provisioning, `tempo.yaml`, `otel-collector-config.yaml`,
 `alertmanager.yml`, `neo4j_jmx_exporter_config.yml`) are `:ro`.
+
+### Web UIs & Human-Reachable Endpoints
+
+Every URL below is bound to `127.0.0.1` only — reachable from this host, not the LAN — per this
+repo's networking convention (see `CLAUDE.md`'s "Docker networking" section). Two rows are **not**
+started by `docker compose up -d` and need a manual command first, noted in the Auth column.
+
+| Tool | URL | Auth |
+| :--- | :--- | :--- |
+| Neo4j Browser | http://127.0.0.1:7474 | `neo4j` / `NEO4J_PASSWORD` from `.env` |
+| Cube.js Developer Playground | http://127.0.0.1:4000 | none to load the page; running a query still needs `CUBEJS_API_SECRET`/`_RESTRICTED`. Only reachable because `CUBEJS_DEV_MODE=true` — production mode removes this UI entirely (see the `cube_semantic_layer` row above) |
+| Grafana | http://127.0.0.1:3000 | `GRAFANA_ADMIN_USER` / `GRAFANA_ADMIN_PASSWORD` from `.env` |
+| Prometheus | http://127.0.0.1:9090 | none |
+| Alertmanager | http://127.0.0.1:9093 | none |
+| cAdvisor | http://127.0.0.1:8081 | none |
+| OpenMetadata (data catalog) | http://127.0.0.1:8585 | `admin@openmetadata.org` / `OPENMETADATA_ADMIN_PASSWORD` from `.env` |
+| Supabase Studio (Postgres UI) | http://127.0.0.1:54323 | none (local dev) |
+| Supabase Inbucket (test-email inbox) | http://127.0.0.1:54324 | none |
+| RAG Explorer Dashboard (Streamlit) | http://127.0.0.1:8501 | none — **not started by Docker Compose**; run `streamlit run scripts/rag_explorer_dashboard.py` first (see §4, step 7) |
+| Dagster UI (asset graph, run history, logs) | http://127.0.0.1:3001 | none — **not started by Docker Compose**; run `dagster dev -f orchestration/definitions.py -p 3001` first (see §4, step 8) |
+
+**No web UI** (API/metrics/protocol endpoints only, in case one is expected):
+
+- **OpenSearch** (`:9200`) — raw REST API, no OpenSearch Dashboards service in this stack.
+- **Tempo** (`:3200`) — query API only; browse traces through Grafana's Tempo datasource instead,
+  not standalone.
+- **MCP sidecar** (`:8001` SSE, `:8000` metrics) — protocol/metrics endpoints, no UI.
+- **Cube SQL** (`:15432`) — Postgres-wire protocol, not HTTP; connect with `psql` or any Postgres
+  client using `CUBEJS_SQL_USER`/`CUBEJS_SQL_PASSWORD` from `.env`, not a browser.
+- **node/postgres/mysqld exporters** (`:9100`/`:9187`/`:9104`) — raw Prometheus text output, not a UI.
+- MySQL (`:33060`), Neo4j Bolt (`:7687`) — wire protocols, no HTTP UI at all.
 
 ---
 
