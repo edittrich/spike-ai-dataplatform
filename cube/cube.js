@@ -3,6 +3,7 @@
 // ============================================================================
 
 const crypto = require('crypto');
+const jwt = require('jsonwebtoken');
 
 // H2 (hardening plan): every special-category-PII dimension in
 // cube/model/cubes/*.yml is also marked `public: false` -- but verified
@@ -171,10 +172,41 @@ module.exports = {
 
     if (matchesPrivileged) {
       req.securityContext = { role: 'privileged' };
-    } else if (matchesRestricted) {
-      req.securityContext = { role: 'restricted' };
-    } else {
-      throw new Error('Unauthorized: invalid Cube.js API token.');
+      return;
     }
+    if (matchesRestricted) {
+      req.securityContext = { role: 'restricted' };
+      return;
+    }
+
+    // Falls through here for a genuine mismatch *and* for the Developer
+    // Playground's own bootstrap token: CUBEJS_DEV_MODE=true's UI (the
+    // Playground at http://<host>:4000) self-issues a JWT -- `{iat, exp}`,
+    // no other claims -- signed with the real CUBEJS_API_SECRET, for its own
+    // background API calls. That token is a legitimate credential (a real
+    // HS256 signature verified against the real secret, not a guess), just
+    // not in the raw-bearer-string shape the two comparisons above expect --
+    // so without this branch, opening the Playground in a browser produces
+    // an unbroken stream of "Auth Error: invalid Cube.js API token" for
+    // every background call it makes, live-confirmed by decoding one such
+    // token and re-computing its HMAC-SHA256 signature against
+    // CUBEJS_API_SECRET by hand. `algorithms: ['HS256']` is explicit and
+    // required -- jsonwebtoken honors an attacker-supplied `alg` header
+    // otherwise, and `alg: none` would make this an unconditional bypass.
+    // Grants 'privileged' rather than a third role: the Playground only
+    // ever signs with CUBEJS_API_SECRET (it has no notion of the restricted
+    // secret, which is this repo's own addition, not Cube.js core's), so a
+    // token that verifies here already proves possession of the privileged
+    // secret.
+    try {
+      jwt.verify(token, privilegedSecret, { algorithms: ['HS256'] });
+      req.securityContext = { role: 'privileged' };
+      return;
+    } catch (e) {
+      // Not a valid Playground token either -- falls through to the
+      // Unauthorized error below, same as any other unrecognized token.
+    }
+
+    throw new Error('Unauthorized: invalid Cube.js API token.');
   }
 };
