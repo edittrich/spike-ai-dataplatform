@@ -688,22 +688,47 @@ services:
       # CUBEJS_SQL_PASSWORD configured), and nothing in this repo uses it --
       # leaving it enabled meant an unauthenticated query interface to the
       # semantic layer on a network_mode: host port.
-      # H1: CUBEJS_DEV_MODE=false, now that the cubestore service above
-      # gives production mode a real cache/queue driver to talk to
-      # (CUBEJS_CUBESTORE_HOST/PORT below) -- verified live: the Developer
-      # Playground is gone (production mode's own behavior, not a separate
-      # toggle), and checkAuth's role-based enforcement (see cube/cube.js)
-      # is unaffected -- it was already enforced in both modes before this
-      # flip. A real, live-discovered gap this flip introduced: dev mode
-      # auto-builds a pre_aggregation's partitions on first query; without
-      # a refresh worker, production mode does not, so the 4 rollups from
-      # H3/D9 failed with "No pre-aggregation partitions were built yet"
-      # on every query until CUBEJS_REFRESH_WORKER=true below -- the
-      # documented single-node pattern (same instance also acts as its own
-      # refresh worker) rather than a separate refresh-worker container,
-      # consistent with this being a single-operator local PoC, not a
-      # multi-node deployment.
-      - CUBEJS_DEV_MODE=false
+      # CUBEJS_DEV_MODE=true -- reverted from H1's production-mode flip
+      # (see git history for the full production-mode rationale). Re-enables
+      # the Developer Playground UI at http://127.0.0.1:4000.
+      # checkAuth's role-based REST/GraphQL enforcement (cube/cube.js) is
+      # unaffected -- verified live, a request with no Bearer token still
+      # gets `401 Unauthorized: missing Cube.js API token` on
+      # /cubejs-api/v1/load, same as before this flip.
+      #
+      # A real, live-discovered gap this flip DOES introduce, not present in
+      # production mode: dev mode unconditionally opens a second API, Cube
+      # SQL (Postgres wire protocol) on :15432, regardless of
+      # CUBEJS_SQL_PORT being unset -- verified live by connecting with
+      # `psql "postgresql://nobody:nothing@cube:15432/db"` (literally any
+      # username/password) from another container on platform_network and
+      # successfully reading real `deposit_balance` rows (account IDs,
+      # balances, currency) with zero credentials. Not published to the
+      # host (only :4000 is, see `ports:` below), so this is reachable by
+      # any bridge-network container, not the LAN -- but that is still every
+      # other service in this compose file, several of which handle
+      # untrusted input (mcp_sidecar dispatches agent/LLM-supplied
+      # queries). The two categories this platform explicitly hardens are
+      # NOT bypassed by this path -- also verified live: special-category
+      # PII dimensions (queried date_of_birth/gender) return `403 Forbidden:
+      # querying special-category PII dimension(s) ... is not permitted`,
+      # and AML-risk-restricted measures (aml_risk_rating) return `403
+      # Forbidden: ... requires the privileged API role (current role:
+      # none)` -- queryRewrite's role-based checks apply uniformly
+      # regardless of which API surface the query arrives through. Only
+      # ordinary, non-restricted financial rows were exposed unauthenticated
+      # -- closed below via CUBEJS_SQL_USER/CUBEJS_SQL_PASSWORD, verified
+      # live: the same `psql postgresql://nobody:nothing@cube:15432/db`
+      # probe that previously succeeded now gets rejected, and the same
+      # query succeeds again with the real credentials from .env.
+      - CUBEJS_DEV_MODE=true
+      # See the CUBEJS_DEV_MODE comment above -- these two are what actually
+      # require a real username/password on the Cube SQL port (:15432) dev
+      # mode opens unconditionally. No fallback default, per this repo's
+      # secrets convention; an unset value here is a real gap, not a
+      # cosmetic omission.
+      - CUBEJS_SQL_USER=${CUBEJS_SQL_USER}
+      - CUBEJS_SQL_PASSWORD=${CUBEJS_SQL_PASSWORD}
       # H4: the cubestore service name, not 127.0.0.1 -- cubestore is a
       # separate container on the same platform_network now, not a
       # process sharing this one's network namespace.
