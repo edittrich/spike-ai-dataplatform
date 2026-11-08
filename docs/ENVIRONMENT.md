@@ -2,7 +2,23 @@
 
 Template for the local development environment of a Python project with a Supabase database and Docker. Project-specific names are placeholders (`<PROJECT_NAME>`, `<package>`, …).
 
-**How to read this document:** §2 describes the host. You set it up once per machine, and all projects share it. §3 to §9 describe a single project. §9 is the step-by-step checklist that Claude follows in a new project.
+**Version:** 1.0.0 (2026-11-08). The [change log](#change-log) at the end lists all versions.
+
+**How to read this document:** §2 describes the host. You set it up once per machine, and all projects share it. §3 to §9 describe a single project in the light variant, which suits local, often short-lived projects. §9 is the step-by-step checklist that Claude follows in a new project. §10 records the decisions behind the light variant and describes the extended variant for projects that grow. The contents list below links every section.
+
+**Contents**
+
+- [1. Purpose and scope](#1-purpose-and-scope): Starting a new project with Claude Code
+- [2. Requirements](#2-requirements): Principles · Operating system and IDE · Globally installed CLIs · Logins (once) · Project-bound runtimes · MCP servers · Version check · Updating
+- [3. Project structure](#3-project-structure)
+- [4. Configuration files](#4-configuration-files): `pyproject.toml` · `.python-version` · `uv.lock` · `config.py` · `.env.example` · `tests/` · `supabase/config.toml` · `.pre-commit-config.yaml` · VS Code settings · `.gitignore`
+- [5. Environment variables and ports](#5-environment-variables-and-ports)
+- [6. Local services](#6-local-services)
+- [7. Conventions](#7-conventions)
+- [8. Claude Code setup](#8-claude-code-setup): Components · Templates for `CLAUDE.md`, `.claude/settings.json` and the commands `/verify` and `/deps` · MCP servers · Skills
+- [9. Bootstrap checklist for a new project](#9-bootstrap-checklist-for-a-new-project)
+- [10. Decisions and the extended variant](#10-decisions-and-the-extended-variant): Decisions · CI · Pull-request workflow · Containers · Claude Code extras · Sharing or publishing a repository · Update bot · Places to adapt in the extended variant
+- [Change log](#change-log)
 
 **Placeholders**
 
@@ -11,7 +27,8 @@ Template for the local development environment of a Python project with a Supaba
 | `<PROJECT_NAME>` | Project and repository name, lower case with `-` | `my-project` |
 | `<package>` | Python package name: `<PROJECT_NAME>` with `_` instead of `-` | `my_project` |
 | `<module>` | Module inside the package, for example the entry point of a service | `api` |
-| `<service>` | Service name in `docker-compose.yml` | `api` |
+| `<service>` | Name of the project's own service; with containers also its name in `docker-compose.yml` (§10) | `api` |
+| `<SERVICE>` | `<service>` in upper case, the prefix of its environment variables | `API` |
 | `<port>` | Port of the project's own service | `8000` |
 | `<OWNER>/<REPO>` | GitHub owner and repository | `edittrich/my-project` |
 | `<X.Y>` | Latest stable Python minor version | `3.15` |
@@ -24,14 +41,16 @@ Template for the local development environment of a Python project with a Supaba
 
 A fully local development environment:
 
-- **Python package in src layout**, managed with **uv**. Code runs directly on the host (`uv run`) or as a service in a container.
-- **PostgreSQL** through the **Supabase CLI**. It runs outside Docker Compose.
-- **Docker Compose** for the project's own containerized services.
+- **Python package in src layout**, managed with **uv**. Code runs directly on the host (`uv run`); containers for the project's own code belong to the extended variant (§10).
+- **PostgreSQL** through the **Supabase CLI**, which runs it in Docker.
 - **Ollama** as the local LLM backend on the host.
-- **pytest + ruff** for testing, linting and formatting, **GitHub Actions** as CI that runs the same checks.
-- **GitHub** as the remote with a pull-request workflow, driven by the **gh CLI** (create repo, PRs, CI status, merge).
+- **pytest + ruff** for testing, linting and formatting. The pre-commit hooks run ruff before every commit; `/verify` runs all checks (§8).
+- **GitHub** as the remote: a private repository, created with the **gh CLI**. Commits go directly to `main`.
+- **gitleaks** as secret scan before every commit. Before a repository is shared or made public, the full history is scanned as well (§10).
 
-All services are only reachable on `127.0.0.1`. The only exception is Ollama: it listens on `0.0.0.0` on purpose, so that containers can reach it (see §6). All configuration comes from environment variables and `.env`.
+All services are reachable only from the host itself (`127.0.0.1`). Supabase would bind to all network interfaces by default; a prepared Docker network keeps its ports on `127.0.0.1` (§6). Ollama keeps its default binding to `127.0.0.1`. All configuration comes from environment variables and `.env`.
+
+This is the **light variant**: it suits local, often short-lived projects such as spikes. §10 records why it leaves out the pull-request workflow, CI, containers and some Claude Code extras, and how to add them when a project grows.
 
 ### Starting a new project with Claude Code
 
@@ -58,10 +77,10 @@ This file is the working basis for Claude Code. It lives in every new project as
    Ask before you push anything or create a GitHub repository.
    ```
 4. When the scaffold is in place, run `/init` in Claude Code. Because `CLAUDE.md` already exists, `/init` does not overwrite it. It suggests improvements based on the actual project. Accept the ones that fit.
-5. Restart Claude Code so that it loads `.claude/settings.json` (permissions, hooks) and `.mcp.json`. On this start, approve the MCP server `supabase-local` once.
-6. Let Claude create the GitHub repository and the first PR (§9, steps 11 to 13). Claude runs this with `gh` after you have confirmed it.
+5. Restart Claude Code so that it loads `.claude/settings.json` (permissions, hooks) and the commands.
+6. Let Claude create the private GitHub repository and push the first commit (§9, step 11). Claude runs this with `gh` after you have confirmed it.
 
-After that, `docs/ENVIRONMENT.md` is the reference for the environment, and `CLAUDE.md` holds the project-specific instructions. When the environment changes, update this file and copy it to the other projects.
+After that, `docs/ENVIRONMENT.md` is the reference for the environment, and `CLAUDE.md` holds the project-specific instructions. When the environment changes, update the master copy, raise its version and add a row to the change log, then copy it to the other projects. The version line at the top shows which version a project follows.
 
 ---
 
@@ -84,8 +103,6 @@ After that, `docs/ENVIRONMENT.md` is the reference for the environment, and `CLA
 | Python extension (`ms-python.python`) | latest version | Python support, debugger, test explorer for pytest. `code --install-extension ms-python.python` |
 | Ruff extension (`charliermarsh.ruff`) | latest version | Shows ruff findings directly in the editor. `code --install-extension charliermarsh.ruff` |
 
-On Linux, containers need `extra_hosts: host-gateway` to reach services on the host (see §6).
-
 ### Globally installed CLIs
 
 | CLI | Purpose | Version channel | Installation / update |
@@ -97,14 +114,14 @@ On Linux, containers need `extra_hosts: host-gateway` to reach services on the h
 | `node` | JavaScript runtime for npm-based CLIs | **LTS** | Only through nvm: `nvm install --lts --reinstall-packages-from=current && nvm alias default 'lts/*'`. Remove old versions with `nvm uninstall <version>`. No other Node installation on the host (no apt package `nodejs`, no tarball in `/usr/local`). Otherwise hooks, cron or systemd may use a different version, depending on their PATH |
 | `npm` | Package manager for global Node CLIs | latest | `npm install -g npm@latest`. With nvm, npm belongs to each Node version and comes with an older npm version. Run the command again after every `nvm install --lts`. Global npm packages are also stored per Node version (`npm ls -g --depth=0`). The current LTS no longer includes corepack, and it is not needed |
 | `supabase` | Local Postgres instance, migrations | latest | `.deb` from the latest GitHub release: `gh release download -R supabase/cli -p 'supabase_*_linux_amd64.deb' -D /tmp --clobber && sudo apt install /tmp/supabase_*_linux_amd64.deb`. Supabase has no APT repository, so `apt upgrade` does not update the CLI. Update with the same command; the check script reports new versions. `supabase start` downloads the Docker images of the local instance on its first start |
-| `psql` | SQL client for the local database (the Supabase CLI cannot run free SQL): `psql postgresql://postgres:postgres@127.0.0.1:54322/postgres -c '<sql>'` | latest | Official PostgreSQL repository (PGDG), because Ubuntu ships an older version: `sudo apt install -y postgresql-common && sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y && sudo apt install postgresql-client`. The meta package `postgresql-client` always pulls in the latest major version. A newer psql also works with older servers. Updates come with `sudo apt upgrade` |
-| `docker` + `docker compose` + `docker buildx` | Containers, Compose, BuildKit builds (`RUN --mount` in the Dockerfile) | latest in the official Docker repository | Not the Ubuntu package `docker.io`. Set up the repository and install (see below), then add your user to the `docker` group: `sudo usermod -aG docker $USER` and log in again. Updates come with `sudo apt upgrade` |
+| `psql` | Interactive SQL console for the local database: `psql postgresql://postgres:postgres@127.0.0.1:54322/postgres`. Single statements also run with `supabase db query '<sql>'` | latest | Official PostgreSQL repository (PGDG), because Ubuntu ships an older version: `sudo apt install -y postgresql-common && sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y && sudo apt install postgresql-client`. The meta package `postgresql-client` always pulls in the latest major version. A newer psql also works with older servers. Updates come with `sudo apt upgrade` |
+| `docker` + `docker compose` + `docker buildx` | Runs the Supabase stack; Compose and BuildKit builds serve containers of the extended variant (§10) | latest in the official Docker repository | Not the Ubuntu package `docker.io`. Set up the repository and install (see below), then add your user to the `docker` group: `sudo usermod -aG docker $USER` and log in again. Updates come with `sudo apt upgrade` |
 | `git` | Version control | latest | git-core PPA (the Ubuntu repositories ship a much older version): `sudo add-apt-repository -y ppa:git-core/ppa && sudo apt update && sudo apt install git`. After that, updates come with `sudo apt upgrade` |
 | `git-lfs` | Large File Storage for git (configured globally as a filter) | latest | Official packagecloud repository (Ubuntu ships an older version): `curl -s https://packagecloud.io/install/repositories/github/git-lfs/script.deb.sh \| sudo bash`. If Ubuntu Pro is active, apt prefers the older ESM package (priority 510 instead of 500). In that case, also pin packagecloud: `printf 'Package: git-lfs\nPin: origin "packagecloud.io"\nPin-Priority: 600\n' \| sudo tee /etc/apt/preferences.d/git-lfs`. Then run `sudo apt update && sudo apt install git-lfs` and, once, `git lfs install` |
 | `gh` | GitHub CLI (repo, PRs, CI) and git credential helper for github.com | latest | Set up the official APT repository: `sudo mkdir -p -m 755 /etc/apt/keyrings && wget -qO- https://cli.github.com/packages/githubcli-archive-keyring.gpg \| sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg >/dev/null && sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \| sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null && sudo apt update && sudo apt install gh`. Once: `gh auth login` (GitHub.com, HTTPS) and `gh auth setup-git`, so that git uses the gh token for github.com. Updates come with `sudo apt upgrade` |
 | `ollama` | Local LLM (systemd service `ollama`) | latest | Install and update: `curl -fsSL https://ollama.com/install.sh \| sh`. The script replaces `/usr/local/bin/ollama`, `/usr/local/lib/ollama` and `ollama.service`. So put your own settings only into `sudo systemctl edit ollama` (stored in `ollama.service.d/override.conf`, kept during updates). If ollama.com is not reachable, install directly from the GitHub release: `sudo systemctl stop ollama && gh release download -R ollama/ollama -p 'ollama-linux-amd64.tar.zst' -D /tmp --clobber && sudo rm -rf /usr/local/lib/ollama && zstd -dc /tmp/ollama-linux-amd64.tar.zst \| sudo tar -xf - -C /usr/local && sudo systemctl start ollama` |
 | `claude` | Claude Code (terminal) | latest | Native installation: `curl -fsSL https://claude.ai/install.sh \| bash` (binary in `~/.local/share/claude/versions/`, link `~/.local/bin/claude`). The native installation updates itself in the background. `/config` → Auto-update channel sets the channel, here `latest` (setting `autoUpdatesChannel`). Check the status with `claude doctor` ("Auto-updates: enabled"), update immediately with `claude update`. No additional npm installation. The VS Code extension brings its own Claude Code version and updates through the Marketplace |
-| `ctx7` | Context7 CLI: fetches current library documentation (`ctx7 library <name> <question>` → `ctx7 docs <libraryId> <question>`) | latest | `npm install -g ctx7@latest`, once `ctx7 login`. Update: `ctx7 upgrade -y` (or the same npm command). It is a global npm package of the current Node version, so reinstall it after a Node switch without `--reinstall-packages-from` |
+| `ctx7` | Context7 CLI: fetches current library documentation (`ctx7 library <name> <question>` → `ctx7 docs <libraryId> <question>`, or `ctx7 search <question>` in one step) | latest | `npm install -g ctx7@latest`, once `ctx7 login`. Update: `ctx7 upgrade -y` (or the same npm command). It is a global npm package of the current Node version, so reinstall it after a Node switch without `--reinstall-packages-from` |
 
 Docker repository (official instructions):
 
@@ -149,9 +166,8 @@ No login needed: Supabase CLI (local instance), Docker (public images), Ollama (
 |---|---|---|---|
 | `context7` (HTTP, `https://mcp.context7.com/mcp`) | User (`claude mcp add --scope user …`) | Library documentation | Fallback only; the CLI `ctx7` comes first |
 | `claude-vscode` | Added automatically by the VS Code extension | Diagnostics and editor context from the IDE | No configuration needed |
-| `supabase-local` (HTTP, `http://127.0.0.1:54321/mcp`) | Project (`.mcp.json`) | Schema, tables, migrations and SQL of the local Supabase instance (for example `list_tables`, `execute_sql`, `apply_migration`, `get_advisors`) | Fallback only; `psql` and `supabase` come first. Only available while `supabase start` is running. Must be approved once on the first start of `claude` in the project |
 
-Other servers connected to the Claude account (claude.ai connectors, Vercel) are not part of the development environment. GitHub does not use an MCP server; use `gh`.
+Other servers connected to the Claude account (claude.ai connectors, Vercel) are not part of the development environment. GitHub does not use an MCP server; use `gh`. The MCP server of the local Supabase instance belongs to the extended variant (§10).
 
 ### Version check
 
@@ -338,11 +354,8 @@ update-dev-tools.sh             # update
 
 ```text
 <PROJECT_ROOT>/
-├── .claude/                # Claude Code configuration (settings, commands, agents, skills)
+├── .claude/                # Claude Code configuration (settings, commands, skills)
 ├── .vscode/                # recommended extensions and workspace settings for VS Code (versioned)
-├── .github/                # GitHub configuration
-│   ├── workflows/          # CI pipeline (one file, ci.yml)
-│   └── pull_request_template.md   # optional PR template
 ├── docs/                   # project documentation, including this file (ENVIRONMENT.md)
 ├── src/
 │   └── <package>/          # all Python code of the project as an installable package
@@ -354,23 +367,20 @@ update-dev-tools.sh             # update
 │   └── migrations/         # SQL migrations with a timestamp prefix
 ├── tests/                  # all tests (pytest), integration tests with the marker `integration`
 ├── CLAUDE.md               # project instructions for Claude Code
-├── Dockerfile              # image for the service from <package>
-├── docker-compose.yml      # the project's own services (PostgreSQL runs separately through Supabase)
-├── .pre-commit-config.yaml # git hooks (ruff check and ruff format)
+├── .pre-commit-config.yaml # git hooks (ruff, gitleaks secret scan, large-file check)
+├── .gitleaksignore         # optional: fingerprints of accepted gitleaks findings (§4)
 ├── pyproject.toml          # project metadata, dependencies, dev group, ruff and pytest configuration
 ├── uv.lock                 # uv lock file (versioned)
 ├── .python-version         # Python version for uv (versioned)
 ├── README.md               # created by uv init
-├── .mcp.json               # optional: project-wide MCP servers (§8)
 ├── .gitignore
-├── .dockerignore
 ├── .env.example            # template for .env (versioned)
 └── .env                    # local values (not versioned)
 ```
 
-The project uses the common **src layout**. `<package>` is the project name in lower case with `_` instead of `-` (`<PROJECT_NAME>` = `my-project` becomes `src/my_project/`). `uv sync` installs the package in editable mode into `.venv`. This makes it importable everywhere: in `tests/`, in `scripts/` and in the container, without changing `sys.path`.
+The project uses the common **src layout**. `<package>` is the project name in lower case with `_` instead of `-` (`<PROJECT_NAME>` = `my-project` becomes `src/my_project/`). `uv sync` installs the package in editable mode into `.venv`. This makes it importable everywhere, in `tests/` and in `scripts/`, without changing `sys.path`.
 
-- **`src/<package>/`** contains all code, including the code of a long-running service. You start a service with `python -m <package>.<module>`: locally through `uv run`, in the container through the `Dockerfile`.
+- **`src/<package>/`** contains all code, including the code of a long-running service. You start a service with `uv run python -m <package>.<module>`.
 - **`scripts/`** contains only thin entry scripts for tasks that run once and then end (for example, loading data). The logic lives in the package.
 - **`tests/`** contains all tests. Tests that need the running stack have the marker `integration` (see §7).
 
@@ -406,14 +416,15 @@ select = ["E", "F", "I", "UP", "B"]   # pycodestyle, pyflakes, isort, pyupgrade,
 [tool.pytest]
 testpaths = ["tests"]
 addopts = ["-m", "not integration"]
-markers = ["integration: needs the local stack (supabase start, docker compose up)"]
+markers = ["integration: needs the local stack (supabase start)"]
+strict = true                    # unknown markers and options are errors
 ```
 
-`uv init --package` also adds a `[build-system]` table with the `uv_build` backend; keep it as generated. `[tool.pytest]` needs pytest 9 or newer (older versions read `[tool.pytest.ini_options]`).
+`uv init --package` also adds a `[build-system]` table with the `uv_build` backend; keep it as generated. `[tool.pytest]` and `strict` need pytest 9 or newer (older versions read `[tool.pytest.ini_options]`). With `strict = true`, a misspelled marker such as `@pytest.mark.integraton` stops the test run; otherwise the test would quietly run with the unit tests. New pytest versions can add strict checks; they show up when `/deps` raises pytest and runs the tests.
 
-`uv add` writes the current version as a lower bound (`>=`). Add an upper bound only when a new major version breaks compatibility. `uv lock --upgrade` raises all packages to the latest version. `uv sync` installs the `dev` group by default; `--no-dev` leaves it out (in the container). ruff is in the dev group, so the same version from `uv.lock` runs locally, in the Claude Code hook and in CI. The pre-commit hooks use the ruff version pinned in `.pre-commit-config.yaml` (`rev`). `uv lock --upgrade` and `uv run pre-commit autoupdate` keep both at the latest version.
+`uv add` writes the current version as a lower bound (`>=`). Add an upper bound only when a new major version breaks compatibility. `uv lock --upgrade` raises all packages to the latest version. `uv sync` installs the `dev` group by default; `--no-dev` leaves it out. ruff is in the dev group, so the same version from `uv.lock` runs locally and in the Claude Code hook. The pre-commit hooks use the ruff version pinned in `.pre-commit-config.yaml` (`rev`). `uv lock --upgrade` and `uv run pre-commit autoupdate` keep both at the latest version.
 
-**`.python-version`**: one line with the latest stable Python version (`<X.Y>`). `uv python pin` writes it; `uv sync`/`uv run` and `astral-sh/setup-uv` in CI read it. Without this file, uv picks the latest installable version that matches `requires-python`.
+**`.python-version`**: one line with the latest stable Python version (`<X.Y>`). `uv python pin` writes it; `uv sync` and `uv run` read it. Without this file, uv picks the latest installable version that matches `requires-python`.
 
 **`uv.lock`**: created by uv and versioned. Do not edit it by hand.
 
@@ -472,6 +483,8 @@ from <package>.config import Settings
 
 
 def test_database_url(monkeypatch):
+    for name in ("POSTGRES_HOST", "POSTGRES_PORT", "POSTGRES_USER", "POSTGRES_DB"):
+        monkeypatch.delenv(name, raising=False)  # test the defaults, not the shell
     monkeypatch.setenv("POSTGRES_PASSWORD", "secret")
     settings = Settings(_env_file=None)
     assert settings.database_url.endswith("@127.0.0.1:54322/postgres")
@@ -512,62 +525,12 @@ major_version = <N>              # keep the default of the current Supabase CLI
 [studio]
 port = 54323
 [analytics]
-enabled = false
+enabled = false                  # no log containers (Logflare, Vector); Studio shows no logs
 ```
 
 `supabase init` also creates `supabase/.gitignore`.
 
-**`docker-compose.yml`**: common patterns:
-
-```yaml
-services:
-  <service>:
-    build: .
-    ports: ["127.0.0.1:<port>:<port>"]       # bind to localhost on the host only
-    env_file: .env
-    environment:
-      POSTGRES_HOST: host.docker.internal     # set container values here, they take priority over .env
-    extra_hosts: ["host.docker.internal:host-gateway"]   # reach Supabase Postgres and Ollama on the host (Linux)
-    healthcheck: { test: ["CMD", "<check-command>"], interval: 10s, retries: 10 }
-    restart: unless-stopped
-    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
-    volumes: ["<service>_data:/data"]       # only if the service stores data
-volumes:
-  <service>_data:
-```
-
-When you create the project, set third-party images to the latest (LTS) version and pin them exactly (`<image>:<version>`), so that builds stay reproducible. Raise the tags when you update the environment. Several services from the same package use the same image with a different `command:`. Compose puts all services into the default network of the project, where they reach each other by service name.
-
-**`Dockerfile`** (official uv pattern):
-
-```dockerfile
-FROM python:<X.Y>-slim
-COPY --from=ghcr.io/astral-sh/uv:<current-uv-version> /uv /uvx /bin/
-ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
-WORKDIR /app
-
-# Dependencies in their own layer (cache survives code changes)
-RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,source=uv.lock,target=uv.lock \
-    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
-    uv sync --locked --no-dev --no-install-project
-
-# Project itself
-COPY . .
-RUN --mount=type=cache,target=/root/.cache/uv uv sync --locked --no-dev
-
-RUN useradd --create-home --uid 1000 appuser && chown -R appuser:appuser /app
-USER appuser
-ENV PATH="/app/.venv/bin:$PATH"
-EXPOSE <port>
-CMD ["python", "-m", "<package>.<module>"]
-```
-
-`<X.Y>` is the version from `.python-version`. The base image provides Python, and uv uses it.
-
-**`.dockerignore`**: `.git`, `.venv`, `.env`, `.env.*`, `!.env.example`, `__pycache__/`, `.pytest_cache/`, `.ruff_cache/` and container data folders.
-
-**`.pre-commit-config.yaml`**: the official ruff hooks. Set `rev` to the latest tag (`gh api repos/astral-sh/ruff-pre-commit/releases/latest -q .tag_name`). `uv run pre-commit install` activates the hooks; `uv run pre-commit autoupdate` raises `rev` to the latest version. Run `uv run pre-commit install` again after `.venv` has been recreated, because the git hook stores the path to the Python interpreter.
+**`.pre-commit-config.yaml`**: the official ruff hooks, the gitleaks secret scan and a check for large files. `uv run pre-commit autoupdate` sets each `rev` to the latest tag, also in a new file; `uv run pre-commit install` activates the hooks. Run `uv run pre-commit install` again after `.venv` has been recreated, because the git hook stores the path to the Python interpreter.
 
 ```yaml
 repos:
@@ -577,59 +540,19 @@ repos:
       - id: ruff-check
         args: [--fix]
       - id: ruff-format
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v<latest-gitleaks-version>
+    hooks:
+      - id: gitleaks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v<latest-pre-commit-hooks-version>
+    hooks:
+      - id: check-added-large-files
 ```
 
-**`.github/workflows/ci.yml`**: one job on `ubuntu-latest`. uv comes from `astral-sh/setup-uv` (with cache), Python from `.python-version`, ruff and pytest from the dev group. Integration tests do not run in CI, because no stack runs there. `concurrency` cancels older runs. Set the actions to their latest major version.
+The `gitleaks` hook scans the staged changes of every commit and blocks the commit if it finds a secret. pre-commit installs a Go toolchain for it on the first run (pre-commit 3 or newer), so the host needs neither Go nor a gitleaks binary. A false positive is accepted only explicitly: with a `gitleaks:allow` comment on the line, or with the fingerprint of the finding in `.gitleaksignore`; the commit message states the reason. Never bypass the hooks with `git commit --no-verify`: in the light variant, the hook is the only scan until the full history is checked before sharing or publishing (§10).
 
-```yaml
-name: CI
-on:
-  push: { branches: [ main ] }
-  pull_request: { branches: [ main ] }
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v<latest-major>
-      - uses: astral-sh/setup-uv@v<latest-major>
-        with: { enable-cache: true }
-      - run: uv sync --locked
-      - run: uv run ruff check .
-      - run: uv run ruff format --check .
-      - run: uv run pytest
-```
-
-**`.github/pull_request_template.md`** (optional):
-
-```markdown
-<One paragraph: what and why.>
-
-## Root cause / Motivation
-
-## Change
-
-## Verification
-| Case | Expected | Result |
-|---|---|---|
-```
-
-**GitHub repository settings** (with the gh CLI, for the PR workflow):
-
-```bash
-gh repo edit <OWNER>/<REPO> \
-  --default-branch main \
-  --enable-squash-merge \
-  --enable-merge-commit=false \
-  --enable-rebase-merge=false \
-  --delete-branch-on-merge \
-  --enable-wiki=false
-```
-
-Optionally, add a branch rule for `main` that requires a green CI check before merging.
+The hook `check-added-large-files` blocks a new file larger than 500 KB, for example a data dump or a model file: once pushed, it stays in the git history. A large file that belongs in the repository goes through git-lfs (`git lfs track '<pattern>'`); the hook skips such files.
 
 **`.vscode/extensions.json`**: VS Code suggests these extensions when you open the project.
 
@@ -657,9 +580,9 @@ Optionally, add a branch rule for `main` that requires a green CI check before m
 }
 ```
 
-**`.gitignore`** (relevant patterns): `.env`, `.env.*`, `!.env.example`, `__pycache__/`, `.pytest_cache/`, `.ruff_cache/`, `.venv`, `dist/`, `.supabase/`, `supabase/.temp/`, `supabase/seed.sql` (if generated) and the bind-mount data folders of the containers.
+**`.gitignore`** (relevant patterns): `.env`, `.env.*`, `!.env.example`, `__pycache__/`, `.pytest_cache/`, `.ruff_cache/`, `.venv`, `dist/`, `.supabase/`, `supabase/.temp/` and `supabase/seed.sql` (if generated).
 
-Not used on purpose: type checking (`mypy`/`pyright`), `.editorconfig`, `.nvmrc`.
+Decisions about what this template leaves out on purpose (type checking, `.editorconfig`, `.nvmrc`, update bots, CI, the pull-request workflow, containers) are recorded with their reasons in §10.
 
 ---
 
@@ -671,12 +594,14 @@ All variables come from the environment or from `.env` (template `.env.example`)
 |---|---|---|
 | `POSTGRES_HOST` / `POSTGRES_PORT` | PostgreSQL (Supabase) | `127.0.0.1` / `54322` |
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | Admin connection | `postgres` / `postgres` (CLI default) / `postgres` |
-| `<APP>_PG_USER` / `<APP>_PG_PASSWORD` | Separate database role for the service (optional) | `<app>_user` / `<local-pw>` |
+| `<SERVICE>_PG_USER` / `<SERVICE>_PG_PASSWORD` | Separate database role for the service (optional) | `<package>_<service>` / `<local-pw>` |
 | `OLLAMA_BASE_URL` / `OLLAMA_MODEL` | Local LLM | `http://127.0.0.1:11434` / `<model>:latest` |
 | `LLM_TIMEOUT_SECONDS` | LLM timeout | `120` |
 | `<SERVICE>_HOST` / `<SERVICE>_PORT` | Host interface and port of the service | `127.0.0.1` / `<port>` |
 
-Ports (bound to `127.0.0.1`, except Ollama):
+The admin connection (`POSTGRES_*`) is for migrations, tests and administration. A service connects with its own database role (`<SERVICE>_PG_*`) as soon as the project defines one.
+
+Ports (all bound to `127.0.0.1`; for Supabase through the prepared network, §6):
 
 | Port | Service |
 |---|---|
@@ -685,53 +610,50 @@ Ports (bound to `127.0.0.1`, except Ollama):
 | 54323 | Supabase Studio |
 | 54324 | Mailpit (Supabase, test mailbox) |
 | `<port>` | the project's own service |
-| 11434 | Ollama (`0.0.0.0` on purpose, so that containers can reach it) |
+| 11434 | Ollama (default binding; with containers see §10) |
 
 ---
 
 ## 6. Local services
 
-**PostgreSQL (Supabase CLI)** does not run in Compose:
+**PostgreSQL (Supabase CLI)** runs in containers that the Supabase CLI manages:
 
 ```bash
+# once per project, before the first supabase start (see below)
+docker network create -o com.docker.network.bridge.host_binding_ipv4=127.0.0.1 supabase_network_<PROJECT_NAME>
+
 supabase start                  # start the Supabase CLI containers, apply migrations on the first start
+docker port supabase_db_<PROJECT_NAME>   # check: must show 127.0.0.1:54322 only
 supabase status                 # URLs, ports and default credentials (DB_URL, STUDIO_URL, …)
 supabase db reset               # rebuild the database: migrations + supabase/seed.sql
 supabase migration new <name>   # new migration supabase/migrations/<timestamp>_<name>.sql
+supabase db query '<sql>'       # run one SQL statement (--read-only for reading, -f for a file)
+supabase db lint --fail-on error   # check the database functions for errors
+supabase db advisors            # Supabase's security and performance checks (--fail-on warn to fail on warnings)
 supabase stop                   # stop (--no-backup discards the local data)
 psql postgresql://postgres:postgres@127.0.0.1:54322/postgres   # SQL console
 ```
 
-The default connection is `postgresql://postgres:postgres@127.0.0.1:54322/postgres`. If you use a different `postgres` password in `.env`, you must set it again after every `db reset` (connect as `supabase_admin`, because `postgres` is not a real superuser in Supabase). It is easier to use the CLI default password locally all the time.
+**Keep Supabase on localhost.** The Supabase CLI publishes all its ports on all network interfaces, and it has no setting to change this; `supabase start` says so in its security notice. On a shared network, the database with its default password and Studio without a login would then be reachable by others. The CLI creates its Docker network `supabase_network_<project_id>` only if it does not exist yet. If you create this network first, with `127.0.0.1` as its default host address, `supabase start` uses it, and all Supabase ports stay on `127.0.0.1`. `<project_id>` is `project_id` in `supabase/config.toml`, by default the folder name `<PROJECT_NAME>`. The network stays when Supabase stops. If Supabase was already started before the network existed, run `supabase stop` first (it removes its own network) and then create the network.
 
-Containers reach the database at `host.docker.internal:54322`. This only works with `extra_hosts: ["host.docker.internal:host-gateway"]` (required on Linux).
+The default connection is `postgresql://postgres:postgres@127.0.0.1:54322/postgres`. If you use a different `postgres` password in `.env`, you must set it again after every `db reset` (connect as `supabase_admin`, because `postgres` is not a real superuser in Supabase). It is easier to use the CLI default password locally all the time. The same applies to the project's own login roles: after every `db reset`, a small idempotent script sets their passwords again from `.env`.
 
-**Docker Compose** (`docker compose up -d`): the project's own services in the default network that Compose creates for the project. They address each other by service name (`http://<service>:<port>`), not by `127.0.0.1`. Persistent data lives in named volumes (`<service>_data`) or in bind mounts that git ignores. Configuration files are mounted read-only (`:ro`).
-
-**Ollama** runs natively on the host as the systemd service `ollama`; `ollama pull <model>` downloads models. Ollama listens on all interfaces (`0.0.0.0:11434`) on purpose, so that containers can reach it at `http://host.docker.internal:11434` (with `extra_hosts: ["host.docker.internal:host-gateway"]`). By default, Ollama only binds to `127.0.0.1`, so set this with `sudo systemctl edit ollama`. The setting is stored in `ollama.service.d/override.conf` and survives updates:
-
-```ini
-[Service]
-Environment="OLLAMA_HOST=0.0.0.0:11434"
-```
-
-Then run `sudo systemctl restart ollama`. Processes on the host still use `http://127.0.0.1:11434` (`OLLAMA_BASE_URL` in `.env`), containers use `http://host.docker.internal:11434`.
+**Ollama** runs natively on the host as the systemd service `ollama`; `ollama pull <model>` downloads models. It keeps its default binding to `127.0.0.1:11434`, and host processes use `http://127.0.0.1:11434` (`OLLAMA_BASE_URL` in `.env`). Only containers would need another binding (§10).
 
 ---
 
 ## 7. Conventions
 
 - **Tools**: CLI before MCP (see §2). All CLIs are installed globally and kept at the latest (LTS) version. Project tools (pytest, ruff, pre-commit) run through `uv run` from the dev group.
-- **Code style**: ruff with the rule groups `E`, `F`, `I`, `UP`, `B` and `ruff format` as formatter, line length 100 (§4). pre-commit checks and formats before every commit; CI checks both again. No type checking.
+- **Code style**: ruff with the rule groups `E`, `F`, `I`, `UP`, `B` and `ruff format` as formatter, line length 100 (§4). pre-commit checks and formats before every commit. No type checking (§10).
 - **Project layout**: src layout, all code in the package `src/<package>/`. Entry points are modules with `main()` and `if __name__ == "__main__": main()`, started with `uv run python -m <package>.<module>`. `scripts/` only contains thin entry scripts that import from the package.
 - **Configuration**: only through `get_settings()` from `src/<package>/config.py` (pydantic-settings). No `os.getenv` in the rest of the code. Required values have no default, so a missing value shows up at startup.
+- **Secrets**: Only in `.env` (ignored by git, mode `600`) or in the environment; never in the repository, not even in tests or examples. gitleaks checks every commit (§4); before a repository is shared or made public, the full history is checked as well (§10). Accepted false positives are recorded explicitly, with the reason in the commit message. Git hooks are never bypassed (`--no-verify`).
 - **Naming**: Files and modules in `snake_case`. Migrations are named `YYYYMMDDHHMMSS_<description>.sql` (created by `supabase migration new`). Recommended: group tables and related files by an area prefix (`<area>_*`).
-- **Commits**: Conventional Commits (`feat:`, `fix:`, `docs:`, `chore:`), imperative mood, lower case. On a squash merge, GitHub adds the PR number (`(#<nr>)`).
-- **Branching**: No direct commits to `main`. Every change goes through a feature branch `<type>/<short-name>` (`feat/…`, `fix/…`, `docs/…`, `chore/…`) created from `main`.
-- **Pull requests**: One PR per branch, created with `gh pr create`. The PR title uses the Conventional Commits format, because it becomes the commit message on a squash merge. The body describes motivation, change and verification (template in §4). Merge only when CI is green (`gh pr checks --watch`), then run `gh pr merge --squash --delete-branch`. After that, update the local `main` with a fast-forward.
-- **CI**: GitHub Actions runs on every push to `main` and every PR against `main`. Newer runs on the same branch cancel older ones (`concurrency`).
-- **Testing**: All tests are in `tests/` and run with pytest. Tests that need the running stack (database, containers, Ollama) have `@pytest.mark.integration`. `uv run pytest` skips them by default (also in CI); `uv run pytest -m integration` runs them while the stack is up. Keep at least one test of each kind (§4). Optional: drift tests that check configuration files against the SQL migrations.
-- **Dependencies**: Only through `uv add`/`uv remove`, never edit the lock file by hand. Lower bounds in `pyproject.toml`, an upper bound only for a known breaking change. Run `uv lock --upgrade` regularly. `uv.lock` and `.python-version` are versioned. Python commands always run through `uv run`.
+- **Commits**: Conventional Commits (`feat:`, `fix:`, `docs:`, `chore:`), imperative mood, lower case.
+- **Branching**: Commits go directly to `main`. A local branch can hold an experiment that might be dropped; it is merged locally or deleted. Pull requests belong to the extended variant (§10).
+- **Testing**: All tests are in `tests/` and run with pytest. Tests that need the running stack (database, containers, Ollama) have `@pytest.mark.integration`. `uv run pytest` skips them by default; `uv run pytest -m integration` runs them while the stack is up. Keep at least one test of each kind (§4). Optional: drift tests that check configuration files against the SQL migrations.
+- **Dependencies**: Only through `uv add`/`uv remove`, never edit the lock file by hand. Lower bounds in `pyproject.toml`, an upper bound only for a known breaking change. Updates are made on demand with `/deps` (`uv lock --upgrade` and more); there is no update bot (§10). `uv.lock` and `.python-version` are versioned. Python commands always run through `uv run`.
 
 ---
 
@@ -744,9 +666,7 @@ Then run `sudo systemctl restart ollama`. Processes on the host still use `http:
 | `CLAUDE.md` | Root | Project instructions (template below) |
 | `.claude/settings.json` | Project | Permissions and hooks, versioned |
 | `.claude/settings.local.json` | Project | Personal overrides, not versioned |
-| `.claude/commands/*.md` | Project | Slash commands |
-| `.claude/agents/*.md` | Project | Subagents |
-| `.mcp.json` | Root | Project-wide MCP servers (fallbacks, see "MCP servers" below) |
+| `.claude/commands/*.md` | Project | Slash commands (`/verify`, `/deps`) |
 | `.claude/skills/<name>/` | Project | Project skills (folder or symlink) |
 | `~/.claude/settings.json` | User | Global hooks, for example the version check at startup (§2) |
 | `~/.claude/rules/*.md` | User | Global rules for all projects |
@@ -769,14 +689,15 @@ The development environment is described in docs/ENVIRONMENT.md.
 - All CLIs are installed globally on the host and kept at the latest (LTS) version.
 - Run project tools through uv: `uv run pytest`, `uv run ruff check .`, `uv run ruff format .`.
 - Run all commands from the project root.
-- Open PRs yourself with `gh pr create`; never hand over a compare link.
+- Never bypass git hooks (`--no-verify`). A secret found by gitleaks is removed, not skipped.
+- Commit directly to `main` with Conventional Commits; ask before every push.
 
 ## Commands
 ```bash
 uv sync                          # install dependencies and the package
-cp .env.example .env             # then fill in the required values
+cp .env.example .env && chmod 600 .env   # then fill in the required values
 supabase start                   # local database
-docker compose up -d --build     # own services (if any)
+uv run python -m <package>.<module>   # own service (if any)
 uv run ruff check . && uv run ruff format --check .
 uv run pytest                    # unit tests
 uv run pytest -m integration     # needs the running stack
@@ -801,6 +722,7 @@ Principles: every command can be copied and pasted. "Beware" sections record pit
 
 ```json
 {
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
   "permissions": {
     "allow": [
       "Bash(uv sync *)",
@@ -809,31 +731,29 @@ Principles: every command can be copied and pasted. "Beware" sections record pit
       "Bash(uv run python -m <package>.*)",
       "Bash(ctx7 library *)",
       "Bash(ctx7 docs *)",
-      "Bash(docker compose ps *)",
-      "Bash(docker compose logs *)",
+      "Bash(ctx7 search *)",
+      "Bash(docker port *)",
       "Bash(supabase start)",
       "Bash(supabase status *)",
+      "Bash(supabase db lint *)",
+      "Bash(supabase db advisors *)",
       "Bash(git status *)",
       "Bash(git diff *)",
       "Bash(git log *)",
-      "Bash(git fetch *)",
-      "Bash(gh pr view *)",
-      "Bash(gh pr list *)",
-      "Bash(gh pr checks *)",
-      "Bash(gh run list *)",
-      "Bash(gh run view *)"
+      "Bash(git fetch *)"
     ],
     "ask": [
       "Bash(git push *)",
-      "Bash(gh pr create *)",
-      "Bash(gh pr merge *)",
       "Bash(uv add *)",
       "Bash(uv remove *)",
       "Bash(uv lock *)",
       "Bash(psql *)",
+      "Bash(supabase db query *)",
       "Bash(supabase db reset *)",
-      "Bash(supabase stop *)",
-      "Bash(docker compose down *)"
+      "Bash(supabase stop *)"
+    ],
+    "deny": [
+      "Read(./.env)"
     ]
   },
   "hooks": {
@@ -852,85 +772,43 @@ Principles: every command can be copied and pasted. "Beware" sections record pit
 }
 ```
 
-Permission rules use the form `Bash(<command> *)`: the trailing ` *` matches the command with any arguments. The hook formats the code after every edit. If ruff still finds problems, the hook exits with code 2, so Claude sees the findings (stderr) and fixes them. When the code is clean, the hook is silent.
+`$schema` gives completion and validation in VS Code. Permission rules use the form `Bash(<command> *)`: the trailing ` *` matches the command with or without arguments. `deny` keeps `.env` out of Claude's file tools and search results, so secrets do not reach the conversation by accident; when Claude needs a value, it asks. The hook formats the code after every edit. If ruff still finds problems, the hook exits with code 2, so Claude sees the findings (stderr) and fixes them. When the code is clean, the hook is silent.
 
 ### Slash command (template, `.claude/commands/verify.md`)
 
 ```markdown
 ---
-description: Run the full local verification (same as CI, plus integration tests)
+description: Run the full local verification (lint, format, tests, database checks)
 ---
 Run, in order, and report pass/fail per step with the failing output:
 1. uv run ruff check .
 2. uv run ruff format --check .
 3. uv run pytest
 4. If `supabase status` shows the stack running: uv run pytest -m integration
+5. If the stack is running and the project has migrations: supabase db lint --fail-on error, then supabase db advisors
 ```
 
-### Slash command (template, `.claude/commands/ship.md`)
+### Slash command (template, `.claude/commands/deps.md`)
 
 ```markdown
 ---
-description: Commit, open a PR, wait for CI, merge and clean up
+description: Update the project dependencies and hook versions, then verify
 ---
-1. If on `main`, create a branch `<type>/<short-name>` first.
-2. Stage and commit all changes with a Conventional Commits message.
-3. `git push -u origin HEAD`.
-4. If no PR exists for this branch (`gh pr view` fails), run `gh pr create --base main`
-   with a Conventional-Commit title and a body following `.github/pull_request_template.md`.
-5. `gh pr checks --watch`. If a check fails, show `gh run view <id> --log-failed` and stop.
-6. `gh pr merge --squash --delete-branch`, then `git switch main && git pull --ff-only`.
+Run, in order, and report what changed (git diff --stat):
+1. uv lock --upgrade, then uv sync
+2. uv run pre-commit autoupdate
+3. Run /verify (.claude/commands/verify.md)
 ```
 
-### Slash command (template, `~/.claude/commands/update-tools.md`, user level)
-
-```markdown
----
-description: Check all global CLIs for the latest (LTS) version and show update commands
----
-Run `~/.local/bin/check-dev-tools.sh`. If any tool is marked UPDATE, run
-`DRY_RUN=1 ~/.local/bin/update-dev-tools.sh` and show the result; the user runs the real update
-(it needs sudo). For tools marked MISSING or REMOVE, show the install/removal command from the
-environment documentation.
-```
-
-Other useful commands: `/sync` (requires a clean working tree: `git fetch --prune`, then `git merge --ff-only`, otherwise stop), `/health` (`uv run pytest -m integration` + `docker compose ps` + `supabase status`), `/deps` (`uv lock --upgrade`, `uv run pre-commit autoupdate`, then `/verify`).
-
-### Subagent (template, `.claude/agents/stack-checker.md`)
-
-```markdown
----
-name: stack-checker
-description: Checks whether the local Docker Compose + Supabase stack is healthy. Use after starting or changing services.
-tools: Bash, Read
----
-Run `docker compose ps` and `supabase status`. Report every service that is not running/healthy,
-then show the last 50 log lines of each unhealthy service via `docker compose logs --tail 50 <service>`.
-Do not restart or modify anything.
-```
+Updates are made on demand with this command; there is no update bot (§10).
 
 ### MCP servers
 
-Principle CLI before MCP: create project-wide MCP servers (`.mcp.json`) only when no CLI covers the task. The user-level server `context7` (§2) stays as a fallback for the CLI `ctx7`:
+Principle CLI before MCP: create project-wide MCP servers (`.mcp.json`) only when no CLI covers the task; the template for the local Supabase instance belongs to the extended variant (§10). The user-level server `context7` (§2) stays as a fallback for the CLI `ctx7`:
 
 ```bash
 claude mcp add --scope user --transport http context7 https://mcp.context7.com/mcp
 ```
-
-As a fallback for `psql`/`supabase`, add the MCP server of the local Supabase instance (`.mcp.json`, versioned). It offers structured tools (for example `list_tables`, `get_advisors`) that the CLIs do not provide directly. `supabase start` provides it and reports it as `MCP_URL`:
-
-```json
-{
-  "mcpServers": {
-    "supabase-local": {
-      "type": "http",
-      "url": "http://127.0.0.1:54321/mcp"
-    }
-  }
-}
-```
-
-On the first start of `claude` in the project, Claude Code asks whether to approve the server. Check the status with `claude mcp get supabase-local`.
 
 ### Skills
 
@@ -975,7 +853,7 @@ The user-level skill `~/.claude/skills/context7-mcp/SKILL.md` follows the same o
 ## 9. Bootstrap checklist for a new project
 
 1. Once per host (skip if already done): install all CLIs from §2 globally, set up `check-dev-tools.sh` and the SessionStart hook, then run `check-dev-tools.sh`. Every tool must report `OK`.
-2. Run `git init -b main` and create the folders `scripts/`, `tests/`, `docs/`, `.github/workflows/`, `.claude/` and `.vscode/`. Create `.vscode/extensions.json` and `.vscode/settings.json` as described in §4.
+2. Run `git init -b main` and create the folders `scripts/`, `tests/`, `docs/`, `.claude/` and `.vscode/`. Create `.vscode/extensions.json` and `.vscode/settings.json` as described in §4.
 3. Create the Python project with uv:
    ```bash
    uv python install                                   # latest stable Python version
@@ -985,44 +863,379 @@ The user-level skill `~/.claude/skills/context7-mcp/SKILL.md` follows the same o
    uv add --dev pytest ruff pre-commit
    ```
    `<X.Y>` is the newest stable CPython minor version (see `uv python list`; ignore pre-releases). `uv init --package` creates `src/<package>/__init__.py` with a sample `main()`, a `[project.scripts]` entry, the build backend, `.python-version` and a `README.md`. `uv python pin` makes sure that `.python-version` contains `<X.Y>`. Then add `[tool.ruff]` and `[tool.pytest]` to `pyproject.toml` as described in §4. Remove `[project.scripts]` and the sample `main()` if you do not need them.
-4. Run `supabase init`. Keep the default `major_version` and check the ports against §4.
-5. Create `.env.example` with the variables from §5. Create `.gitignore` and `.dockerignore` as described in §4.
+4. Run `supabase init`. Keep the default `major_version` and check the settings against §4 (ports, `[analytics]`). Then create the Supabase network as described in §6, before the first `supabase start`.
+5. Create `.env.example` with the variables from §5. Create `.gitignore` as described in §4.
 6. Create `src/<package>/config.py` and the two tests `tests/test_config.py` and `tests/test_database.py` as described in §4.
-7. If the project has its own service: create `src/<package>/<module>.py` as entry point, then `Dockerfile` and `docker-compose.yml` as described in §4, and set the image tags to the latest version. Without a service, skip this step and the `docker compose` command in step 10.
-8. Create `.pre-commit-config.yaml` as described in §4, then run `uv run pre-commit autoupdate` and `uv run pre-commit install`. Create the CI workflow and, optionally, the PR template in `.github/`, and set the actions to their latest major version.
-9. Write `CLAUDE.md` from the template in §8. Optionally create `.claude/settings.json`, commands, agents and `.mcp.json`.
+7. If the project has its own service: create `src/<package>/<module>.py` as entry point; it runs with `uv run python -m <package>.<module>`. Containers belong to the extended variant (§10).
+8. Create `.pre-commit-config.yaml` with the hooks from §4, then run `uv run pre-commit autoupdate` and `uv run pre-commit install`.
+9. Write `CLAUDE.md` from the template in §8. Create `.claude/settings.json` and the commands `/verify` and `/deps` from their templates in §8.
 10. Start and check the environment:
     ```bash
     uv sync --locked
-    cp .env.example .env
+    cp .env.example .env && chmod 600 .env
     supabase start
-    docker compose up -d --build     # only with a service (step 7)
+    docker port supabase_db_<PROJECT_NAME>   # must show 127.0.0.1:54322 only
     uv run ruff check . && uv run ruff format --check .
     uv run pytest
     uv run pytest -m integration
     ```
-11. Create the GitHub repository and push the first commit:
+11. Create the private GitHub repository and push the first commit:
     ```bash
     git add -A && git commit -m "chore: initial project setup"
     gh repo create <OWNER>/<REPO> --private --source=. --remote=origin --push
     ```
-12. Apply the repository settings with `gh repo edit` from §4; optionally add a branch rule for `main` that requires the CI check.
-13. Create the first feature branch and open a PR. Check that CI runs (`gh pr checks --watch`).
+
+Later commits go directly to `main` and are pushed after confirmation. When the project grows, add the parts of the extended variant (§10).
 
 **Places to adapt**
 
 | What | File(s) |
 |---|---|
-| Project name `<PROJECT_NAME>` | `pyproject.toml` (`name`), CI workflow `name`, `supabase/config.toml` (`project_id`) |
-| Package name `<package>` (derived from the project name) | `src/<package>/`, imports, `Dockerfile` (`CMD`), `docker-compose.yml` (`command:`), `.claude/settings.json` |
-| Ports | `supabase/config.toml`, `docker-compose.yml` (`ports:`), `.env.example` |
-| Volume names | `docker-compose.yml` (`volumes:`) |
-| Bind-mount paths | `docker-compose.yml`, `.gitignore`, `.dockerignore` |
-| Python version `<X.Y>` | `.python-version`, `pyproject.toml` (`requires-python`), Dockerfile base image, skill symlinks |
-| uv version | `Dockerfile` (`ghcr.io/astral-sh/uv:<version>`) |
-| Image tags, action versions, hook versions | `docker-compose.yml`, `Dockerfile`, `.github/workflows/ci.yml`, `.pre-commit-config.yaml` (`uv run pre-commit autoupdate`) |
+| Project name `<PROJECT_NAME>` | `pyproject.toml` (`name`), `supabase/config.toml` (`project_id`), Supabase network and database container names (`docker network create` in §6) |
+| Package name `<package>` (derived from the project name) | `src/<package>/`, imports, `.claude/settings.json` |
+| Ports | `supabase/config.toml`, `.env.example` |
+| Python version `<X.Y>` | `.python-version`, `pyproject.toml` (`requires-python`), skill symlinks |
+| Hook versions | `.pre-commit-config.yaml` (`uv run pre-commit autoupdate`) |
 | LLM model | `OLLAMA_MODEL` in `.env.example` |
 | Skill symlinks | `.claude/skills/*` (set new paths) |
-| GitHub owner/repository `<OWNER>/<REPO>` | `gh repo create`, `gh repo clone`, `gh repo edit` |
+| GitHub owner/repository `<OWNER>/<REPO>` | `gh repo create`, `gh repo clone` |
+
+---
+
+## 10. Decisions and the extended variant
+
+This template uses the **light variant** wherever a local, often short-lived project needs no more. The decisions below are settled. Each one has its reason and the signal for switching, so that a justified question does not have to be discussed again, and the knowledge behind it is not lost. When a project grows, the sections after the table describe the **extended variant**, topic by topic.
+
+### Decisions
+
+| # | Topic | Decision (light variant) | Reason | Switch when … |
+|---|---|---|---|---|
+| D1 | Change workflow | Commits go directly to `main` | A single developer on a short-lived project gains nothing from pull requests | others review or contribute ("Pull-request workflow") |
+| D2 | CI | No GitHub Actions; pre-commit checks every commit, and `/verify` runs the tests | The same checks already run locally | the repository is shared or made public, or several people commit ("CI") |
+| D3 | Containers for the project's own code | Code runs on the host with `uv run`; Docker only runs Supabase | Containers add a Dockerfile, Compose, networks and an Ollama binding to all interfaces | a service must run isolated, needs another runtime, or several services work together ("Containers") |
+| D4 | Claude Code extras | `CLAUDE.md`, `.claude/settings.json` with the ruff hook, `/verify` and `/deps` | The CLIs cover the rest; the Supabase CLI runs SQL, the linter and the advisors itself | the project uses pull requests, containers or many sessions ("Claude Code extras") |
+| D5 | Branch protection | Not used | For private repositories, it needs a paid GitHub plan (GitHub Pro for personal accounts, GitHub Team for organizations); without pull requests (D1), it has nothing to protect | the repository is public or the plan allows it, and pull requests are used ("Pull-request workflow") |
+| D6 | Update bots (Dependabot, Renovate) | Not used; updates on demand with `/deps` | A bot opens pull requests every week; they do not fit direct commits (D1) and cost time in a project that may soon be dropped | the project becomes long-lived or public ("Update bot") |
+| D7 | Type checking (`mypy`, `pyright`) | Not used | ruff finds style problems and many bugs; type checking pays off for larger, longer-lived code | the code base grows or becomes a library |
+| D8 | `.editorconfig` | Not used | `ruff format` and the VS Code settings already define the formatting | other editors join the project |
+| D9 | `.nvmrc` | Not used | Node comes once per host from nvm and only serves global CLIs | the project gets its own Node code |
+| D10 | Secret scan | Kept: gitleaks before every commit; the full history before a repository is shared or made public | A secret that ever reaches GitHub counts as leaked, also in a private repository that becomes public later | — (always) |
+| D11 | Supabase on localhost | Kept: a prepared Docker network keeps Supabase on `127.0.0.1` (§6) | The Supabase CLI binds to all interfaces; the database has a default password, and Studio has no login | — (always; it costs one command) |
+| D12 | Ollama binding | Default `127.0.0.1`, no override | Only containers need another binding, and the light variant has none (D3) | containers must reach Ollama ("Containers") |
+
+The parts of the extended variant are added one by one. When several apply, follow the order of the sections below: CI comes first, because the pull-request workflow and publishing rely on its checks.
+
+### CI
+
+Add the folder `.github/workflows/` with one workflow. GitHub Actions then runs on every push to `main` and on every PR against `main`; newer runs on the same branch cancel older ones (`concurrency`).
+
+**`.github/workflows/ci.yml`**: two jobs on `ubuntu-latest`. The job `test` gets uv from `astral-sh/setup-uv` (with cache), Python from `.python-version`, ruff and pytest from the dev group. Integration tests do not run in CI, because no stack runs there. The job `secrets` scans the full git history with gitleaks, in the same version as in `.pre-commit-config.yaml`. If you add the optional branch protection, both job names are its required checks. `permissions` gives the workflow token read access only. Set the actions to their latest major version.
+
+```yaml
+name: CI
+on:
+  push: { branches: [ main ] }
+  pull_request: { branches: [ main ] }
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v<latest-major>
+      - uses: astral-sh/setup-uv@v<latest-major>
+        with: { enable-cache: true }
+      - run: uv sync --locked
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run pytest
+  secrets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v<latest-major>
+        with: { fetch-depth: 0 }            # full history for the secret scan
+      - name: Scan the full history for secrets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITLEAKS_VERSION: <latest-gitleaks-version>   # same as rev in .pre-commit-config.yaml, without "v"
+        run: |
+          gh release download "v$GITLEAKS_VERSION" -R gitleaks/gitleaks -p "gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" -O - | tar -xz gitleaks
+          ./gitleaks git --redact --verbose .
+```
+
+When `/deps` raises the gitleaks `rev`, set `GITLEAKS_VERSION` to the same version.
+
+### Pull-request workflow
+
+- **Branching**: No direct commits to `main`. Every change goes through a feature branch `<type>/<short-name>` (`feat/…`, `fix/…`, `docs/…`, `chore/…`) created from `main`.
+- **Pull requests**: One PR per branch, created with `gh pr create`. The PR title uses the Conventional Commits format, because it becomes the commit message on a squash merge. The body describes motivation, change and verification (template below). Merge only when CI is green (`gh pr checks --watch`); if the branch is behind `main`, update it first (`gh pr update-branch`). Then run `gh pr merge --squash --delete-branch` and update the local `main` with a fast-forward.
+- **Commits**: On a squash merge, GitHub adds the PR number (`(#<nr>)`). The reason for an accepted gitleaks false positive is stated in the PR.
+
+In `CLAUDE.md`, replace the bullet about direct commits with: "Every change goes through a PR with a Conventional Commits title. Open PRs yourself with `gh pr create`; never hand over a compare link. Ask before every push." In `.claude/settings.json`, add `Bash(gh pr view *)`, `Bash(gh pr list *)`, `Bash(gh pr checks *)`, `Bash(gh run list *)` and `Bash(gh run view *)` to `allow`, and `Bash(gh pr create *)` and `Bash(gh pr merge *)` to `ask`.
+
+**`.github/pull_request_template.md`** (optional):
+
+```markdown
+<One paragraph: what and why.>
+
+## Root cause / Motivation
+
+## Change
+
+## Verification
+| Case | Expected | Result |
+|---|---|---|
+```
+
+**GitHub repository settings** (with the gh CLI, for the PR workflow):
+
+```bash
+gh repo edit <OWNER>/<REPO> \
+  --default-branch main \
+  --enable-squash-merge \
+  --enable-merge-commit=false \
+  --enable-rebase-merge=false \
+  --delete-branch-on-merge \
+  --enable-wiki=false
+```
+
+**Branch protection (optional):** GitHub can enforce the PR workflow for `main` with branch protection or a ruleset: only pull requests, only with the green checks `test` and `secrets`, no force pushes. For private repositories, this needs a paid GitHub plan (GitHub Pro for personal accounts, GitHub Team for organizations); for public repositories, it is free. Because this template creates private repositories, branch protection is optional. Without it, the PR workflow is a convention that `CLAUDE.md` and the `/ship` command follow.
+
+#### Slash command (template, `.claude/commands/ship.md`)
+
+```markdown
+---
+description: Commit, open a PR, wait for CI, merge and clean up
+---
+1. If on `main`, create a branch `<type>/<short-name>` first.
+2. Stage and commit all changes with a Conventional Commits message.
+3. `git push -u origin HEAD`.
+4. If no PR exists for this branch (`gh pr view` fails), run `gh pr create --base main`
+   with a Conventional-Commit title and a body following `.github/pull_request_template.md`.
+5. `gh pr checks --watch`. If a check fails, show `gh run view <id> --log-failed` and stop.
+6. If the branch is behind `main`, run `gh pr update-branch` and go back to step 5.
+7. `gh pr merge --squash --delete-branch`, then `git switch main && git pull --ff-only`.
+```
+
+### Containers
+
+For services that run in containers. Add `Dockerfile`, `docker-compose.yml` and `.dockerignore` to the project root, and the bind-mount data folders of the containers to `.gitignore`. On Linux, containers need `extra_hosts: ["host.docker.internal:host-gateway"]` to reach services on the host.
+
+**`docker-compose.yml`**: common patterns:
+
+```yaml
+services:
+  <service>:
+    build: .
+    ports: ["127.0.0.1:<port>:<port>"]       # bind to localhost on the host only
+    env_file: .env
+    environment:                             # container values, they take priority over .env
+      POSTGRES_HOST: supabase_db_<PROJECT_NAME>        # database container in the Supabase network (§6)
+      POSTGRES_PORT: "5432"
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+    extra_hosts: ["host.docker.internal:host-gateway"]   # reach Ollama on the host (Linux)
+    networks: [default, supabase]            # only if the service needs the database
+    healthcheck: { test: ["CMD", "<check-command>"], interval: 10s, retries: 10 }
+    restart: unless-stopped
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
+    volumes: ["<service>_data:/data"]       # only if the service stores data
+networks:
+  supabase:
+    external: true
+    name: supabase_network_<PROJECT_NAME>    # created once, used by supabase start (§6)
+volumes:
+  <service>_data:
+```
+
+When you create the project, set third-party images to the latest (LTS) version and pin them exactly (`<image>:<version>`), so that builds stay reproducible. Raise the tags when you update the environment. Several services from the same package use the same image with a different `command:`.
+
+**Docker Compose** (`docker compose up -d`): the project's own services in the default network that Compose creates for the project. They address each other by service name (`http://<service>:<port>`), not by `127.0.0.1`. Persistent data lives in named volumes (`<service>_data`) or in bind mounts that git ignores. Configuration files are mounted read-only (`:ro`).
+
+Containers of the project reach the database through the Supabase network: they join `supabase_network_<PROJECT_NAME>` and connect to `supabase_db_<PROJECT_NAME>:5432` (see `docker-compose.yml` above). `host.docker.internal:54322` does not work, because the port is published on `127.0.0.1` only.
+
+**`Dockerfile`** (official uv pattern):
+
+```dockerfile
+FROM python:<X.Y>-slim
+COPY --from=ghcr.io/astral-sh/uv:<current-uv-version> /uv /uvx /bin/
+ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never
+WORKDIR /app
+
+# Dependencies in their own layer (cache survives code changes)
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=uv.lock,target=uv.lock \
+    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
+    uv sync --locked --no-dev --no-install-project
+
+# Project itself
+COPY . .
+RUN --mount=type=cache,target=/root/.cache/uv uv sync --locked --no-dev
+
+RUN useradd --create-home --uid 1000 appuser && chown -R appuser:appuser /app
+USER appuser
+ENV PATH="/app/.venv/bin:$PATH"
+EXPOSE <port>
+CMD ["python", "-m", "<package>.<module>"]
+```
+
+`<X.Y>` is the version from `.python-version`. The base image provides Python, and uv uses it. `UV_PYTHON_DOWNLOADS=never` makes the build fail instead of downloading a second Python when the base image does not match `.python-version`.
+
+**`.dockerignore`**: `.git`, `.venv`, `.env`, `.env.*`, `!.env.example`, `__pycache__/`, `.pytest_cache/`, `.ruff_cache/` and container data folders.
+
+**Ollama for containers:** containers reach Ollama at `http://host.docker.internal:11434`. For this, Ollama listens on all interfaces (`0.0.0.0:11434`) instead of its default `127.0.0.1`. Set this with `sudo systemctl edit ollama`; the setting is stored in `ollama.service.d/override.conf` and survives updates:
+
+```ini
+[Service]
+Environment="OLLAMA_HOST=0.0.0.0:11434"
+```
+
+Then run `sudo systemctl restart ollama`. Processes on the host still use `http://127.0.0.1:11434` (`OLLAMA_BASE_URL` in `.env`), containers use `http://host.docker.internal:11434`.
+
+Ollama has no authentication. Because it listens on all interfaces, the host firewall allows port 11434 only from Docker networks (`172.16.0.0/12` is Docker's default address range; adjust it if `daemon.json` sets other `default-address-pools`):
+
+```bash
+sudo ufw allow in from 172.16.0.0/12 to any port 11434 proto tcp
+sudo ufw deny in to any port 11434 proto tcp
+sudo ufw status   # if inactive: sudo ufw enable (it then blocks every incoming connection without a rule)
+```
+
+These rules work for Ollama because it runs on the host. They do not protect ports that Docker publishes, because Docker bypasses ufw; that is why all container ports are published on `127.0.0.1` only.
+
+When the range `172.16.0.0/12` is used up, Docker takes further networks from `192.168.0.0/16`. If a container cannot reach Ollama, check the subnet of its network (`docker network inspect <network>`) and allow exactly that subnet. Do not open all of `192.168.0.0/16`, because local networks often use it.
+
+Commands and permissions: `docker compose up -d --build` starts the services; `docker compose ps` and `docker compose logs <service>` check them. Add `docker compose up -d --build` to the commands in `CLAUDE.md`, `Bash(docker compose ps *)` and `Bash(docker compose logs *)` to `allow`, and `Bash(docker compose down *)` to `ask` in `.claude/settings.json`.
+
+### Claude Code extras
+
+For projects with pull requests, containers or many sessions:
+
+- the commands `/ship` (see "Pull-request workflow"), `/sync` (requires a clean working tree: `git fetch --prune`, then `git merge --ff-only`, otherwise stop) and `/health` (`uv run pytest -m integration` + `docker compose ps` + `supabase status`);
+- the user-level command `/update-tools` and the subagent `stack-checker` (templates below);
+- the MCP server of the local Supabase instance as a fallback for the CLI (template below).
+
+#### Slash command (template, `~/.claude/commands/update-tools.md`, user level)
+
+```markdown
+---
+description: Check all global CLIs for the latest (LTS) version and show update commands
+---
+Run `~/.local/bin/check-dev-tools.sh`. If any tool is marked UPDATE, run
+`DRY_RUN=1 ~/.local/bin/update-dev-tools.sh` and show the result; the user runs the real update
+(it needs sudo). For tools marked MISSING or REMOVE, show the install/removal command from the
+environment documentation.
+```
+
+#### Subagent (template, `.claude/agents/stack-checker.md`)
+
+```markdown
+---
+name: stack-checker
+description: Checks whether the local Docker Compose + Supabase stack is healthy. Use after starting or changing services.
+tools: Bash, Read
+---
+Run `docker compose ps` and `supabase status`. Report every service that is not running/healthy,
+then show the last 50 log lines of each unhealthy service via `docker compose logs --tail 50 <service>`.
+Do not restart or modify anything.
+```
+
+#### MCP server `supabase-local` (template, `.mcp.json`)
+
+As a fallback for `psql`/`supabase`, add the MCP server of the local Supabase instance (`.mcp.json`, versioned). It offers structured tools (for example `list_tables`) that the CLIs do not provide in this form; SQL, linting and the advisors are available in the CLI (`supabase db query`, `supabase db lint`, `supabase db advisors`). `supabase start` provides it and reports it as `MCP_URL`:
+
+```json
+{
+  "mcpServers": {
+    "supabase-local": {
+      "type": "http",
+      "url": "http://127.0.0.1:54321/mcp"
+    }
+  }
+}
+```
+
+On the first start of `claude` in the project, Claude Code asks whether to approve the server. Check the status with `claude mcp get supabase-local`.
+
+### Sharing or publishing a repository
+
+Before a repository is shared with others or made public, add CI with the job `secrets` (see "CI"): it scans the full history.
+
+**Secret scanning by GitHub:** for a public repository (and for a private one with GitHub Secret Protection), also switch on GitHub's secret scanning and push protection. Push protection rejects a push that contains a known type of secret:
+
+```bash
+gh api -X PATCH repos/<OWNER>/<REPO> \
+  -f 'security_and_analysis[secret_scanning][status]=enabled' \
+  -f 'security_and_analysis[secret_scanning_push_protection][status]=enabled'
+```
+
+**Making a repository public:** first check that the `secrets` job is green on `main`, because it scans the full history. Then change the visibility (`gh repo edit <OWNER>/<REPO> --visibility public --accept-visibility-change-consequences`) and switch on GitHub's secret scanning as above. For a public repository, branch protection is free and can be added as well. A secret that ever reached the history counts as leaked: revoke it where it was issued and replace it; removing it from the history afterwards is not enough.
+
+### Update bot
+
+When a project becomes long-lived or public, switch on Dependabot first: it is built into GitHub, free for private repositories, and covers GitHub Actions, `uv.lock`, pre-commit hooks and Docker images. A starting point for `.github/dependabot.yml`:
+
+```yaml
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly }
+    groups: { actions: { patterns: ["*"] } }
+    commit-message: { prefix: chore, include: scope }
+  - package-ecosystem: uv
+    directory: /
+    schedule: { interval: weekly }
+    groups: { python: { patterns: ["*"], update-types: [minor, patch] } }
+    commit-message: { prefix: chore, include: scope }
+  - package-ecosystem: pre-commit
+    directory: /
+    schedule: { interval: weekly }
+    commit-message: { prefix: chore, include: scope }
+  - package-ecosystem: docker
+    directory: /
+    schedule: { interval: weekly }
+    commit-message: { prefix: chore, include: scope }
+```
+
+Dependabot does not update `GITLEAKS_VERSION` in `ci.yml`. Either read the version from `.pre-commit-config.yaml` in the CI job, or keep it in step by hand. Renovate is the alternative when you want automatic merges, a dashboard of open updates or updates of `.python-version`; it runs as a third-party GitHub app or self-hosted.
+
+### Places to adapt in the extended variant
+
+| What | File(s) |
+|---|---|
+| Project name `<PROJECT_NAME>` | `docker-compose.yml` (Supabase network and database container) |
+| Package name `<package>` | `Dockerfile` (`CMD`), `docker-compose.yml` (`command:`) |
+| Ports | `docker-compose.yml` (`ports:`) |
+| Volume names | `docker-compose.yml` (`volumes:`) |
+| Bind-mount paths | `docker-compose.yml`, `.gitignore`, `.dockerignore` |
+| Python version `<X.Y>` | Dockerfile base image |
+| uv version | `Dockerfile` (`ghcr.io/astral-sh/uv:<version>`) |
+| Image tags, action versions | `docker-compose.yml`, `Dockerfile`, `.github/workflows/ci.yml` |
+| gitleaks version | `.pre-commit-config.yaml` (`rev`) and `.github/workflows/ci.yml` (`GITLEAKS_VERSION`); keep both equal |
+| GitHub owner/repository `<OWNER>/<REPO>` | `gh repo edit`, `gh api` (secret scanning) |
 | Default branch | CI trigger (`branches: [ main ]`), `gh repo edit --default-branch`, `gh pr create --base` |
 | CI workflow name | `name:` in `.github/workflows/ci.yml` (shown as the check name in the PR) |
+
+---
+
+## Change log
+
+The version of this document follows semantic versioning:
+
+| Part | Raised when |
+|---|---|
+| MAJOR | existing projects must change, for example for a new required tool, a changed convention or a changed file layout |
+| MINOR | something is added that existing projects can adopt later, for example a new optional template |
+| PATCH | wording, commands or links are corrected without changing what a project must do |
+
+- Every released change raises the version and adds a row to the table below. A change is released when it reaches the main branch or is copied into a project; until then, changes belong to the next version.
+- The contents list at the start is updated whenever a heading changes.
+- The copy of this file in a project shows the version that the project follows (§1).
+
+| Version | Date | Changes |
+|---|---|---|
+| 1.0.0 | 2026-11-08 | First versioned release, with contents list and change log |
