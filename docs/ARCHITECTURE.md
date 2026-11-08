@@ -6,9 +6,7 @@ behavior, and troubleshooting, see [`APPLICATION_RUNBOOK.md`](APPLICATION_RUNBOO
 
 This is a proof-of-concept. Everything described in this document — [System
 Architecture](#system-architecture), [Data Model](#data-model), and [Security
-Model](#security-model) — is implemented and runnable today. For what is *not* built yet, together
-with known issues and their remediation plan, see
-[`PLATFORM_ANALYSIS_PLAN.md`](PLATFORM_ANALYSIS_PLAN.md).
+Model](#security-model) — is implemented and runnable today.
 
 ---
 
@@ -331,8 +329,3 @@ encoding can still evade detection, even though a detected match is now actually
 payload rather than merely flagged — and audit logging of which agent ran which query does not yet
 exist. Both are tracked as implementation work, not architecture changes, so they live outside this
 document.
-
----
-
-For proposed extensions beyond the architecture described above, along with the ranked issue list
-and remediation plan, see [`PLATFORM_ANALYSIS_PLAN.md`](PLATFORM_ANALYSIS_PLAN.md).

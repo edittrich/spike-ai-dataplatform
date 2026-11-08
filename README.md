@@ -60,9 +60,7 @@ An enterprise-grade, multi-modal **AI-Enabled Data Platform** combining relation
 ```
 
 This is what's built today. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full
-component breakdown and data model, and
-[`docs/PLATFORM_ANALYSIS_PLAN.md`](docs/PLATFORM_ANALYSIS_PLAN.md) for what's proposed but not yet
-implemented (CDC ingestion, a lakehouse/warehouse tier, hybrid lexical+vector search, document RAG).
+component breakdown and data model.
 
 ---
 
@@ -264,7 +262,7 @@ entirely and let it read your existing `.env` instead of duplicating secrets int
 
 - [Architecture & Design](docs/ARCHITECTURE.md): system architecture, data model, BIAN/FIBO domain alignment, and the security model.
 - [Application Runbook](docs/APPLICATION_RUNBOOK.md): service inventory, script-by-script deep dive, troubleshooting, and known operational quirks.
-- [Platform Analysis & Remediation Plan](docs/PLATFORM_ANALYSIS_PLAN.md): per-dimension findings, ranked issue list, accepted limitations, proposed capabilities, and the phased plan.
+- [Development Environment Template](docs/ENVIRONMENT.md): reusable template for the local development environment of new projects.
 - [Data Contracts](contracts/): data product contract specs.
 - [Test Suite](tests/): pytest negative security tests, auth middleware tests, and the contract/schema drift check.
 - [CLAUDE.md](CLAUDE.md): commands and conventions for agentic coding tools working in this repo.

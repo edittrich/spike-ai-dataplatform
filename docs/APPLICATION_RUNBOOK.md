@@ -461,6 +461,5 @@ Operational quirks worth knowing before you conclude something in your own setup
   `openmetadata_search` standalone, or a manual `docker compose up -d openmetadata_search` without the
   rest of the stack). Manual fix: `python3 scripts/rebuild_search_index.py`.
 
-Deliberately accepted, out-of-scope limitations of this PoC (cAdvisor per-container discovery, Neo4j
-Community's absent metrics reporter, backup/restore & DR) are tracked in
-[`PLATFORM_ANALYSIS_PLAN.md`](PLATFORM_ANALYSIS_PLAN.md)'s accepted-limitations register, not here.
+Deliberately accepted, out-of-scope limitations of this PoC: cAdvisor per-container discovery, Neo4j
+Community's absent metrics reporter, and backup/restore & DR.
